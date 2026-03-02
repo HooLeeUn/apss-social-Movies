@@ -115,3 +115,16 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"Profile({self.user.username})"
+
+
+class Comment(models.Model):
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="comments")
+    post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="comments")
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Comment({self.author_id} -> {self.post_id})"
