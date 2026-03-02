@@ -144,6 +144,7 @@ class FeedFollowingView(ListAPIView):
         qs = (
             Post.objects.feed_following(self.request.user)
             .with_rating_stats()
+            .with_comment_stats()
             .select_related("author", "author__profile")
             .order_by("-created_at")
         )
@@ -171,6 +172,7 @@ class PostListCreateView(generics.ListCreateAPIView):
         qs = (
             Post.objects.all()
             .with_rating_stats()
+            .with_comment_stats()
             .select_related("author", "author__profile")
             .order_by("-created_at")
         )
@@ -191,6 +193,7 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
         qs = (
             Post.objects.all()
             .with_rating_stats()
+            .with_comment_stats()
             .select_related("author", "author__profile")
         )
         return qs.with_my_rating(self.request.user)
@@ -242,6 +245,7 @@ class UserPostsListView(generics.ListAPIView):
         qs = (
             Post.objects.filter(author=user)
             .with_rating_stats()
+            .with_comment_stats()
             .select_related("author", "author__profile")
             .order_by("-created_at")
         )

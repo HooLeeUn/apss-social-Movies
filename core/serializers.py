@@ -99,11 +99,12 @@ class PostListSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     avg_rating = serializers.FloatField(read_only=True)
     ratings_count = serializers.IntegerField(read_only=True)
+    comments_count = serializers.IntegerField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Post
-        fields = ["id", "author", "text", "image", "created_at", "avg_rating", "ratings_count", "my_rating"]
+        fields = ["id", "author", "text", "image", "created_at", "avg_rating", "ratings_count", "comments_count", "my_rating"]
 
     
 class PostCreateSerializer(serializers.ModelSerializer):
@@ -116,11 +117,12 @@ class PostDetailSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     avg_rating = serializers.FloatField(read_only=True)
     ratings_count = serializers.IntegerField(read_only=True)
+    comments_count = serializers.IntegerField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Post
-        fields = ["id", "author", "text", "image", "created_at", "avg_rating", "ratings_count", "my_rating"]
+        fields = ["id", "author", "text", "image", "created_at", "avg_rating", "ratings_count", "comments_count", "my_rating"]
 
     
 class PostWriteSerializer(serializers.ModelSerializer):
