@@ -10,10 +10,10 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
-    PostWriteSerializer,
+    PostWriteSerializer, CommentSerializer,
 )
-from .models import Post, Rating, Follow
-from .permissions import IsAuthorOrReadOnly
+from .models import Post, Rating, Follow, Comment
+from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
@@ -235,6 +235,36 @@ class PostRatingView(APIView):
         Rating.objects.filter(user=request.user, post=post).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     
+
+
+class PostCommentsListCreateView(generics.ListCreateAPIView):
+    serializer_class = CommentSerializer
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(post_id=self.kwargs["pk"])
+            .select_related("author", "author__profile", "post")
+            .order_by("-created_at")
+        )
+
+    def perform_create(self, serializer):
+        post = get_object_or_404(Post, pk=self.kwargs["pk"])
+        serializer.save(author=self.request.user, post=post)
+
+
+class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly, IsCommentAuthorOrReadOnly]
+    serializer_class = CommentSerializer
+    http_method_names = ["get", "put", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return Comment.objects.select_related("author", "author__profile", "post")
+
 class UserPostsListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = PostListSerializer

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.db.models import Avg, Count
-from .models import Post, Rating, Follow
+from .models import Post, Rating, Follow, Comment
 
 
 @admin.register(Post)
@@ -40,3 +40,9 @@ class RatingAdmin(admin.ModelAdmin):
 class FollowAdmin(admin.ModelAdmin):
     list_display = ("id", "follower", "following", "created_at")
     search_fields = ("follower__username", "following__username")
+
+@admin.register(Comment)
+class CommentAdmin(admin.ModelAdmin):
+    list_display = ("id", "post", "author", "created_at")
+    search_fields = ("body", "author__username")
+    list_filter = ("created_at",)

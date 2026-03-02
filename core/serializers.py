@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
 from django.db.models import Avg, Count
-from .models import Post, Rating
+from .models import Post, Rating, Comment
 
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
@@ -129,3 +129,11 @@ class PostWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Post
         fields = ["content"]  # ajusta a tus campos editables
+
+class CommentSerializer(serializers.ModelSerializer):
+    author = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model = Comment
+        fields = ["id", "author", "post", "body", "created_at"]
+        read_only_fields = ["id", "author", "post", "created_at"]
