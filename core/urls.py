@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     UserProfileView, MeView, FollowToggleView,UserFollowersListView, UserFollowingListView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
-    UserPostsListView
+    UserPostsListView, PostCommentsListCreateView, CommentDetailView
 )
 from rest_framework.authtoken.views import obtain_auth_token
 
@@ -19,4 +19,6 @@ urlpatterns = [
     path("posts/", PostListCreateView.as_view(), name="post-list-create"),
     path("posts/<int:pk>/", PostDetailView.as_view(), name="post-detail"),
     path("posts/<int:pk>/rating/", PostRatingView.as_view(), name="post-rating"),
+    path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
+    path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),
 ]
