@@ -17,15 +17,11 @@ class PostQuerySet(models.QuerySet):
         )
 
     def feed_discover(self):
-        return self.annotate(
-            avg_rating=Avg('ratings__score'),
-            ratings_count=Count('ratings', distinct=True)
-        ).filter(
-            ratings_count__gt=0
-        ).order_by(
-            '-avg_rating',
-            '-ratings_count',
-            '-created_at'
+        return (
+            self.with_rating_stats()
+            .with_comment_stats()
+            .filter(ratings_count__gt=0)
+            .order_by('-avg_rating')
         )
     
     def with_my_rating(self, user):
