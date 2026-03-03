@@ -17,9 +17,9 @@ class PostQuerySet(models.QuerySet):
         )
 
     def feed_discover(self):
-        return (
-            self.with_rating_stats()
-            .with_comment_stats()
+        return self.annotate(
+            avg_rating=Avg('ratings__score'),
+            ratings_count=Count('ratings', distinct=True)
         ).filter(
             ratings_count__gt=0
         ).order_by(
@@ -48,7 +48,7 @@ class PostQuerySet(models.QuerySet):
             avg_rating=Avg("ratings__score"),
             ratings_count=Count("ratings", distinct=True),
         )
-
+    
     def with_comment_stats(self):
         return self.annotate(
             comments_count=Count("comments", distinct=True),
@@ -120,8 +120,6 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"Profile({self.user.username})"
-<<<<<<< HEAD
-=======
 
 
 class Comment(models.Model):
@@ -135,4 +133,3 @@ class Comment(models.Model):
 
     def __str__(self):
         return f"Comment({self.author_id} -> {self.post_id})"
->>>>>>> main
