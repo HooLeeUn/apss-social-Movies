@@ -116,8 +116,6 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"Profile({self.user.username})"
-<<<<<<< HEAD
-=======
 
 
 class Comment(models.Model):
@@ -131,4 +129,3 @@ class Comment(models.Model):
 
     def __str__(self):
         return f"Comment({self.author_id} -> {self.post_id})"
->>>>>>> main
