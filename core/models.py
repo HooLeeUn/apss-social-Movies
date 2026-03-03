@@ -20,12 +20,8 @@ class PostQuerySet(models.QuerySet):
         return (
             self.with_rating_stats()
             .with_comment_stats()
-        ).filter(
-            ratings_count__gt=0
-        ).order_by(
-            '-avg_rating',
-            '-ratings_count',
-            '-created_at'
+            .filter(ratings_count__gt=0)
+            .order_by("-created_at")
         )
     
     def with_my_rating(self, user):
