@@ -214,10 +214,10 @@ class PostRatingView(APIView):
         try:
             score = int(score)
         except (TypeError, ValueError):
-            return Response({"score": "Debe ser un entero 1..5"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"score": "Debe ser un entero 1..10"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if score not in (1, 2, 3, 4, 5):
-            return Response({"score": "Debe estar entre 1 y 5"}, status=status.HTTP_400_BAD_REQUEST)
+        if score not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+            return Response({"score": "Debe estar entre 1 y 10"}, status=status.HTTP_400_BAD_REQUEST)
 
         rating, created = Rating.objects.update_or_create(
             user=request.user,
