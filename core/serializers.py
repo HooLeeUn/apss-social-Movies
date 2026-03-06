@@ -133,11 +133,17 @@ class PostWriteSerializer(serializers.ModelSerializer):
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
+    password2 = serializers.CharField(write_only=True, min_length=6)
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "password"]
+        fields = ["id", "username", "email", "password", "password2"]
         read_only_fields = ["id"]
+
+    def validate(self, attrs):
+        if attrs.get("password") != attrs.get("password2"):
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        return attrs
 
     def validate_username(self, value):
         if User.objects.filter(username=value).exists():
@@ -150,6 +156,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        validated_data.pop("password2", None)
         return User.objects.create_user(**validated_data)
 
 class CommentSerializer(serializers.ModelSerializer):
