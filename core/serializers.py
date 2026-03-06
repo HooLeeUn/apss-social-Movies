@@ -1,5 +1,7 @@
 from django.contrib.auth.models import User
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from django.db.models import Avg, Count
 from .models import Post, Rating, Comment
 
@@ -7,6 +9,61 @@ from .models import Post, Rating, Comment
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
 # porque los stats vienen por annotate() desde la vista.
 from .models import Profile
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        min_length=8,
+        help_text="Minimum 8 characters. Letters, digits and @/./+/-/_ only.",
+        validators=[
+            UnicodeUsernameValidator(),
+            UniqueValidator(queryset=User.objects.all()),
+        ],
+    )
+    email = serializers.EmailField(
+        required=True,
+        validators=[UniqueValidator(queryset=User.objects.all())],
+    )
+    password = serializers.CharField(write_only=True, min_length=6)
+    password_confirmation = serializers.CharField(write_only=True, min_length=6)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "password", "password_confirmation"]
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["password_confirmation"]:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        return attrs
+
+    def validate_email(self, value):
+        domain = value.rsplit("@", 1)[-1].lower()
+        labels = domain.split(".")
+
+        domain_invalid = (
+            "." not in domain
+            or domain.startswith(".")
+            or domain.endswith(".")
+            or any(
+                not label or label.startswith("-") or label.endswith("-")
+                for label in labels
+            )
+            or len(labels[-1]) < 2
+            or not labels[-1].isalpha()
+        )
+
+        if domain_invalid:
+            raise serializers.ValidationError("This email domain does not appear to exist.")
+
+        return value
+
+    def create(self, validated_data):
+        validated_data.pop("password_confirmation", None)
+        password = validated_data.pop("password")
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
