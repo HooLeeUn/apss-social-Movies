@@ -10,13 +10,19 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
-    PostWriteSerializer, CommentSerializer,
+    PostWriteSerializer, CommentSerializer, RegisterSerializer,
 )
 from .models import Post, Rating, Follow, Comment
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
+
+
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    serializer_class = RegisterSerializer
+    permission_classes = [AllowAny]
 
 class UserProfileView(RetrieveAPIView):
     serializer_class = UserProfileSerializer

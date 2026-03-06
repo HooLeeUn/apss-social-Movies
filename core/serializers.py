@@ -1,6 +1,10 @@
+import socket
+
 from django.contrib.auth.models import User
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from django.db.models import Avg, Count
+from rest_framework.validators import UniqueValidator
 from .models import Post, Rating, Comment
 
 # Importas tus modelos solo si los necesitas aquí.
@@ -128,7 +132,54 @@ class PostDetailSerializer(serializers.ModelSerializer):
 class PostWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Post
-        fields = ["content"]  # ajusta a tus campos editables
+        fields = ["text", "image"]
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        min_length=8,
+        validators=[
+            UnicodeUsernameValidator(),
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="A user with that username already exists.",
+            ),
+        ],
+        help_text="At least 8 characters. Letters, digits and @/./+/-/_ only.",
+    )
+    email = serializers.EmailField(
+        validators=[
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="A user with that email already exists.",
+            )
+        ]
+    )
+    password = serializers.CharField(write_only=True, min_length=6)
+    password_confirmation = serializers.CharField(write_only=True, min_length=6)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "password", "password_confirmation"]
+        read_only_fields = ["id"]
+
+    def validate_email(self, value):
+        domain = value.split("@")[-1]
+        try:
+            socket.getaddrinfo(domain, None)
+        except socket.gaierror:
+            raise serializers.ValidationError("This email domain does not appear to exist")
+
+        return value
+
+    def validate(self, attrs):
+        if attrs.get("password") != attrs.get("password_confirmation"):
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop("password_confirmation", None)
+        return User.objects.create_user(**validated_data)
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
