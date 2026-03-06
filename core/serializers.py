@@ -1,5 +1,7 @@
 from django.contrib.auth.models import User
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from django.db.models import Avg, Count
 from .models import Post, Rating, Comment
 
@@ -7,6 +9,50 @@ from .models import Post, Rating, Comment
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
 # porque los stats vienen por annotate() desde la vista.
 from .models import Profile
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        min_length=8,
+        help_text="Minimum 8 characters. Letters, digits and @/./+/-/_ only.",
+        validators=[
+            UnicodeUsernameValidator(),
+            UniqueValidator(queryset=User.objects.all()),
+        ],
+    )
+    email = serializers.EmailField(
+        required=True,
+        validators=[UniqueValidator(queryset=User.objects.all())],
+    )
+    password = serializers.CharField(write_only=True, min_length=6)
+    password_confirmation = serializers.CharField(write_only=True, min_length=6)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "password", "password_confirmation"]
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["password_confirmation"]:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+
+        domain = attrs["email"].split("@")[-1].lower()
+        parts = domain.split(".")
+        reserved_domains = {"example.com", "test.com", "invalid", "localhost"}
+        if (
+            domain in reserved_domains
+            or len(parts) < 2
+            or not all(part.isalnum() or "-" in part for part in parts)
+            or len(parts[-1]) < 2
+        ):
+            raise serializers.ValidationError(
+                {"email": "This email domain does not appear to exist."}
+            )
+
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop("password_confirmation", None)
+        return User.objects.create_user(**validated_data)
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
