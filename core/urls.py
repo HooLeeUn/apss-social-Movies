@@ -2,11 +2,12 @@ from django.urls import path
 from .views import (
     UserProfileView, MeView, FollowToggleView,UserFollowersListView, UserFollowingListView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
-    UserPostsListView, PostCommentsListCreateView, CommentDetailView
+    UserPostsListView, PostCommentsListCreateView, CommentDetailView, RegisterView
 )
 from rest_framework.authtoken.views import obtain_auth_token
 
 urlpatterns = [
+    path("register/", RegisterView.as_view(), name="register"),
     path("users/<str:username>/", UserProfileView.as_view(), name="user-profile"),
     path("users/<str:username>/posts/", UserPostsListView.as_view(), name="user-posts"),
     path("api-token-auth/", obtain_auth_token),

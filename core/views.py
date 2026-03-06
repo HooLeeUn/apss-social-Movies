@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Count, Avg
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
+from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -17,6 +18,57 @@ from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
+
+
+class RegisterView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        username = request.data.get("username")
+        email = request.data.get("email")
+        password = request.data.get("password")
+
+        errors = {}
+        if not username:
+            errors["username"] = ["This field is required."]
+        if not email:
+            errors["email"] = ["This field is required."]
+        if not password:
+            errors["password"] = ["This field is required."]
+
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"username": ["A user with that username already exists."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"email": ["A user with that email already exists."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+        )
+        token, created = Token.objects.get_or_create(user=user)
+
+        return Response(
+            {
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                },
+                "token": token.key,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 class UserProfileView(RetrieveAPIView):
     serializer_class = UserProfileSerializer
