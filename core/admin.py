@@ -50,6 +50,6 @@ class CommentAdmin(admin.ModelAdmin):
 
 @admin.register(Movie)
 class MovieAdmin(admin.ModelAdmin):
-    list_display = ("id", "title_english", "title_spanish", "release_year", "author", "external_rating", "created_at")
-    list_filter = ("release_year", "created_at", "author")
-    search_fields = ("title_english", "title_spanish", "director", "cast_members", "author__username")
+    list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "created_at")
+    list_filter = ("genre", "release_year", "created_at", "author")
+    search_fields = ("title_english", "title_spanish", "genre", "director", "cast_members", "author__username")
