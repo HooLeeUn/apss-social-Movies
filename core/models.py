@@ -68,9 +68,17 @@ class Post(models.Model):
 
 
 class Movie(models.Model):
+    MOVIE = "movie"
+    SERIES = "series"
+    TYPE_CHOICES = [
+        (MOVIE, "Movie"),
+        (SERIES, "Series"),
+    ]
+
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movies")
     title_english = models.CharField(max_length=255)
     title_spanish = models.CharField(max_length=255, null=True, blank=True)
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES, null=True, blank=True)
     genre = models.CharField(max_length=100, null=True, blank=True)
     release_year = models.PositiveIntegerField(null=True, blank=True)
     director = models.CharField(max_length=255, null=True, blank=True)
