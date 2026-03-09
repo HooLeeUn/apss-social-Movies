@@ -66,6 +66,27 @@ class Post(models.Model):
     def __str__(self):
         return f"{self.author.username} - {self.text[:30]}"
 
+
+class Movie(models.Model):
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movies")
+    title_english = models.CharField(max_length=255)
+    title_spanish = models.CharField(max_length=255, null=True, blank=True)
+    release_year = models.PositiveIntegerField(null=True, blank=True)
+    director = models.CharField(max_length=255, null=True, blank=True)
+    cast_members = models.TextField(null=True, blank=True)
+    external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
+    image = models.URLField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        if self.release_year:
+            return f"{self.title_english} ({self.release_year})"
+        return self.title_english
+
 class Rating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ratings")
     post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="ratings")
