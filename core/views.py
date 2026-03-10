@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Count, Avg
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
+from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
@@ -11,9 +12,10 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
-    PostWriteSerializer, CommentSerializer, RegisterSerializer,
+    PostWriteSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
+    MovieRatingSerializer,
 )
-from .models import Post, Rating, Follow, Comment
+from .models import Post, Rating, Follow, Comment, Movie, MovieRating
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from django.shortcuts import get_object_or_404
 
@@ -305,4 +307,55 @@ class UserPostsListView(generics.ListAPIView):
             .order_by("-created_at")
         )
         return qs.with_my_rating(self.request.user)
+
+
+class MovieListView(generics.ListAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = MovieListSerializer
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ["title_english", "title_spanish", "director", "cast_members", "genre"]
+    ordering_fields = ["created_at", "release_year", "display_rating", "real_ratings_count", "title_english"]
+    ordering = ["-created_at"]
+
+    def get_queryset(self):
+        qs = (
+            Movie.objects
+            .with_rating_stats()
+            .with_display_rating()
+            .select_related("author", "author__profile")
+        )
+
+        if movie_type := self.request.query_params.get("type"):
+            qs = qs.filter(type=movie_type)
+        if genre := self.request.query_params.get("genre"):
+            qs = qs.filter(genre__icontains=genre)
+        if release_year := self.request.query_params.get("release_year"):
+            qs = qs.filter(release_year=release_year)
+
+        return qs.with_my_rating(self.request.user)
+
+
+class MovieRatingView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def put(self, request, pk):
+        movie = get_object_or_404(Movie, pk=pk)
+        serializer = MovieRatingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        rating, created = MovieRating.objects.update_or_create(
+            user=request.user,
+            movie=movie,
+            defaults={"score": serializer.validated_data["score"]},
+        )
+
+        return Response(
+            {"movie": movie.id, "my_rating": rating.score, "created": created},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        movie = get_object_or_404(Movie, pk=pk)
+        MovieRating.objects.filter(user=request.user, movie=movie).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
             

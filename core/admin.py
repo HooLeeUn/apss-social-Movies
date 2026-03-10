@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.db.models import Avg, Count
-from .models import Post, Rating, Follow, Comment, Movie
+from .models import Post, Rating, Follow, Comment, Movie, MovieRating
 
 
 @admin.register(Post)
@@ -53,3 +53,10 @@ class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
     search_fields = ("title_english", "title_spanish", "genre", "director", "cast_members", "author__username")
+
+
+@admin.register(MovieRating)
+class MovieRatingAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "movie", "score", "created_at", "updated_at")
+    list_filter = ("score", "created_at", "updated_at")
+    search_fields = ("user__username", "movie__title_english", "movie__title_spanish")
