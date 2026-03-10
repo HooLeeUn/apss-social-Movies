@@ -5,7 +5,7 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
-from .models import Post, Rating, Comment
+from .models import Post, Rating, Comment, Movie
 
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
@@ -188,3 +188,27 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         fields = ["id", "author", "post", "body", "created_at"]
         read_only_fields = ["id", "author", "post", "created_at"]
+
+
+class MovieListSerializer(serializers.ModelSerializer):
+    author = UserMiniSerializer(read_only=True)
+    real_ratings_count = serializers.IntegerField(read_only=True)
+    real_ratings_avg = serializers.FloatField(read_only=True)
+    display_rating = serializers.FloatField(read_only=True)
+    my_rating = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = [
+            "id", "author",
+            "title_english", "title_spanish",
+            "type", "genre", "release_year",
+            "director", "cast_members",
+            "image", "external_rating",
+            "real_ratings_count", "real_ratings_avg",
+            "display_rating", "my_rating",
+        ]
+
+
+class MovieRatingSerializer(serializers.Serializer):
+    score = serializers.IntegerField(min_value=1, max_value=10)

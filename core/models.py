@@ -1,9 +1,11 @@
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
-from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value
 from django.db.models.functions import Cast
 from django.db.models import Q
+from django.db.models.functions import Coalesce
 
 class PostQuerySet(models.QuerySet):
 
@@ -67,6 +69,47 @@ class Post(models.Model):
         return f"{self.author.username} - {self.text[:30]}"
 
 
+class MovieQuerySet(models.QuerySet):
+    def with_rating_stats(self):
+        return self.annotate(
+            real_ratings_count=Count("movie_ratings", distinct=True),
+            real_ratings_avg=Avg("movie_ratings__score"),
+        )
+
+    def with_my_rating(self, user):
+        if not user or not user.is_authenticated:
+            return self.annotate(my_rating=Value(None, output_field=IntegerField()))
+
+        return self.annotate(
+            my_rating=Subquery(
+                MovieRating.objects.filter(
+                    movie_id=OuterRef("pk"),
+                    user_id=user.id,
+                ).values("score")[:1]
+            )
+        )
+
+    def with_display_rating(self):
+        return self.annotate(
+            _external_rating_float=Cast("external_rating", FloatField()),
+            _real_ratings_avg_float=Coalesce(F("real_ratings_avg"), Value(0.0), output_field=FloatField()),
+            _external_rating_for_mix=Coalesce(Cast("external_rating", FloatField()), Value(0.0), output_field=FloatField()),
+        ).annotate(
+            display_rating=Case(
+                When(real_ratings_count=0, then=F("_external_rating_float")),
+                When(real_ratings_count__gte=100, then=F("_real_ratings_avg_float")),
+                default=(
+                    (
+                        F("_external_rating_for_mix") * (Value(100.0) - Cast(F("real_ratings_count"), FloatField()))
+                    ) + (
+                        F("_real_ratings_avg_float") * Cast(F("real_ratings_count"), FloatField())
+                    )
+                ) / Value(100.0),
+                output_field=FloatField(),
+            )
+        )
+
+
 class Movie(models.Model):
     MOVIE = "movie"
     SERIES = "series"
@@ -88,6 +131,8 @@ class Movie(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = MovieQuerySet.as_manager()
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -95,6 +140,21 @@ class Movie(models.Model):
         if self.release_year:
             return f"{self.title_english} ({self.release_year})"
         return self.title_english
+
+class MovieRating(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movie_ratings")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="movie_ratings")
+    score = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(10)])
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "movie"], name="unique_rating_per_user_per_movie")
+        ]
+
+    def __str__(self):
+        return f"MovieRating(user={self.user_id}, movie={self.movie_id}, score={self.score})"
 
 class Rating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ratings")
