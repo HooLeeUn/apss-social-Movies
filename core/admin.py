@@ -52,7 +52,7 @@ class CommentAdmin(admin.ModelAdmin):
 class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
-    search_fields = ("title_english", "title_spanish", "genre", "director", "cast_members", "author__username")
+    search_fields = ("id", "title_english", "title_spanish", "director", "genre")
 
 
 @admin.register(MovieRating)
@@ -60,3 +60,6 @@ class MovieRatingAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "movie", "score", "created_at", "updated_at")
     list_filter = ("score", "created_at", "updated_at")
     search_fields = ("user__username", "movie__title_english", "movie__title_spanish")
+    autocomplete_fields = ("user", "movie")
+    list_select_related = ("user", "movie")
+    ordering = ("-created_at",)
