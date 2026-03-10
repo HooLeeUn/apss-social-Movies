@@ -9,7 +9,11 @@ from core.models import Movie
 
 
 class Command(BaseCommand):
-    help = "Importa películas desde un CSV consolidado al modelo Movie."
+    help = (
+        "Importa películas desde un CSV consolidado al modelo Movie. "
+        "Columnas esperadas: title_english,title_spanish,type,genre,release_year,"
+        "director,cast_members,external_rating"
+    )
 
     TYPE_MOVIE_ALIASES = {
         "movie",
@@ -43,6 +47,10 @@ class Command(BaseCommand):
             "--author",
             default="admin",
             help="Username del autor que se asignará a todas las películas (default: admin).",
+        )
+        parser.epilog = (
+            "Ejemplo de encabezado CSV: "
+            "title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating"
         )
 
     def handle(self, *args, **options):

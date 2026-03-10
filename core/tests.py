@@ -24,7 +24,7 @@ class ImportMoviesCommandTests(TestCase):
         return csv_path
 
     def test_import_movies_creates_records_and_skips_duplicates(self):
-        csv_content = """nombre_ingles,nombre_espanol,tipo,genero,startyear,director,reparto,calificacion
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating
 Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8
 Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8
 Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
@@ -56,7 +56,7 @@ Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
         alt_user = get_user_model().objects.create_user(
             username="catalog_admin", email="catalog@example.com", password="test1234"
         )
-        csv_content = """nombre_ingles,nombre_espanol,tipo,genero,startyear,director,reparto,calificacion
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating
 Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
 """
         csv_path = self._write_csv(csv_content)
@@ -67,7 +67,7 @@ Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
         self.assertEqual(movie.author, alt_user)
 
     def test_import_movies_fails_when_author_does_not_exist(self):
-        csv_content = """nombre_ingles,nombre_espanol,tipo,genero,startyear,director,reparto,calificacion
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating
 Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
 """
         csv_path = self._write_csv(csv_content)
