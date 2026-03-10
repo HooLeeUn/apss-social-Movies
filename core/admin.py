@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django import forms
 from django.db.models import Avg, Count
 from .models import Post, Rating, Follow, Comment, Movie, MovieRating
 
@@ -52,11 +53,24 @@ class CommentAdmin(admin.ModelAdmin):
 class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
-    search_fields = ("id", "title_english", "title_spanish", "director", "genre")
+    search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members")
+
+
+class MovieRatingAdminForm(forms.ModelForm):
+    class Meta:
+        model = MovieRating
+        fields = "__all__"
+        widgets = {
+            "score": forms.NumberInput(attrs={"min": 1, "max": 10, "step": 1}),
+        }
+        help_texts = {
+            "score": "Calificación de 1 a 10.",
+        }
 
 
 @admin.register(MovieRating)
 class MovieRatingAdmin(admin.ModelAdmin):
+    form = MovieRatingAdminForm
     list_display = ("id", "user", "movie", "score", "created_at", "updated_at")
     list_filter = ("score", "created_at", "updated_at")
     search_fields = ("user__username", "movie__title_english", "movie__title_spanish")
