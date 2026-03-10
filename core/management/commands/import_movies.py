@@ -9,7 +9,11 @@ from core.models import Movie
 
 
 class Command(BaseCommand):
-    help = "Importa películas desde un CSV consolidado al modelo Movie."
+    help = (
+        "Importa películas desde un CSV consolidado al modelo Movie. "
+        "Columnas esperadas: title_english,title_spanish,type,genre,release_year,"
+        "director,cast_members,external_rating"
+    )
 
     TYPE_MOVIE_ALIASES = {
         "movie",
@@ -27,14 +31,14 @@ class Command(BaseCommand):
     }
 
     REQUIRED_COLUMNS = {
-        "nombre_ingles",
-        "nombre_espanol",
-        "tipo",
-        "genero",
-        "startyear",
+        "title_english",
+        "title_spanish",
+        "type",
+        "genre",
+        "release_year",
         "director",
-        "reparto",
-        "calificacion",
+        "cast_members",
+        "external_rating",
     }
 
     def add_arguments(self, parser):
@@ -43,6 +47,10 @@ class Command(BaseCommand):
             "--author",
             default="admin",
             help="Username del autor que se asignará a todas las películas (default: admin).",
+        )
+        parser.epilog = (
+            "Ejemplo de encabezado CSV: "
+            "title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating"
         )
 
     def handle(self, *args, **options):
@@ -132,19 +140,19 @@ class Command(BaseCommand):
         self.stdout.write(f"Omitidas por error: {error_count}")
 
     def _build_movie_payload(self, row):
-        title_english = self._clean_text(row.get("nombre_ingles"))
+        title_english = self._clean_text(row.get("title_english"))
         if not title_english:
-            raise ValueError("nombre_ingles es obligatorio para crear Movie")
+            raise ValueError("title_english es obligatorio para crear Movie")
 
         return {
             "title_english": title_english,
-            "title_spanish": self._clean_text(row.get("nombre_espanol")),
-            "type": self._normalize_type(row.get("tipo")),
-            "genre": self._clean_text(row.get("genero")),
-            "release_year": self._parse_year(row.get("startyear")),
+            "title_spanish": self._clean_text(row.get("title_spanish")),
+            "type": self._normalize_type(row.get("type")),
+            "genre": self._clean_text(row.get("genre")),
+            "release_year": self._parse_year(row.get("release_year")),
             "director": self._clean_text(row.get("director")),
-            "cast_members": self._clean_text(row.get("reparto")),
-            "external_rating": self._parse_rating(row.get("calificacion")),
+            "cast_members": self._clean_text(row.get("cast_members")),
+            "external_rating": self._parse_rating(row.get("external_rating")),
         }
 
     @staticmethod
