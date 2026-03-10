@@ -4,6 +4,7 @@ from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from core.models import Movie
 
@@ -41,6 +42,9 @@ class Command(BaseCommand):
         "external_rating",
     }
 
+    BATCH_SIZE = 2000
+    PROGRESS_EVERY = 10000
+
     def add_arguments(self, parser):
         parser.add_argument("csv_path", type=str, help="Ruta al archivo CSV a importar.")
         parser.add_argument(
@@ -73,10 +77,30 @@ class Command(BaseCommand):
         created_count = 0
         duplicate_count = 0
         error_count = 0
-        seen_keys = set()
 
         self.stdout.write(self.style.NOTICE(f"Iniciando importación desde: {csv_path}"))
         self.stdout.write(self.style.NOTICE(f"Autor asignado: {author.username}"))
+        self.stdout.write(
+            self.style.NOTICE(
+                f"Precargando claves existentes (title_english, release_year, type)..."
+            )
+        )
+
+        existing_keys = set()
+        existing_rows = Movie.objects.values_list("title_english", "release_year", "type").iterator(
+            chunk_size=10000
+        )
+        for title_english, release_year, movie_type in existing_rows:
+            existing_keys.add(self._build_key(title_english, release_year, movie_type))
+
+        self.stdout.write(
+            self.style.NOTICE(
+                f"Claves existentes cargadas: {len(existing_keys)}. "
+                f"Iniciando importación por lotes de {self.BATCH_SIZE}."
+            )
+        )
+
+        to_create = []
 
         with csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             reader = csv.DictReader(csv_file)
@@ -92,52 +116,51 @@ class Command(BaseCommand):
                 total_rows += 1
                 try:
                     movie_payload = self._build_movie_payload(row)
-                    key = (
-                        movie_payload["title_english"].strip().lower(),
+                    key = self._build_key(
+                        movie_payload["title_english"],
                         movie_payload["release_year"],
                         movie_payload["type"],
                     )
 
-                    if key in seen_keys:
+                    if key in existing_keys:
                         duplicate_count += 1
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"Fila {row_number}: duplicado dentro del CSV para "
-                                f"'{movie_payload['title_english']}'. Se omite."
-                            )
-                        )
                         continue
 
-                    exists_in_db = Movie.objects.filter(
-                        title_english=movie_payload["title_english"],
-                        release_year=movie_payload["release_year"],
-                        type=movie_payload["type"],
-                    ).exists()
-                    if exists_in_db:
-                        duplicate_count += 1
-                        seen_keys.add(key)
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"Fila {row_number}: ya existe en BD "
-                                f"'{movie_payload['title_english']}' ({movie_payload['release_year']}). Se omite."
-                            )
-                        )
-                        continue
+                    to_create.append(Movie(author=author, image=None, **movie_payload))
+                    existing_keys.add(key)
 
-                    Movie.objects.create(author=author, image=None, **movie_payload)
-                    seen_keys.add(key)
-                    created_count += 1
+                    if len(to_create) >= self.BATCH_SIZE:
+                        created_count += self._flush_batch(to_create)
+                        to_create.clear()
                 except Exception as exc:  # noqa: BLE001
                     error_count += 1
                     self.stdout.write(
                         self.style.ERROR(f"Fila {row_number}: error al importar -> {exc}")
                     )
 
+                if total_rows % self.PROGRESS_EVERY == 0:
+                    self.stdout.write(
+                        self.style.NOTICE(
+                            f"Progreso: {total_rows} filas leídas | "
+                            f"creadas={created_count} | "
+                            f"duplicadas={duplicate_count} | "
+                            f"errores={error_count}"
+                        )
+                    )
+
+        if to_create:
+            created_count += self._flush_batch(to_create)
+
         self.stdout.write(self.style.SUCCESS("Importación finalizada."))
         self.stdout.write(f"Total filas leídas: {total_rows}")
         self.stdout.write(f"Creadas: {created_count}")
         self.stdout.write(f"Omitidas por duplicado: {duplicate_count}")
         self.stdout.write(f"Omitidas por error: {error_count}")
+
+    def _flush_batch(self, items):
+        with transaction.atomic():
+            created = Movie.objects.bulk_create(items, batch_size=self.BATCH_SIZE)
+        return len(created)
 
     def _build_movie_payload(self, row):
         title_english = self._clean_text(row.get("title_english"))
@@ -154,6 +177,10 @@ class Command(BaseCommand):
             "cast_members": self._clean_text(row.get("cast_members")),
             "external_rating": self._parse_rating(row.get("external_rating")),
         }
+
+    @staticmethod
+    def _build_key(title_english, release_year, movie_type):
+        return (str(title_english).strip().lower(), release_year, movie_type)
 
     @staticmethod
     def _clean_text(value):
