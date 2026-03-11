@@ -90,7 +90,7 @@ class MovieQuerySet(models.QuerySet):
         )
 
     def with_display_rating(self):
-        return self.annotate(
+        return self.with_rating_stats().annotate(
             _external_rating_float=Cast("external_rating", FloatField()),
             _real_ratings_avg_float=Coalesce(F("real_ratings_avg"), Value(0.0), output_field=FloatField()),
             _external_rating_for_mix=Coalesce(Cast("external_rating", FloatField()), Value(0.0), output_field=FloatField()),
