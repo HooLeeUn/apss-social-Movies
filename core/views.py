@@ -315,12 +315,11 @@ class MovieListView(generics.ListAPIView):
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ["title_english", "title_spanish", "director", "cast_members", "genre"]
     ordering_fields = ["created_at", "release_year", "display_rating", "real_ratings_count", "title_english"]
-    ordering = ["-created_at"]
+    ordering = ["-release_year", "-display_rating", "-created_at", "id"]
 
     def get_queryset(self):
         qs = (
             Movie.objects
-            .with_rating_stats()
             .with_display_rating()
             .select_related("author", "author__profile")
         )
