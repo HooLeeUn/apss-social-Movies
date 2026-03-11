@@ -13,7 +13,8 @@ class Command(BaseCommand):
     help = (
         "Importa películas desde un CSV consolidado al modelo Movie. "
         "Columnas esperadas: title_english,title_spanish,type,genre,release_year,"
-        "director,cast_members,external_rating"
+        "director,cast_members,external_rating\n"
+        "Columna opcional soportada: imdb_id"
     )
 
     TYPE_MOVIE_ALIASES = {
@@ -41,6 +42,7 @@ class Command(BaseCommand):
         "cast_members",
         "external_rating",
     }
+    # `imdb_id` se mantiene opcional para no romper CSV históricos.
 
     BATCH_SIZE = 2000
     PROGRESS_EVERY = 10000
@@ -55,6 +57,7 @@ class Command(BaseCommand):
         parser.epilog = (
             "Ejemplo de encabezado CSV: "
             "title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating"
+            "[,imdb_id]"
         )
 
     def handle(self, *args, **options):
@@ -76,31 +79,34 @@ class Command(BaseCommand):
         total_rows = 0
         created_count = 0
         duplicate_count = 0
+        updated_imdb_count = 0
         error_count = 0
 
         self.stdout.write(self.style.NOTICE(f"Iniciando importación desde: {csv_path}"))
         self.stdout.write(self.style.NOTICE(f"Autor asignado: {author.username}"))
         self.stdout.write(
             self.style.NOTICE(
-                f"Precargando claves existentes (title_english, release_year, type)..."
+                "Precargando películas existentes (clave: title_english, release_year, type)..."
             )
         )
 
-        existing_keys = set()
-        existing_rows = Movie.objects.values_list("title_english", "release_year", "type").iterator(
-            chunk_size=10000
-        )
-        for title_english, release_year, movie_type in existing_rows:
-            existing_keys.add(self._build_key(title_english, release_year, movie_type))
+        existing_movies = {}
+        existing_rows = Movie.objects.values_list(
+            "id", "title_english", "release_year", "type", "imdb_id"
+        ).iterator(chunk_size=10000)
+        for movie_id, title_english, release_year, movie_type, imdb_id in existing_rows:
+            key = self._build_key(title_english, release_year, movie_type)
+            existing_movies[key] = {"id": movie_id, "imdb_id": self._clean_text(imdb_id)}
 
         self.stdout.write(
             self.style.NOTICE(
-                f"Claves existentes cargadas: {len(existing_keys)}. "
+                f"Claves existentes cargadas: {len(existing_movies)}. "
                 f"Iniciando importación por lotes de {self.BATCH_SIZE}."
             )
         )
 
         to_create = []
+        to_update = []
 
         with csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             reader = csv.DictReader(csv_file)
@@ -122,12 +128,21 @@ class Command(BaseCommand):
                         movie_payload["type"],
                     )
 
-                    if key in existing_keys:
+                    existing_movie = existing_movies.get(key)
+                    if existing_movie is not None:
                         duplicate_count += 1
+                        csv_imdb_id = movie_payload["imdb_id"]
+                        if csv_imdb_id and not existing_movie["imdb_id"]:
+                            to_update.append(Movie(id=existing_movie["id"], imdb_id=csv_imdb_id))
+                            existing_movie["imdb_id"] = csv_imdb_id
+
+                            if len(to_update) >= self.BATCH_SIZE:
+                                updated_imdb_count += self._flush_imdb_updates(to_update)
+                                to_update.clear()
                         continue
 
                     to_create.append(Movie(author=author, image=None, **movie_payload))
-                    existing_keys.add(key)
+                    existing_movies[key] = {"id": None, "imdb_id": movie_payload["imdb_id"]}
 
                     if len(to_create) >= self.BATCH_SIZE:
                         created_count += self._flush_batch(to_create)
@@ -143,6 +158,7 @@ class Command(BaseCommand):
                         self.style.NOTICE(
                             f"Progreso: {total_rows} filas leídas | "
                             f"creadas={created_count} | "
+                            f"actualizadas_imdb={updated_imdb_count} | "
                             f"duplicadas={duplicate_count} | "
                             f"errores={error_count}"
                         )
@@ -150,10 +166,13 @@ class Command(BaseCommand):
 
         if to_create:
             created_count += self._flush_batch(to_create)
+        if to_update:
+            updated_imdb_count += self._flush_imdb_updates(to_update)
 
         self.stdout.write(self.style.SUCCESS("Importación finalizada."))
         self.stdout.write(f"Total filas leídas: {total_rows}")
         self.stdout.write(f"Creadas: {created_count}")
+        self.stdout.write(f"IMDb ID actualizados en existentes: {updated_imdb_count}")
         self.stdout.write(f"Omitidas por duplicado: {duplicate_count}")
         self.stdout.write(f"Omitidas por error: {error_count}")
 
@@ -161,6 +180,11 @@ class Command(BaseCommand):
         with transaction.atomic():
             created = Movie.objects.bulk_create(items, batch_size=self.BATCH_SIZE)
         return len(created)
+
+    def _flush_imdb_updates(self, items):
+        with transaction.atomic():
+            Movie.objects.bulk_update(items, ["imdb_id"], batch_size=self.BATCH_SIZE)
+        return len(items)
 
     def _build_movie_payload(self, row):
         title_english = self._clean_text(row.get("title_english"))
@@ -176,6 +200,7 @@ class Command(BaseCommand):
             "director": self._clean_text(row.get("director")),
             "cast_members": self._clean_text(row.get("cast_members")),
             "external_rating": self._parse_rating(row.get("external_rating")),
+            "imdb_id": self._clean_text(row.get("imdb_id")),
         }
 
     @staticmethod
