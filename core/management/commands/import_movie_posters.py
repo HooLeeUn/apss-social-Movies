@@ -2,7 +2,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 from django.conf import settings
@@ -57,14 +57,26 @@ class Command(BaseCommand):
             default=0.1,
             help="Pausa en segundos entre requests externas.",
         )
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            help="Muestra detalles de depuración para consultas a Wikidata y fallback a Fanart.",
+        )
 
     def handle(self, *args, **options):
         limit = options["limit"]
         batch_size = min(max(1, options["batch_size"]), 400)
         only_empty = options["only_empty"]
         pause = max(0.0, options["pause"])
+        debug = options["debug"]
 
         fanart_api_key = self._get_fanart_api_key()
+        if not fanart_api_key:
+            self.stdout.write(
+                self.style.WARNING(
+                    "FANART_API_KEY no está configurada; se omitirá Fanart.tv y solo se usará Wikidata/Wikimedia."
+                )
+            )
 
         base_qs = Movie.objects.filter(imdb_id__isnull=False).exclude(imdb_id="")
         # Regla: no sobrescribir imágenes existentes.
@@ -121,11 +133,11 @@ class Command(BaseCommand):
 
             batch.append(MovieCandidate(movie_id=movie_id, imdb_id=clean_imdb, movie_type=movie_type))
             if len(batch) >= batch_size:
-                self._process_batch(batch, session, fanart_api_key, pause, stats)
+                self._process_batch(batch, session, fanart_api_key, pause, stats, debug=debug)
                 batch = []
 
         if batch:
-            self._process_batch(batch, session, fanart_api_key, pause, stats)
+            self._process_batch(batch, session, fanart_api_key, pause, stats, debug=debug)
 
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Procesadas: {stats['processed']}")
@@ -134,9 +146,9 @@ class Command(BaseCommand):
         self.stdout.write(f"Sin poster: {stats['without_poster']}")
         self.stdout.write(f"Errores: {stats['errors']}")
 
-    def _process_batch(self, batch, session, fanart_api_key, pause, stats):
+    def _process_batch(self, batch, session, fanart_api_key, pause, stats, debug=False):
         imdb_ids = [item.imdb_id for item in batch]
-        wikidata_map = self._fetch_wikidata_posters(session, imdb_ids, pause, stats)
+        wikidata_map = self._fetch_wikidata_posters(session, imdb_ids, pause, stats, debug=debug)
 
         to_update = []
         missing_for_fanart: List[MovieCandidate] = []
@@ -150,7 +162,9 @@ class Command(BaseCommand):
                 missing_for_fanart.append(item)
 
         for item in missing_for_fanart:
-            poster_url = self._fetch_fanart_poster(session, item, fanart_api_key, pause, stats)
+            if debug:
+                self.stdout.write(f"[DEBUG] Wikidata sin poster para {item.imdb_id}; probando fallback Fanart...")
+            poster_url = self._fetch_fanart_poster(session, item, fanart_api_key, pause, stats, debug=debug)
             if poster_url:
                 to_update.append(Movie(id=item.movie_id, image=poster_url))
                 stats["fanart"] += 1
@@ -173,18 +187,23 @@ class Command(BaseCommand):
             )
         )
 
-    def _fetch_wikidata_posters(self, session, imdb_ids, pause, stats):
+    def _fetch_wikidata_posters(self, session, imdb_ids, pause, stats, debug=False):
         if not imdb_ids:
             return {}
 
         values = " ".join(f'"{imdb}"' for imdb in imdb_ids)
         query = f"""
-SELECT ?imdb ?poster WHERE {{
-  VALUES ?imdb {{ {values} }}
-  ?item wdt:P345 ?imdb .
+SELECT ?imdb_id ?poster WHERE {{
+  VALUES ?imdb_id {{ {values} }}
+  ?item wdt:P345 ?imdb_id .
   ?item wdt:P3383 ?poster .
 }}
-"""
+""".strip()
+
+        if debug:
+            self.stdout.write(f"[DEBUG] imdb_id enviados a Wikidata ({len(imdb_ids)}): {imdb_ids}")
+            self.stdout.write("[DEBUG] Consulta SPARQL final:")
+            self.stdout.write(query)
 
         try:
             response = session.get(
@@ -204,22 +223,37 @@ SELECT ?imdb ?poster WHERE {{
 
         results = {}
         bindings = data.get("results", {}).get("bindings", [])
+        if debug:
+            self.stdout.write(f"[DEBUG] Resultados Wikidata recibidos: {len(bindings)}")
+            self.stdout.write(f"[DEBUG] Primer resultado: {bindings[0] if bindings else None}")
+
         for row in bindings:
-            imdb = row.get("imdb", {}).get("value")
+            imdb = row.get("imdb_id", {}).get("value")
             poster_value = row.get("poster", {}).get("value")
             if not imdb or not poster_value:
                 continue
-            filename = poster_value.replace("File:", "", 1)
-            results[imdb] = f"{WIKIMEDIA_FILEPATH_BASE}{quote(filename)}"
+            filename = poster_value.replace("http://commons.wikimedia.org/wiki/Special:FilePath/", "")
+            filename = filename.replace("https://commons.wikimedia.org/wiki/Special:FilePath/", "")
+            filename = filename.replace("https://commons.wikimedia.org/wiki/File:", "")
+            filename = filename.replace("http://commons.wikimedia.org/wiki/File:", "")
+            filename = filename.replace("File:", "", 1)
+            filename = unquote(filename).strip()
+            if not filename:
+                continue
+            results[imdb] = f"{WIKIMEDIA_FILEPATH_BASE}{quote(filename, safe='')}"
 
         return results
 
-    def _fetch_fanart_poster(self, session, item, fanart_api_key, pause, stats):
+    def _fetch_fanart_poster(self, session, item, fanart_api_key, pause, stats, debug=False):
         if not fanart_api_key:
+            if debug:
+                self.stdout.write(f"[DEBUG] FANART_API_KEY ausente; fallback no disponible para {item.imdb_id}")
             return None
 
         endpoint = "movies" if item.movie_type == Movie.MOVIE else "tv"
         url = f"{FANART_BASE_URL}/{endpoint}/{item.imdb_id}"
+        if debug:
+            self.stdout.write(f"[DEBUG] Fanart request -> endpoint={endpoint}, imdb_id={item.imdb_id}")
 
         try:
             response = session.get(url, params={"api_key": fanart_api_key}, timeout=DEFAULT_TIMEOUT)
@@ -251,7 +285,13 @@ SELECT ?imdb ?poster WHERE {{
         if value is None:
             return None
         imdb = str(value).strip()
-        return imdb or None
+        if not imdb:
+            return None
+        if imdb.isdigit():
+            imdb = f"tt{imdb}"
+        elif imdb.lower().startswith("tt"):
+            imdb = f"tt{imdb[2:]}"
+        return imdb
 
     @staticmethod
     def _get_fanart_api_key() -> Optional[str]:
