@@ -62,6 +62,12 @@ class Command(BaseCommand):
             action="store_true",
             help="Muestra detalles de depuración para consultas a Wikidata y fallback a Fanart.",
         )
+        parser.add_argument(
+            "--start-id",
+            type=int,
+            default=None,
+            help="Procesa solo películas con id mayor o igual a este valor.",
+        )
 
     def handle(self, *args, **options):
         limit = options["limit"]
@@ -69,6 +75,7 @@ class Command(BaseCommand):
         only_empty = options["only_empty"]
         pause = max(0.0, options["pause"])
         debug = options["debug"]
+        start_id = options["start_id"]
 
         fanart_api_key = self._get_fanart_api_key()
         if not fanart_api_key:
@@ -83,6 +90,9 @@ class Command(BaseCommand):
         empty_image_filter = Q(image__isnull=True) | Q(image="")
         base_qs = base_qs.filter(empty_image_filter)
 
+        if start_id is not None:
+            base_qs = base_qs.filter(id__gte=start_id)
+
         if not only_empty:
             self.stdout.write(
                 self.style.WARNING(
@@ -90,10 +100,10 @@ class Command(BaseCommand):
                 )
             )
 
+        base_qs = base_qs.order_by("id")
+
         if limit:
-            base_qs = base_qs.order_by("id")[:limit]
-        else:
-            base_qs = base_qs.order_by("id")
+            base_qs = base_qs[:limit]
 
         total_candidates = base_qs.count()
         if total_candidates == 0:
@@ -113,6 +123,7 @@ class Command(BaseCommand):
             "fanart": 0,
             "without_poster": 0,
             "errors": 0,
+            "last_processed_id": None,
         }
 
         session = requests.Session()
@@ -145,8 +156,13 @@ class Command(BaseCommand):
         self.stdout.write(f"Posters desde Fanart.tv: {stats['fanart']}")
         self.stdout.write(f"Sin poster: {stats['without_poster']}")
         self.stdout.write(f"Errores: {stats['errors']}")
+        self.stdout.write(f"Último id procesado: {stats['last_processed_id']}")
+        self.stdout.write(f"Cantidad procesada: {stats['processed']}")
 
     def _process_batch(self, batch, session, fanart_api_key, pause, stats, debug=False):
+        batch_min_id = min(item.movie_id for item in batch)
+        batch_max_id = max(item.movie_id for item in batch)
+
         imdb_ids = [item.imdb_id for item in batch]
         wikidata_map = self._fetch_wikidata_posters(session, imdb_ids, pause, stats, debug=debug)
 
@@ -176,9 +192,11 @@ class Command(BaseCommand):
                 Movie.objects.bulk_update(to_update, ["image"], batch_size=1000)
 
         stats["processed"] += len(batch)
+        stats["last_processed_id"] = batch_max_id
         self.stdout.write(
             self.style.NOTICE(
                 "Progreso -> "
+                f"batch_ids={batch_min_id}-{batch_max_id}, "
                 f"procesadas={stats['processed']}, "
                 f"wikidata={stats['wikidata']}, "
                 f"fanart={stats['fanart']}, "
