@@ -355,6 +355,8 @@ class MovieRatingView(APIView):
 
     def delete(self, request, pk):
         movie = get_object_or_404(Movie, pk=pk)
-        MovieRating.objects.filter(user=request.user, movie=movie).delete()
+        deleted, _ = MovieRating.objects.filter(user=request.user, movie=movie).delete()
+        if not deleted:
+            return Response({"detail": "Rating not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
             
