@@ -1,6 +1,7 @@
 import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -168,6 +169,25 @@ class MovieRatingEndpointTests(TestCase):
 
         self.assertEqual(put_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(delete_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_put_rolls_back_rating_when_preference_update_fails(self):
+        self.client.force_authenticate(user=self.user)
+
+        with patch("core.views.update_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.client.put(self.url, {"score": 8}, format="json")
+
+        self.assertFalse(MovieRating.objects.filter(user=self.user, movie=self.movie).exists())
+
+    def test_delete_rolls_back_rating_delete_when_preference_update_fails(self):
+        self.client.force_authenticate(user=self.user)
+        rating = MovieRating.objects.create(user=self.user, movie=self.movie, score=8)
+
+        with patch("core.views.remove_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.client.delete(self.url)
+
+        self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
 
 
 class MoviePreferenceServiceTests(TestCase):
