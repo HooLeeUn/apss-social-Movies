@@ -5,7 +5,16 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
-from .models import Post, Rating, Comment, Movie
+from .models import (
+    Comment,
+    Movie,
+    Post,
+    Rating,
+    UserDirectorPreference,
+    UserGenrePreference,
+    UserTasteProfile,
+    UserTypePreference,
+)
 
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
@@ -212,3 +221,73 @@ class MovieListSerializer(serializers.ModelSerializer):
 
 class MovieRatingSerializer(serializers.Serializer):
     score = serializers.IntegerField(min_value=1, max_value=10)
+
+
+class TastePreferenceBaseSerializer(serializers.ModelSerializer):
+    class Meta:
+        fields = [
+            "score",
+            "ratings_count",
+            "count_1",
+            "count_2",
+            "count_3",
+            "count_4",
+            "count_5",
+            "count_6",
+            "count_7",
+            "count_8",
+            "count_9",
+            "count_10",
+        ]
+
+
+class UserGenrePreferenceSerializer(TastePreferenceBaseSerializer):
+    name = serializers.CharField(source="genre", read_only=True)
+
+    class Meta(TastePreferenceBaseSerializer.Meta):
+        model = UserGenrePreference
+        fields = ["name", *TastePreferenceBaseSerializer.Meta.fields]
+
+
+class UserTypePreferenceSerializer(TastePreferenceBaseSerializer):
+    name = serializers.CharField(source="content_type", read_only=True)
+
+    class Meta(TastePreferenceBaseSerializer.Meta):
+        model = UserTypePreference
+        fields = ["name", *TastePreferenceBaseSerializer.Meta.fields]
+
+
+class UserDirectorPreferenceSerializer(TastePreferenceBaseSerializer):
+    name = serializers.CharField(source="director", read_only=True)
+
+    class Meta(TastePreferenceBaseSerializer.Meta):
+        model = UserDirectorPreference
+        fields = ["name", *TastePreferenceBaseSerializer.Meta.fields]
+
+
+class UserTasteProfileInspectSerializer(serializers.ModelSerializer):
+    genre_preferences = serializers.SerializerMethodField()
+    type_preferences = serializers.SerializerMethodField()
+    director_preferences = serializers.SerializerMethodField()
+
+    def get_genre_preferences(self, obj):
+        preferences = obj.user.genre_preferences.order_by("-score", "-ratings_count", "genre")
+        return UserGenrePreferenceSerializer(preferences, many=True).data
+
+    def get_type_preferences(self, obj):
+        preferences = obj.user.type_preferences.order_by("-score", "-ratings_count", "content_type")
+        return UserTypePreferenceSerializer(preferences, many=True).data
+
+    def get_director_preferences(self, obj):
+        preferences = obj.user.director_preferences.order_by("-score", "-ratings_count", "director")
+        return UserDirectorPreferenceSerializer(preferences, many=True).data
+
+    class Meta:
+        model = UserTasteProfile
+        fields = [
+            "ratings_count",
+            "last_updated_at",
+            "genre_preferences",
+            "type_preferences",
+            "director_preferences",
+        ]

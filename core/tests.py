@@ -242,3 +242,56 @@ class MoviePreferenceServiceTests(TestCase):
 
         profile = UserTasteProfile.objects.get(user=self.user)
         self.assertEqual(profile.ratings_count, 0)
+
+
+class MeTasteProfileEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="profile_user", email="profile@example.com", password="test1234"
+        )
+        self.url = reverse("me-taste-profile")
+
+    def test_requires_authentication(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_returns_profile_and_sorted_preferences(self):
+        self.client.force_authenticate(user=self.user)
+
+        UserTasteProfile.objects.create(user=self.user, ratings_count=4)
+        UserGenrePreference.objects.create(user=self.user, genre="Comedy", count_9=2)
+        UserGenrePreference.objects.create(user=self.user, genre="Action", count_10=1)
+        UserTypePreference.objects.create(user=self.user, content_type=Movie.SERIES, count_8=1)
+        UserTypePreference.objects.create(user=self.user, content_type=Movie.MOVIE, count_9=3)
+        UserDirectorPreference.objects.create(user=self.user, director="Villeneuve", count_8=1)
+        UserDirectorPreference.objects.create(user=self.user, director="Nolan", count_10=2)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ratings_count"], 4)
+        self.assertIn("last_updated_at", response.data)
+
+        self.assertEqual([item["name"] for item in response.data["genre_preferences"]], ["Action", "Comedy"])
+        self.assertEqual([item["name"] for item in response.data["type_preferences"]], [Movie.MOVIE, Movie.SERIES])
+        self.assertEqual([item["name"] for item in response.data["director_preferences"]], ["Nolan", "Villeneuve"])
+
+        genre_item = response.data["genre_preferences"][0]
+        self.assertEqual(genre_item["score"], "10.00")
+        self.assertEqual(genre_item["ratings_count"], 1)
+        self.assertEqual(genre_item["count_10"], 1)
+        self.assertEqual(genre_item["count_1"], 0)
+
+    def test_creates_empty_profile_when_not_exists(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["ratings_count"], 0)
+        self.assertEqual(response.data["genre_preferences"], [])
+        self.assertEqual(response.data["type_preferences"], [])
+        self.assertEqual(response.data["director_preferences"], [])
+        self.assertTrue(UserTasteProfile.objects.filter(user=self.user).exists())

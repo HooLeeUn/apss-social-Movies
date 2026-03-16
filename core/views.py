@@ -14,9 +14,17 @@ from .serializers import (
     UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
     PostWriteSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
-    MovieRatingSerializer,
+    MovieRatingSerializer, UserTasteProfileInspectSerializer,
 )
-from .models import Post, Rating, Follow, Comment, Movie, MovieRating
+from .models import (
+    Comment,
+    Follow,
+    Movie,
+    MovieRating,
+    Post,
+    Rating,
+    UserTasteProfile,
+)
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .services import (
     remove_user_preferences_for_movie_rating,
@@ -386,4 +394,12 @@ class MovieRatingView(APIView):
             )
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MeTasteProfileView(generics.RetrieveAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserTasteProfileInspectSerializer
+
+    def get_object(self):
+        return UserTasteProfile.objects.get_or_create(user=self.request.user)[0]
             
