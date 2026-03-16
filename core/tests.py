@@ -10,7 +10,14 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import Movie, MovieRating
+from core.models import (
+    Movie,
+    MovieRating,
+    UserDirectorPreference,
+    UserGenrePreference,
+    UserTasteProfile,
+    UserTypePreference,
+)
 
 
 class ImportMoviesCommandTests(TestCase):
@@ -92,6 +99,8 @@ class MovieRatingEndpointTests(TestCase):
             author=self.user,
             title_english="Interstellar",
             type=Movie.MOVIE,
+            genre=" Sci-Fi, Drama, Sci-Fi ",
+            director=" Christopher Nolan ",
             release_year=2014,
         )
         self.url = reverse("movie-rating", kwargs={"pk": self.movie.pk})
@@ -115,6 +124,54 @@ class MovieRatingEndpointTests(TestCase):
         rating.refresh_from_db()
         self.assertEqual(rating.score, 9)
         self.assertEqual(MovieRating.objects.filter(user=self.user, movie=self.movie).count(), 1)
+
+
+    def test_put_updates_taste_preferences_incrementally(self):
+        self.client.force_authenticate(user=self.user)
+
+        self.client.put(self.url, {"score": 8}, format="json")
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 1)
+
+        sci_fi_pref = UserGenrePreference.objects.get(user=self.user, genre="Sci-Fi")
+        drama_pref = UserGenrePreference.objects.get(user=self.user, genre="Drama")
+        self.assertEqual(sci_fi_pref.count_8, 1)
+        self.assertEqual(sci_fi_pref.ratings_count, 1)
+        self.assertEqual(float(sci_fi_pref.score), 8.0)
+        self.assertEqual(drama_pref.count_8, 1)
+
+        type_pref = UserTypePreference.objects.get(user=self.user, content_type=Movie.MOVIE)
+        director_pref = UserDirectorPreference.objects.get(user=self.user, director="Christopher Nolan")
+        self.assertEqual(type_pref.count_8, 1)
+        self.assertEqual(director_pref.count_8, 1)
+
+        self.client.put(self.url, {"score": 10}, format="json")
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.ratings_count, 1)
+
+        sci_fi_pref.refresh_from_db()
+        self.assertEqual(sci_fi_pref.count_8, 0)
+        self.assertEqual(sci_fi_pref.count_10, 1)
+        self.assertEqual(sci_fi_pref.ratings_count, 1)
+        self.assertEqual(float(sci_fi_pref.score), 10.0)
+
+        drama_pref.refresh_from_db()
+        self.assertEqual(drama_pref.count_10, 1)
+
+    def test_delete_updates_taste_preferences_and_removes_empty_preferences(self):
+        self.client.force_authenticate(user=self.user)
+        self.client.put(self.url, {"score": 7}, format="json")
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 0)
+        self.assertFalse(UserGenrePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserTypePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserDirectorPreference.objects.filter(user=self.user).exists())
 
     def test_put_validates_score_range(self):
         self.client.force_authenticate(user=self.user)
