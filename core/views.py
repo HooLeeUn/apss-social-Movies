@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Count, Avg
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
@@ -17,6 +18,10 @@ from .serializers import (
 )
 from .models import Post, Rating, Follow, Comment, Movie, MovieRating
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
+from .services import (
+    remove_user_preferences_for_movie_rating,
+    update_user_preferences_for_movie_rating,
+)
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
@@ -341,12 +346,23 @@ class MovieRatingView(APIView):
         movie = get_object_or_404(Movie, pk=pk)
         serializer = MovieRatingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        new_score = serializer.validated_data["score"]
 
-        rating, created = MovieRating.objects.update_or_create(
-            user=request.user,
-            movie=movie,
-            defaults={"score": serializer.validated_data["score"]},
-        )
+        with transaction.atomic():
+            existing_rating = MovieRating.objects.select_for_update().filter(user=request.user, movie=movie).first()
+            old_score = existing_rating.score if existing_rating else None
+
+            rating, created = MovieRating.objects.update_or_create(
+                user=request.user,
+                movie=movie,
+                defaults={"score": new_score},
+            )
+            update_user_preferences_for_movie_rating(
+                user=request.user,
+                movie=movie,
+                new_score=new_score,
+                old_score=old_score,
+            )
 
         return Response(
             {"movie": movie.id, "my_rating": rating.score, "created": created},
@@ -355,8 +371,19 @@ class MovieRatingView(APIView):
 
     def delete(self, request, pk):
         movie = get_object_or_404(Movie, pk=pk)
-        deleted, _ = MovieRating.objects.filter(user=request.user, movie=movie).delete()
-        if not deleted:
-            return Response({"detail": "Rating not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            rating = MovieRating.objects.select_for_update().filter(user=request.user, movie=movie).first()
+            if rating is None:
+                return Response({"detail": "Rating not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            old_score = rating.score
+            rating.delete()
+            remove_user_preferences_for_movie_rating(
+                user=request.user,
+                movie=movie,
+                old_score=old_score,
+            )
+
         return Response(status=status.HTTP_204_NO_CONTENT)
             

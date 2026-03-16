@@ -10,7 +10,18 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import Movie, MovieRating
+from core.models import (
+    Movie,
+    MovieRating,
+    UserDirectorPreference,
+    UserGenrePreference,
+    UserTasteProfile,
+    UserTypePreference,
+)
+from core.services import (
+    remove_user_preferences_for_movie_rating,
+    update_user_preferences_for_movie_rating,
+)
 
 
 class ImportMoviesCommandTests(TestCase):
@@ -116,6 +127,9 @@ class MovieRatingEndpointTests(TestCase):
         self.assertEqual(rating.score, 9)
         self.assertEqual(MovieRating.objects.filter(user=self.user, movie=self.movie).count(), 1)
 
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 1)
+
     def test_put_validates_score_range(self):
         self.client.force_authenticate(user=self.user)
 
@@ -129,12 +143,16 @@ class MovieRatingEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
         own_rating = MovieRating.objects.create(user=self.user, movie=self.movie, score=7)
         other_rating = MovieRating.objects.create(user=self.other_user, movie=self.movie, score=10)
+        update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=7)
 
         response = self.client.delete(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(MovieRating.objects.filter(pk=own_rating.pk).exists())
         self.assertTrue(MovieRating.objects.filter(pk=other_rating.pk).exists())
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 0)
 
     def test_delete_without_existing_rating_returns_controlled_response(self):
         self.client.force_authenticate(user=self.user)
@@ -150,3 +168,57 @@ class MovieRatingEndpointTests(TestCase):
 
         self.assertEqual(put_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(delete_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class MoviePreferenceServiceTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="taste_user", email="taste@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="The Matrix",
+            type=Movie.MOVIE,
+            genre=" Sci-Fi, Action, Sci-Fi , ,Action ",
+            director=" Lana Wachowski ",
+            release_year=1999,
+        )
+
+    def test_update_preferences_creates_and_updates_preference_buckets_incrementally(self):
+        update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=8)
+
+        sci_fi = UserGenrePreference.objects.get(user=self.user, genre="Sci-Fi")
+        action = UserGenrePreference.objects.get(user=self.user, genre="Action")
+        type_pref = UserTypePreference.objects.get(user=self.user, content_type=Movie.MOVIE)
+        director_pref = UserDirectorPreference.objects.get(user=self.user, director="Lana Wachowski")
+
+        self.assertEqual(sci_fi.count_8, 1)
+        self.assertEqual(action.count_8, 1)
+        self.assertEqual(type_pref.count_8, 1)
+        self.assertEqual(director_pref.count_8, 1)
+        self.assertEqual(float(sci_fi.score), 8.0)
+
+        update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=10, old_score=8)
+        sci_fi.refresh_from_db()
+        type_pref.refresh_from_db()
+
+        self.assertEqual(sci_fi.count_8, 0)
+        self.assertEqual(sci_fi.count_10, 1)
+        self.assertEqual(float(sci_fi.score), 10.0)
+        self.assertEqual(type_pref.count_8, 0)
+        self.assertEqual(type_pref.count_10, 1)
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 1)
+
+    def test_remove_preferences_deletes_empty_preference_rows(self):
+        update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=6)
+
+        remove_user_preferences_for_movie_rating(user=self.user, movie=self.movie, old_score=6)
+
+        self.assertFalse(UserGenrePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserTypePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserDirectorPreference.objects.filter(user=self.user).exists())
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 0)
