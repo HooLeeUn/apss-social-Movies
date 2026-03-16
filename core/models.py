@@ -157,6 +157,117 @@ class MovieRating(models.Model):
     def __str__(self):
         return f"MovieRating(user={self.user_id}, movie={self.movie_id}, score={self.score})"
 
+
+class UserTasteProfile(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="taste_profile",
+    )
+    ratings_count = models.PositiveIntegerField(default=0)
+    last_updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"UserTasteProfile(user={self.user_id}, ratings_count={self.ratings_count})"
+
+
+class PreferenceDistributionMixin(models.Model):
+    count_1 = models.PositiveIntegerField(default=0)
+    count_2 = models.PositiveIntegerField(default=0)
+    count_3 = models.PositiveIntegerField(default=0)
+    count_4 = models.PositiveIntegerField(default=0)
+    count_5 = models.PositiveIntegerField(default=0)
+    count_6 = models.PositiveIntegerField(default=0)
+    count_7 = models.PositiveIntegerField(default=0)
+    count_8 = models.PositiveIntegerField(default=0)
+    count_9 = models.PositiveIntegerField(default=0)
+    count_10 = models.PositiveIntegerField(default=0)
+    ratings_count = models.PositiveIntegerField(default=0)
+    score = models.DecimalField(max_digits=4, decimal_places=2, default=0)
+
+    class Meta:
+        abstract = True
+
+    def get_distribution_counts(self):
+        return [
+            self.count_1,
+            self.count_2,
+            self.count_3,
+            self.count_4,
+            self.count_5,
+            self.count_6,
+            self.count_7,
+            self.count_8,
+            self.count_9,
+            self.count_10,
+        ]
+
+    def recalculate_distribution_metrics(self):
+        counts = self.get_distribution_counts()
+        total = sum(counts)
+        self.ratings_count = total
+        if total == 0:
+            self.score = 0
+            return
+
+        weighted_sum = sum((index + 1) * count for index, count in enumerate(counts))
+        self.score = round(weighted_sum / total, 2)
+
+    def save(self, *args, **kwargs):
+        self.recalculate_distribution_metrics()
+        super().save(*args, **kwargs)
+
+
+class UserGenrePreference(PreferenceDistributionMixin):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="genre_preferences",
+    )
+    genre = models.CharField(max_length=100)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "genre"], name="unique_user_genre_preference")
+        ]
+
+    def __str__(self):
+        return f"UserGenrePreference(user={self.user_id}, genre={self.genre}, score={self.score})"
+
+
+class UserTypePreference(PreferenceDistributionMixin):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="type_preferences",
+    )
+    content_type = models.CharField(max_length=10, choices=Movie.TYPE_CHOICES)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "content_type"], name="unique_user_type_preference")
+        ]
+
+    def __str__(self):
+        return f"UserTypePreference(user={self.user_id}, content_type={self.content_type}, score={self.score})"
+
+
+class UserDirectorPreference(PreferenceDistributionMixin):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="director_preferences",
+    )
+    director = models.CharField(max_length=255)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "director"], name="unique_user_director_preference")
+        ]
+
+    def __str__(self):
+        return f"UserDirectorPreference(user={self.user_id}, director={self.director}, score={self.score})"
+
 class Rating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ratings")
     post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="ratings")

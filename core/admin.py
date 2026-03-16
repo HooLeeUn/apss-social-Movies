@@ -1,7 +1,18 @@
 from django.contrib import admin
 from django import forms
 from django.db.models import Avg, Count
-from .models import Post, Rating, Follow, Comment, Movie, MovieRating
+from .models import (
+    Post,
+    Rating,
+    Follow,
+    Comment,
+    Movie,
+    MovieRating,
+    UserTasteProfile,
+    UserGenrePreference,
+    UserTypePreference,
+    UserDirectorPreference,
+)
 
 
 @admin.register(Post)
@@ -77,3 +88,48 @@ class MovieRatingAdmin(admin.ModelAdmin):
     autocomplete_fields = ("user", "movie")
     list_select_related = ("user", "movie")
     ordering = ("-created_at",)
+
+
+@admin.register(UserTasteProfile)
+class UserTasteProfileAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "ratings_count", "last_updated_at")
+    search_fields = ("user__username",)
+    list_filter = ("last_updated_at",)
+    autocomplete_fields = ("user",)
+    list_select_related = ("user",)
+
+
+class PreferenceDistributionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "ratings_count",
+        "score",
+        "count_1",
+        "count_10",
+    )
+    list_filter = ("score", "ratings_count")
+    search_fields = ("user__username",)
+    autocomplete_fields = ("user",)
+    list_select_related = ("user",)
+
+
+@admin.register(UserGenrePreference)
+class UserGenrePreferenceAdmin(PreferenceDistributionAdmin):
+    list_display = ("id", "user", "genre", "ratings_count", "score", "count_1", "count_10")
+    search_fields = ("user__username", "genre")
+    list_filter = ("genre", "score", "ratings_count")
+
+
+@admin.register(UserTypePreference)
+class UserTypePreferenceAdmin(PreferenceDistributionAdmin):
+    list_display = ("id", "user", "content_type", "ratings_count", "score", "count_1", "count_10")
+    search_fields = ("user__username", "content_type")
+    list_filter = ("content_type", "score", "ratings_count")
+
+
+@admin.register(UserDirectorPreference)
+class UserDirectorPreferenceAdmin(PreferenceDistributionAdmin):
+    list_display = ("id", "user", "director", "ratings_count", "score", "count_1", "count_10")
+    search_fields = ("user__username", "director")
+    list_filter = ("director", "score", "ratings_count")
