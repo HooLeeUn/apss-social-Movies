@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from core.models import Movie
+from core.models import Movie, build_genre_key
 
 
 class Command(BaseCommand):
@@ -196,6 +196,7 @@ class Command(BaseCommand):
             "title_spanish": self._clean_text(row.get("title_spanish")),
             "type": self._normalize_type(row.get("type")),
             "genre": self._clean_text(row.get("genre")),
+            "genre_key": build_genre_key(row.get("genre")),
             "release_year": self._parse_year(row.get("release_year")),
             "director": self._clean_text(row.get("director")),
             "cast_members": self._clean_text(row.get("cast_members")),
