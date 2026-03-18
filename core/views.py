@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Avg, Q
+from django.db.models import Count, Avg, F, Q
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -353,9 +353,10 @@ class FeedMoviesView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
+        has_preferences = UserTasteProfile.objects.filter(user_id=user.id, ratings_count__gt=0).exists()
         qs = (
             Movie.objects
-            .feed_for_user(user)
+            .feed_for_user(user, include_recommendation_score=has_preferences)
             .select_related("author", "author__profile")
         )
 
@@ -376,16 +377,12 @@ class FeedMoviesView(generics.ListAPIView):
         if genre := self.request.query_params.get("genre"):
             qs = qs.filter(genre__icontains=genre)
 
-        has_preferences = (
-            user.genre_preferences.exists()
-            or user.type_preferences.exists()
-            or user.director_preferences.exists()
-        )
+        release_year_desc = F("release_year").desc(nulls_last=True)
 
         if has_preferences:
-            return qs.order_by("-recommendation_score", "-release_year", "-id")
+            return qs.order_by("-recommendation_score", release_year_desc, "-id")
 
-        return qs.order_by("-display_rating", "-release_year", "-id")
+        return qs.order_by("-display_rating", release_year_desc, "-id")
 
 
 class MovieRatingView(APIView):

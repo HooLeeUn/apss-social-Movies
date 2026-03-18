@@ -119,7 +119,11 @@ class MovieQuerySet(models.QuerySet):
             )
         )
 
-    def feed_for_user(self, user):
+    def feed_for_user(self, user, include_recommendation_score=True):
+        qs = self.with_display_rating().with_my_rating(user)
+        if not include_recommendation_score:
+            return qs
+
         genre_score_subquery = UserGenrePreference.objects.filter(
             user_id=user.id,
             genre=OuterRef("genre_key"),
@@ -133,7 +137,7 @@ class MovieQuerySet(models.QuerySet):
             content_type=OuterRef("type"),
         ).values("score")[:1]
 
-        return self.with_display_rating().with_my_rating(user).annotate(
+        return qs.annotate(
             genre_combo_score=Coalesce(Cast(Subquery(genre_score_subquery), FloatField()), Value(0.0)),
             director_score=Coalesce(Cast(Subquery(director_score_subquery), FloatField()), Value(0.0)),
             type_score=Coalesce(Cast(Subquery(type_score_subquery), FloatField()), Value(0.0)),
