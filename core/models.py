@@ -7,6 +7,16 @@ from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
 
+
+def build_genre_key(value):
+    if value is None:
+        return None
+
+    genres = sorted({part.strip() for part in str(value).split(",") if part and part.strip()})
+    if not genres:
+        return None
+    return "|".join(genres)
+
 class PostQuerySet(models.QuerySet):
 
     def feed_following(self, user):
@@ -109,6 +119,41 @@ class MovieQuerySet(models.QuerySet):
             )
         )
 
+    def feed_for_user(self, user):
+        genre_score_subquery = UserGenrePreference.objects.filter(
+            user_id=user.id,
+            genre=OuterRef("genre_key"),
+        ).values("score")[:1]
+        director_score_subquery = UserDirectorPreference.objects.filter(
+            user_id=user.id,
+            director=OuterRef("director"),
+        ).values("score")[:1]
+        type_score_subquery = UserTypePreference.objects.filter(
+            user_id=user.id,
+            content_type=OuterRef("type"),
+        ).values("score")[:1]
+
+        return self.with_display_rating().with_my_rating(user).annotate(
+            genre_combo_score=Coalesce(Cast(Subquery(genre_score_subquery), FloatField()), Value(0.0)),
+            director_score=Coalesce(Cast(Subquery(director_score_subquery), FloatField()), Value(0.0)),
+            type_score=Coalesce(Cast(Subquery(type_score_subquery), FloatField()), Value(0.0)),
+            popularity_score=Case(
+                When(real_ratings_count__gte=20, then=Value(10.0)),
+                When(real_ratings_count__gte=10, then=Value(7.0)),
+                When(real_ratings_count__gte=5, then=Value(4.0)),
+                default=Value(0.0),
+                output_field=FloatField(),
+            ),
+        ).annotate(
+            recommendation_score=(
+                F("genre_combo_score") * Value(0.60)
+                + F("director_score") * Value(0.20)
+                + F("type_score") * Value(0.10)
+                + Coalesce(F("display_rating"), Value(0.0), output_field=FloatField()) * Value(0.05)
+                + F("popularity_score") * Value(0.05)
+            )
+        )
+
 
 class Movie(models.Model):
     MOVIE = "movie"
@@ -123,6 +168,7 @@ class Movie(models.Model):
     title_spanish = models.CharField(max_length=255, null=True, blank=True)
     type = models.CharField(max_length=10, choices=TYPE_CHOICES, null=True, blank=True)
     genre = models.CharField(max_length=100, null=True, blank=True)
+    genre_key = models.CharField(max_length=100, null=True, blank=True, db_index=True)
     release_year = models.PositiveIntegerField(null=True, blank=True)
     director = models.CharField(max_length=255, null=True, blank=True)
     cast_members = models.TextField(null=True, blank=True)
@@ -136,6 +182,10 @@ class Movie(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        self.genre_key = build_genre_key(self.genre)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         if self.release_year:

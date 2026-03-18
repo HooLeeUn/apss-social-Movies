@@ -3,7 +3,7 @@ from .views import (
     UserProfileView, MeView, FollowToggleView,UserFollowersListView, UserFollowingListView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
     UserPostsListView, PostCommentsListCreateView, CommentDetailView, RegisterView,
-    MovieListView, MovieRatingView, MeTasteProfileView,
+    MovieListView, MovieRatingView, MeTasteProfileView, FeedMoviesView,
 )
 
 urlpatterns = [
@@ -21,6 +21,7 @@ urlpatterns = [
     path("posts/<int:pk>/", PostDetailView.as_view(), name="post-detail"),
     path("posts/<int:pk>/rating/", PostRatingView.as_view(), name="post-rating"),
     path("movies/", MovieListView.as_view(), name="movie-list"),
+    path("feed/movies/", FeedMoviesView.as_view(), name="feed-movies"),
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
     path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),

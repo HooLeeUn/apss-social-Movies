@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Avg
+from django.db.models import Count, Avg, Q
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -345,6 +345,47 @@ class MovieListView(generics.ListAPIView):
             qs = qs.filter(release_year=release_year)
 
         return qs.with_my_rating(self.request.user)
+
+
+class FeedMoviesView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = MovieListSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            Movie.objects
+            .feed_for_user(user)
+            .select_related("author", "author__profile")
+        )
+
+        if self.request.query_params.get("exclude_rated", "true").lower() != "false":
+            qs = qs.filter(my_rating__isnull=True)
+
+        if search := self.request.query_params.get("search"):
+            qs = qs.filter(
+                Q(title_english__icontains=search)
+                | Q(title_spanish__icontains=search)
+                | Q(director__icontains=search)
+                | Q(cast_members__icontains=search)
+                | Q(genre__icontains=search)
+            )
+
+        if movie_type := self.request.query_params.get("type"):
+            qs = qs.filter(type=movie_type)
+        if genre := self.request.query_params.get("genre"):
+            qs = qs.filter(genre__icontains=genre)
+
+        has_preferences = (
+            user.genre_preferences.exists()
+            or user.type_preferences.exists()
+            or user.director_preferences.exists()
+        )
+
+        if has_preferences:
+            return qs.order_by("-recommendation_score", "-release_year", "-id")
+
+        return qs.order_by("-display_rating", "-release_year", "-id")
 
 
 class MovieRatingView(APIView):

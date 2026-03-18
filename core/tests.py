@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 from core.models import (
     Movie,
     MovieRating,
+    build_genre_key,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -55,6 +56,7 @@ Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
         self.assertEqual(inception.type, Movie.MOVIE)
         self.assertEqual(inception.release_year, 2010)
         self.assertEqual(float(inception.external_rating), 8.8)
+        self.assertEqual(inception.genre_key, "Sci-Fi")
         self.assertEqual(inception.author, self.author)
         self.assertIsNone(inception.image)
 
@@ -89,6 +91,158 @@ Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
 
         with self.assertRaisesMessage(CommandError, "No existe un usuario con username 'missing_user'"):
             call_command("import_movies", str(csv_path), author="missing_user")
+
+
+class MovieGenreKeyTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="genre_user", email="genre@example.com", password="test1234"
+        )
+
+    def test_build_genre_key_canonicalizes_genres(self):
+        self.assertEqual(build_genre_key("Action, Comedy, Drama"), "Action|Comedy|Drama")
+        self.assertEqual(build_genre_key("Drama, Action, Comedy"), "Action|Comedy|Drama")
+        self.assertEqual(build_genre_key("Drama"), "Drama")
+        self.assertIsNone(build_genre_key(" ,  , "))
+
+    def test_movie_persists_canonical_genre_key(self):
+        movie = Movie.objects.create(
+            author=self.user,
+            title_english="Canonical Movie",
+            genre=" Drama, Action, Comedy ",
+            type=Movie.MOVIE,
+        )
+
+        self.assertEqual(movie.genre_key, "Action|Comedy|Drama")
+
+
+class FeedMoviesEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="feed_user", email="feed@example.com", password="test1234"
+        )
+        self.author = get_user_model().objects.create_user(
+            username="catalog_user", email="catalog@example.com", password="test1234"
+        )
+        self.url = reverse("feed-movies")
+
+    def test_feed_requires_authentication_and_returns_200_for_authenticated_user(self):
+        anon_response = self.client.get(self.url)
+        self.assertEqual(anon_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        Movie.objects.create(
+            author=self.author,
+            title_english="Authenticated Feed Movie",
+            genre="Drama",
+            type=Movie.MOVIE,
+            external_rating=8.0,
+            release_year=2020,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_feed_excludes_rated_movies_by_default(self):
+        rated_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Already Rated",
+            genre="Action, Comedy",
+            type=Movie.MOVIE,
+            release_year=2021,
+            external_rating=7.0,
+        )
+        fresh_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Fresh Pick",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=2022,
+            external_rating=8.0,
+        )
+        MovieRating.objects.create(user=self.user, movie=rated_movie, score=9)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles, [fresh_movie.title_english])
+
+    def test_feed_orders_by_recommendation_score(self):
+        preferred_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Preferred Combo",
+            genre="Comedy, Action",
+            type=Movie.MOVIE,
+            director="Christopher Nolan",
+            release_year=2024,
+            external_rating=6.0,
+        )
+        Movie.objects.create(
+            author=self.author,
+            title_english="Higher External Rating",
+            genre="Drama",
+            type=Movie.SERIES,
+            director="Other Director",
+            release_year=2025,
+            external_rating=9.5,
+        )
+
+        UserGenrePreference.objects.create(user=self.user, genre="Action|Comedy", count_10=1)
+        UserTypePreference.objects.create(user=self.user, content_type=Movie.MOVIE, count_10=1)
+        UserDirectorPreference.objects.create(user=self.user, director="Christopher Nolan", count_10=1)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[0], preferred_movie.title_english)
+
+    def test_feed_for_user_without_taste_profile_does_not_break(self):
+        high_rated = Movie.objects.create(
+            author=self.author,
+            title_english="Top Rated",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=2020,
+            external_rating=9.1,
+        )
+        Movie.objects.create(
+            author=self.author,
+            title_english="Lower Rated",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=2024,
+            external_rating=7.2,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[0], high_rated.title_english)
+
+    def test_movies_list_endpoint_still_works(self):
+        Movie.objects.create(
+            author=self.author,
+            title_english="Public Catalog Movie",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=2019,
+            external_rating=8.3,
+        )
+
+        response = self.client.get(reverse("movie-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["title_english"], "Public Catalog Movie")
 
 
 class MovieRatingEndpointTests(TestCase):
@@ -207,15 +361,18 @@ class MoviePreferenceServiceTests(TestCase):
     def test_update_preferences_creates_and_updates_preference_buckets_incrementally(self):
         update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=8)
 
+        combo_pref = UserGenrePreference.objects.get(user=self.user, genre="Action|Sci-Fi")
         sci_fi = UserGenrePreference.objects.get(user=self.user, genre="Sci-Fi")
         action = UserGenrePreference.objects.get(user=self.user, genre="Action")
         type_pref = UserTypePreference.objects.get(user=self.user, content_type=Movie.MOVIE)
         director_pref = UserDirectorPreference.objects.get(user=self.user, director="Lana Wachowski")
 
+        self.assertEqual(combo_pref.count_8, 1)
         self.assertEqual(sci_fi.count_8, 1)
         self.assertEqual(action.count_8, 1)
         self.assertEqual(type_pref.count_8, 1)
         self.assertEqual(director_pref.count_8, 1)
+        self.assertEqual(float(combo_pref.score), 8.0)
         self.assertEqual(float(sci_fi.score), 8.0)
 
         update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=10, old_score=8)

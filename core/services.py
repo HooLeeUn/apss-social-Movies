@@ -10,6 +10,7 @@ from core.models import (
     UserGenrePreference,
     UserTasteProfile,
     UserTypePreference,
+    build_genre_key,
 )
 
 
@@ -85,8 +86,17 @@ def get_movie_genres(movie):
 
 def get_movie_preference_targets(movie):
     targets = []
+    seen_genre_preferences = set()
+
+    genre_key = build_genre_key(movie.genre)
+    if genre_key:
+        seen_genre_preferences.add(genre_key)
+        targets.append((UserGenrePreference, "genre", genre_key))
 
     for genre in get_movie_genres(movie):
+        if genre in seen_genre_preferences:
+            continue
+        seen_genre_preferences.add(genre)
         targets.append((UserGenrePreference, "genre", genre))
 
     content_type = normalize_text(movie.type)
