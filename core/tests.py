@@ -228,6 +228,31 @@ class FeedMoviesEndpointTests(TestCase):
         titles = [item["title_english"] for item in response.data["results"]]
         self.assertEqual(titles[0], high_rated.title_english)
 
+    def test_feed_orders_null_release_years_last(self):
+        recent_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Recent Year",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=2024,
+            external_rating=8.0,
+        )
+        null_year_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Unknown Year",
+            genre="Drama",
+            type=Movie.MOVIE,
+            release_year=None,
+            external_rating=8.0,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [recent_movie.title_english, null_year_movie.title_english])
+
     def test_movies_list_endpoint_still_works(self):
         Movie.objects.create(
             author=self.author,
