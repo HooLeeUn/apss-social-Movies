@@ -145,6 +145,8 @@ class FeedMoviesEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["external_votes"], 0)
+        self.assertEqual(response.data["results"][0]["synopsis"], "")
 
     def test_feed_excludes_rated_movies_by_default(self):
         rated_movie = Movie.objects.create(
@@ -268,6 +270,8 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["title_english"], "Public Catalog Movie")
+        self.assertEqual(response.data["results"][0]["external_votes"], 0)
+        self.assertEqual(response.data["results"][0]["synopsis"], "")
 
 
 class MovieRatingEndpointTests(TestCase):
