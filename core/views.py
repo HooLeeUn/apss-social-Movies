@@ -379,10 +379,7 @@ class FeedMoviesView(generics.ListAPIView):
 
         release_year_desc = F("release_year").desc(nulls_last=True)
 
-        if has_preferences:
-            return qs.order_by("-recommendation_score", release_year_desc, "-id")
-
-        return qs.order_by("-display_rating", release_year_desc, "-id")
+        return qs.order_by("-recommendation_score", "-ranking_confidence_score", release_year_desc, "-id")
 
 
 class MovieRatingView(APIView):

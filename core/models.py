@@ -175,9 +175,17 @@ class MovieQuerySet(models.QuerySet):
         )
 
     def feed_for_user(self, user, include_recommendation_score=True):
-        qs = self.with_display_rating().with_ranking_scores().with_my_rating(user)
+        qs = self.with_display_rating().with_ranking_scores().with_my_rating(user).annotate(
+            recency_score=Coalesce(Cast("release_year", FloatField()), Value(0.0)) / Value(1000.0),
+        )
         if not include_recommendation_score:
-            return qs
+            return qs.annotate(
+                recommendation_score=(
+                    F("ranking_quality_score") * Value(0.90)
+                    + F("ranking_confidence_score") * Value(1.00)
+                    + F("recency_score") * Value(0.15)
+                )
+            )
 
         genre_score_subquery = UserGenrePreference.objects.filter(
             user_id=user.id,
@@ -196,20 +204,18 @@ class MovieQuerySet(models.QuerySet):
             genre_combo_score=Coalesce(Cast(Subquery(genre_score_subquery), FloatField()), Value(0.0)),
             director_score=Coalesce(Cast(Subquery(director_score_subquery), FloatField()), Value(0.0)),
             type_score=Coalesce(Cast(Subquery(type_score_subquery), FloatField()), Value(0.0)),
-            popularity_score=Case(
-                When(real_ratings_count__gte=20, then=Value(10.0)),
-                When(real_ratings_count__gte=10, then=Value(7.0)),
-                When(real_ratings_count__gte=5, then=Value(4.0)),
-                default=Value(0.0),
-                output_field=FloatField(),
-            ),
+        ).annotate(
+            user_affinity_score=(
+                F("genre_combo_score") * Value(0.60)
+                + F("director_score") * Value(0.25)
+                + F("type_score") * Value(0.15)
+            )
         ).annotate(
             recommendation_score=(
-                F("genre_combo_score") * Value(0.60)
-                + F("director_score") * Value(0.20)
-                + F("type_score") * Value(0.10)
-                + Coalesce(F("display_rating"), Value(0.0), output_field=FloatField()) * Value(0.05)
-                + F("popularity_score") * Value(0.05)
+                F("user_affinity_score") * Value(0.55)
+                + F("ranking_quality_score") * Value(0.30)
+                + F("ranking_confidence_score") * Value(1.00)
+                + F("recency_score") * Value(0.15)
             )
         )
 
