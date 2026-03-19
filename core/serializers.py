@@ -212,8 +212,8 @@ class MovieListSerializer(serializers.ModelSerializer):
             "id", "author",
             "title_english", "title_spanish",
             "type", "genre", "release_year",
-            "director", "cast_members",
-            "image", "external_rating",
+            "director", "cast_members", "synopsis",
+            "image", "external_rating", "external_votes",
             "real_ratings_count", "real_ratings_avg",
             "display_rating", "my_rating",
         ]
