@@ -101,6 +101,27 @@ Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,tt
         self.assertIn("Registros existentes actualizados: 1", output)
         self.assertIn("Omitidas por duplicado: 1", output)
 
+    def test_import_movies_does_not_queue_unsaved_movies_for_bulk_update(self):
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,imdb_id,external_votes
+Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,,100
+Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,tt1375666,200
+"""
+        csv_path = self._write_csv(csv_content)
+        out = io.StringIO()
+
+        call_command("import_movies", str(csv_path), stdout=out)
+
+        movie = Movie.objects.get(title_english="Inception")
+
+        self.assertEqual(Movie.objects.count(), 1)
+        self.assertEqual(movie.imdb_id, "tt1375666")
+        self.assertEqual(movie.external_votes, 200)
+
+        output = out.getvalue()
+        self.assertIn("Creadas: 1", output)
+        self.assertIn("Registros existentes actualizados: 0", output)
+        self.assertIn("Omitidas por duplicado: 1", output)
+
     def test_import_movies_uses_given_author(self):
         alt_user = get_user_model().objects.create_user(
             username="catalog_admin", email="catalog@example.com", password="test1234"

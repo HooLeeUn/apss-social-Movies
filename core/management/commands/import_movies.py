@@ -100,6 +100,7 @@ class Command(BaseCommand):
                 "id": movie_id,
                 "imdb_id": self._clean_text(imdb_id),
                 "external_votes": external_votes,
+                "pending_create": None,
             }
 
         self.stdout.write(
@@ -135,26 +136,37 @@ class Command(BaseCommand):
                     existing_movie = existing_movies.get(key)
                     if existing_movie is not None:
                         duplicate_count += 1
-                        update_fields = {}
                         csv_imdb_id = movie_payload["imdb_id"]
                         csv_external_votes = movie_payload["external_votes"]
+                        pending_create = existing_movie.get("pending_create")
+
+                        if pending_create is not None:
+                            if csv_imdb_id and not pending_create.imdb_id:
+                                pending_create.imdb_id = csv_imdb_id
+                                existing_movie["imdb_id"] = csv_imdb_id
+
+                            if (
+                                movie_payload["external_votes_provided"]
+                                and csv_external_votes != pending_create.external_votes
+                            ):
+                                pending_create.external_votes = csv_external_votes
+                                existing_movie["external_votes"] = csv_external_votes
+                            continue
 
                         if csv_imdb_id and not existing_movie["imdb_id"]:
-                            update_fields["imdb_id"] = csv_imdb_id
+                            Movie.objects.filter(pk=existing_movie["id"], imdb_id__isnull=True).update(
+                                imdb_id=csv_imdb_id
+                            )
                             existing_movie["imdb_id"] = csv_imdb_id
 
                         if (
                             movie_payload["external_votes_provided"]
                             and csv_external_votes != existing_movie["external_votes"]
                         ):
-                            update_fields["external_votes"] = csv_external_votes
                             existing_movie["external_votes"] = csv_external_votes
-
-                        if update_fields:
                             to_update.append(
                                 Movie(
                                     id=existing_movie["id"],
-                                    imdb_id=existing_movie["imdb_id"],
                                     external_votes=existing_movie["external_votes"],
                                 )
                             )
@@ -169,11 +181,13 @@ class Command(BaseCommand):
                         for key, value in movie_payload.items()
                         if key != "external_votes_provided"
                     }
-                    to_create.append(Movie(author=author, image=None, **create_payload))
+                    pending_movie = Movie(author=author, image=None, **create_payload)
+                    to_create.append(pending_movie)
                     existing_movies[key] = {
                         "id": None,
                         "imdb_id": movie_payload["imdb_id"],
                         "external_votes": movie_payload["external_votes"],
+                        "pending_create": pending_movie,
                     }
 
                     if len(to_create) >= self.BATCH_SIZE:
@@ -214,9 +228,13 @@ class Command(BaseCommand):
         return len(created)
 
     def _flush_existing_updates(self, items):
+        persisted_items = [item for item in items if item.pk]
+        if not persisted_items:
+            return 0
+
         with transaction.atomic():
-            Movie.objects.bulk_update(items, ["imdb_id", "external_votes"], batch_size=self.BATCH_SIZE)
-        return len(items)
+            Movie.objects.bulk_update(persisted_items, ["external_votes"], batch_size=self.BATCH_SIZE)
+        return len(persisted_items)
 
     def _build_movie_payload(self, row):
         title_english = self._clean_text(row.get("title_english"))
