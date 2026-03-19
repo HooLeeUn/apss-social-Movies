@@ -14,7 +14,7 @@ class Command(BaseCommand):
         "Importa películas desde un CSV consolidado al modelo Movie. "
         "Columnas esperadas: title_english,title_spanish,type,genre,release_year,"
         "director,cast_members,external_rating\n"
-        "Columna opcional soportada: imdb_id"
+        "Columnas opcionales soportadas: imdb_id, external_votes"
     )
 
     TYPE_MOVIE_ALIASES = {
@@ -57,7 +57,7 @@ class Command(BaseCommand):
         parser.epilog = (
             "Ejemplo de encabezado CSV: "
             "title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating"
-            "[,imdb_id]"
+            "[,imdb_id][,external_votes]"
         )
 
     def handle(self, *args, **options):
@@ -79,7 +79,7 @@ class Command(BaseCommand):
         total_rows = 0
         created_count = 0
         duplicate_count = 0
-        updated_imdb_count = 0
+        updated_existing_count = 0
         error_count = 0
 
         self.stdout.write(self.style.NOTICE(f"Iniciando importación desde: {csv_path}"))
@@ -92,11 +92,15 @@ class Command(BaseCommand):
 
         existing_movies = {}
         existing_rows = Movie.objects.values_list(
-            "id", "title_english", "release_year", "type", "imdb_id"
+            "id", "title_english", "release_year", "type", "imdb_id", "external_votes"
         ).iterator(chunk_size=10000)
-        for movie_id, title_english, release_year, movie_type, imdb_id in existing_rows:
+        for movie_id, title_english, release_year, movie_type, imdb_id, external_votes in existing_rows:
             key = self._build_key(title_english, release_year, movie_type)
-            existing_movies[key] = {"id": movie_id, "imdb_id": self._clean_text(imdb_id)}
+            existing_movies[key] = {
+                "id": movie_id,
+                "imdb_id": self._clean_text(imdb_id),
+                "external_votes": external_votes,
+            }
 
         self.stdout.write(
             self.style.NOTICE(
@@ -131,18 +135,46 @@ class Command(BaseCommand):
                     existing_movie = existing_movies.get(key)
                     if existing_movie is not None:
                         duplicate_count += 1
+                        update_fields = {}
                         csv_imdb_id = movie_payload["imdb_id"]
+                        csv_external_votes = movie_payload["external_votes"]
+
                         if csv_imdb_id and not existing_movie["imdb_id"]:
-                            to_update.append(Movie(id=existing_movie["id"], imdb_id=csv_imdb_id))
+                            update_fields["imdb_id"] = csv_imdb_id
                             existing_movie["imdb_id"] = csv_imdb_id
 
+                        if (
+                            movie_payload["external_votes_provided"]
+                            and csv_external_votes != existing_movie["external_votes"]
+                        ):
+                            update_fields["external_votes"] = csv_external_votes
+                            existing_movie["external_votes"] = csv_external_votes
+
+                        if update_fields:
+                            to_update.append(
+                                Movie(
+                                    id=existing_movie["id"],
+                                    imdb_id=existing_movie["imdb_id"],
+                                    external_votes=existing_movie["external_votes"],
+                                )
+                            )
+
                             if len(to_update) >= self.BATCH_SIZE:
-                                updated_imdb_count += self._flush_imdb_updates(to_update)
+                                updated_existing_count += self._flush_existing_updates(to_update)
                                 to_update.clear()
                         continue
 
-                    to_create.append(Movie(author=author, image=None, **movie_payload))
-                    existing_movies[key] = {"id": None, "imdb_id": movie_payload["imdb_id"]}
+                    create_payload = {
+                        key: value
+                        for key, value in movie_payload.items()
+                        if key != "external_votes_provided"
+                    }
+                    to_create.append(Movie(author=author, image=None, **create_payload))
+                    existing_movies[key] = {
+                        "id": None,
+                        "imdb_id": movie_payload["imdb_id"],
+                        "external_votes": movie_payload["external_votes"],
+                    }
 
                     if len(to_create) >= self.BATCH_SIZE:
                         created_count += self._flush_batch(to_create)
@@ -158,7 +190,7 @@ class Command(BaseCommand):
                         self.style.NOTICE(
                             f"Progreso: {total_rows} filas leídas | "
                             f"creadas={created_count} | "
-                            f"actualizadas_imdb={updated_imdb_count} | "
+                            f"actualizadas_existentes={updated_existing_count} | "
                             f"duplicadas={duplicate_count} | "
                             f"errores={error_count}"
                         )
@@ -167,12 +199,12 @@ class Command(BaseCommand):
         if to_create:
             created_count += self._flush_batch(to_create)
         if to_update:
-            updated_imdb_count += self._flush_imdb_updates(to_update)
+            updated_existing_count += self._flush_existing_updates(to_update)
 
         self.stdout.write(self.style.SUCCESS("Importación finalizada."))
         self.stdout.write(f"Total filas leídas: {total_rows}")
         self.stdout.write(f"Creadas: {created_count}")
-        self.stdout.write(f"IMDb ID actualizados en existentes: {updated_imdb_count}")
+        self.stdout.write(f"Registros existentes actualizados: {updated_existing_count}")
         self.stdout.write(f"Omitidas por duplicado: {duplicate_count}")
         self.stdout.write(f"Omitidas por error: {error_count}")
 
@@ -181,15 +213,17 @@ class Command(BaseCommand):
             created = Movie.objects.bulk_create(items, batch_size=self.BATCH_SIZE)
         return len(created)
 
-    def _flush_imdb_updates(self, items):
+    def _flush_existing_updates(self, items):
         with transaction.atomic():
-            Movie.objects.bulk_update(items, ["imdb_id"], batch_size=self.BATCH_SIZE)
+            Movie.objects.bulk_update(items, ["imdb_id", "external_votes"], batch_size=self.BATCH_SIZE)
         return len(items)
 
     def _build_movie_payload(self, row):
         title_english = self._clean_text(row.get("title_english"))
         if not title_english:
             raise ValueError("title_english es obligatorio para crear Movie")
+
+        external_votes = self._parse_external_votes(row.get("external_votes"))
 
         return {
             "title_english": title_english,
@@ -201,6 +235,8 @@ class Command(BaseCommand):
             "director": self._clean_text(row.get("director")),
             "cast_members": self._clean_text(row.get("cast_members")),
             "external_rating": self._parse_rating(row.get("external_rating")),
+            "external_votes": external_votes if external_votes is not None else 0,
+            "external_votes_provided": external_votes is not None,
             "imdb_id": self._clean_text(row.get("imdb_id")),
         }
 
@@ -265,3 +301,19 @@ class Command(BaseCommand):
             return None
 
         return decimal_value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+    @staticmethod
+    def _parse_external_votes(raw_votes):
+        value = Command._clean_text(raw_votes)
+        if not value:
+            return None
+
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if not digits:
+            return None
+
+        votes = int(digits)
+        if votes < 0:
+            return None
+
+        return votes
