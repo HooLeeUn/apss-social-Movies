@@ -266,6 +266,34 @@ class FeedMoviesEndpointTests(TestCase):
         )
         self.url = reverse("feed-movies")
 
+    def _create_movie(self, **overrides):
+        data = {
+            "author": self.author,
+            "title_english": overrides.pop("title_english", "Feed Movie"),
+            "genre": overrides.pop("genre", "Drama"),
+            "type": overrides.pop("type", Movie.MOVIE),
+            "external_rating": overrides.pop("external_rating", 8.0),
+            "external_votes": overrides.pop("external_votes", 0),
+        }
+        data.update(overrides)
+        return Movie.objects.create(**data)
+
+    def _bulk_rate_movie(self, movie, total_ratings, score, username_prefix):
+        users = get_user_model().objects.bulk_create(
+            [
+                get_user_model()(
+                    username=f"{username_prefix}_{index}",
+                    email=f"{username_prefix}_{index}@example.com",
+                )
+                for index in range(total_ratings)
+            ],
+            batch_size=1000,
+        )
+        MovieRating.objects.bulk_create(
+            [MovieRating(user=user, movie=movie, score=score) for user in users],
+            batch_size=1000,
+        )
+
     def test_feed_requires_authentication_and_returns_200_for_authenticated_user(self):
         anon_response = self.client.get(self.url)
         self.assertEqual(anon_response.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -288,21 +316,18 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.data["results"][0]["synopsis"], "")
 
     def test_feed_excludes_rated_movies_by_default(self):
-        rated_movie = Movie.objects.create(
-            author=self.author,
+        rated_movie = self._create_movie(
             title_english="Already Rated",
             genre="Action, Comedy",
-            type=Movie.MOVIE,
             release_year=2021,
             external_rating=7.0,
         )
-        fresh_movie = Movie.objects.create(
-            author=self.author,
+        fresh_movie = self._create_movie(
             title_english="Fresh Pick",
             genre="Drama",
-            type=Movie.MOVIE,
             release_year=2022,
             external_rating=8.0,
+            external_votes=6000,
         )
         MovieRating.objects.create(user=self.user, movie=rated_movie, score=9)
 
@@ -314,14 +339,15 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(titles, [fresh_movie.title_english])
 
     def test_feed_orders_by_recommendation_score(self):
-        preferred_movie = Movie.objects.create(
-            author=self.author,
+        UserTasteProfile.objects.create(user=self.user, ratings_count=3)
+
+        preferred_movie = self._create_movie(
             title_english="Preferred Combo",
             genre="Comedy, Action",
-            type=Movie.MOVIE,
             director="Christopher Nolan",
             release_year=2024,
             external_rating=6.0,
+            external_votes=7000,
         )
         Movie.objects.create(
             author=self.author,
@@ -331,6 +357,7 @@ class FeedMoviesEndpointTests(TestCase):
             director="Other Director",
             release_year=2025,
             external_rating=9.5,
+            external_votes=100,
         )
 
         UserGenrePreference.objects.create(user=self.user, genre="Action|Comedy", count_10=1)
@@ -345,13 +372,11 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(titles[0], preferred_movie.title_english)
 
     def test_feed_for_user_without_taste_profile_does_not_break(self):
-        high_rated = Movie.objects.create(
-            author=self.author,
+        high_rated = self._create_movie(
             title_english="Top Rated",
-            genre="Drama",
-            type=Movie.MOVIE,
             release_year=2020,
             external_rating=9.1,
+            external_votes=6500,
         )
         Movie.objects.create(
             author=self.author,
@@ -360,6 +385,7 @@ class FeedMoviesEndpointTests(TestCase):
             type=Movie.MOVIE,
             release_year=2024,
             external_rating=7.2,
+            external_votes=1500,
         )
 
         self.client.force_authenticate(user=self.user)
@@ -370,21 +396,17 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(titles[0], high_rated.title_english)
 
     def test_feed_orders_null_release_years_last(self):
-        recent_movie = Movie.objects.create(
-            author=self.author,
+        recent_movie = self._create_movie(
             title_english="Recent Year",
-            genre="Drama",
-            type=Movie.MOVIE,
             release_year=2024,
             external_rating=8.0,
+            external_votes=6500,
         )
-        null_year_movie = Movie.objects.create(
-            author=self.author,
+        null_year_movie = self._create_movie(
             title_english="Unknown Year",
-            genre="Drama",
-            type=Movie.MOVIE,
             release_year=None,
             external_rating=8.0,
+            external_votes=6500,
         )
 
         self.client.force_authenticate(user=self.user)
@@ -393,6 +415,93 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         titles = [item["title_english"] for item in response.data["results"]]
         self.assertEqual(titles[:2], [recent_movie.title_english, null_year_movie.title_english])
+
+    def test_feed_does_not_overprioritize_high_rating_with_low_confidence(self):
+        trusted_movie = self._create_movie(
+            title_english="Trusted Consensus",
+            external_rating=8.1,
+            external_votes=6500,
+            release_year=2021,
+        )
+        flashy_movie = self._create_movie(
+            title_english="Flashy But Thin",
+            external_rating=9.8,
+            external_votes=100,
+            release_year=2025,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [trusted_movie.title_english, flashy_movie.title_english])
+
+    def test_feed_prioritizes_titles_with_5000_real_ratings(self):
+        real_consensus = self._create_movie(
+            title_english="Real Consensus",
+            external_rating=9.8,
+            external_votes=12000,
+            release_year=2023,
+        )
+        external_only = self._create_movie(
+            title_english="External Favorite",
+            external_rating=7.2,
+            external_votes=6500,
+            release_year=2024,
+        )
+        self._bulk_rate_movie(real_consensus, total_ratings=5000, score=8, username_prefix="feed_real_consensus")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [real_consensus.title_english, external_only.title_english])
+
+    def test_feed_can_prioritize_external_consensus_without_internal_mass(self):
+        external_consensus = self._create_movie(
+            title_english="External Consensus",
+            external_rating=8.6,
+            external_votes=6500,
+            release_year=2022,
+        )
+        internal_but_small = self._create_movie(
+            title_english="Internal But Small",
+            external_rating=7.0,
+            external_votes=300,
+            release_year=2024,
+        )
+        self._bulk_rate_movie(external_consensus, total_ratings=12, score=5, username_prefix="feed_external_consensus")
+        self._bulk_rate_movie(internal_but_small, total_ratings=200, score=8, username_prefix="feed_internal_small")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [external_consensus.title_english, internal_but_small.title_english])
+
+    def test_feed_uses_release_year_as_reasonable_tiebreaker(self):
+        older_movie = self._create_movie(
+            title_english="Older Twin",
+            external_rating=8.0,
+            external_votes=6500,
+            release_year=2021,
+        )
+        newer_movie = self._create_movie(
+            title_english="Newer Twin",
+            external_rating=8.0,
+            external_votes=6500,
+            release_year=2024,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [newer_movie.title_english, older_movie.title_english])
 
     def test_movies_list_endpoint_still_works(self):
         Movie.objects.create(
