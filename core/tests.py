@@ -40,10 +40,10 @@ class ImportMoviesCommandTests(TestCase):
         return csv_path
 
     def test_import_movies_creates_records_and_skips_duplicates(self):
-        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating
-Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8
-Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8
-Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,external_votes
+Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,2500000
+Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,2500000
+Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4,
 """
         csv_path = self._write_csv(csv_content)
         out = io.StringIO()
@@ -56,6 +56,7 @@ Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
         self.assertEqual(inception.type, Movie.MOVIE)
         self.assertEqual(inception.release_year, 2010)
         self.assertEqual(float(inception.external_rating), 8.8)
+        self.assertEqual(inception.external_votes, 2500000)
         self.assertEqual(inception.genre_key, "Sci-Fi")
         self.assertEqual(inception.author, self.author)
         self.assertIsNone(inception.image)
@@ -67,6 +68,37 @@ Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4
         output = out.getvalue()
         self.assertIn("Total filas leídas: 3", output)
         self.assertIn("Creadas: 2", output)
+        self.assertIn("Omitidas por duplicado: 1", output)
+
+    def test_import_movies_updates_external_votes_and_missing_imdb_for_existing_movies(self):
+        existing_movie = Movie.objects.create(
+            author=self.author,
+            title_english="Inception",
+            title_spanish="El origen",
+            type=Movie.MOVIE,
+            genre="Sci-Fi",
+            release_year=2010,
+            director="Christopher Nolan",
+            cast_members="Leonardo DiCaprio",
+            external_rating=8.8,
+        )
+        csv_content = """title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,imdb_id,external_votes
+Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,tt1375666,2500000
+"""
+        csv_path = self._write_csv(csv_content)
+        out = io.StringIO()
+
+        call_command("import_movies", str(csv_path), stdout=out)
+
+        existing_movie.refresh_from_db()
+
+        self.assertEqual(Movie.objects.count(), 1)
+        self.assertEqual(existing_movie.imdb_id, "tt1375666")
+        self.assertEqual(existing_movie.external_votes, 2500000)
+
+        output = out.getvalue()
+        self.assertIn("Creadas: 0", output)
+        self.assertIn("Registros existentes actualizados: 1", output)
         self.assertIn("Omitidas por duplicado: 1", output)
 
     def test_import_movies_uses_given_author(self):
