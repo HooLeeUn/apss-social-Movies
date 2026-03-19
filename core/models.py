@@ -80,10 +80,38 @@ class Post(models.Model):
 
 
 class MovieQuerySet(models.QuerySet):
+    RANKING_CONFIDENCE_THRESHOLD = 5000.0
+    DISPLAY_RATING_THRESHOLD = 100.0
+
     def with_rating_stats(self):
         return self.annotate(
             real_ratings_count=Count("movie_ratings", distinct=True),
             real_ratings_avg=Avg("movie_ratings__score"),
+        )
+
+    def with_rating_signals(self):
+        required_annotations = {
+            "real_ratings_count",
+            "real_ratings_avg",
+            "_external_rating_float",
+            "_real_ratings_avg_float",
+            "_external_rating_for_mix",
+            "_real_ratings_count_float",
+            "_external_votes_float",
+        }
+        if required_annotations.issubset(self.query.annotations):
+            return self
+
+        qs = self
+        if {"real_ratings_count", "real_ratings_avg"}.difference(self.query.annotations):
+            qs = qs.with_rating_stats()
+
+        return qs.annotate(
+            _external_rating_float=Cast("external_rating", FloatField()),
+            _real_ratings_avg_float=Coalesce(F("real_ratings_avg"), Value(0.0), output_field=FloatField()),
+            _external_rating_for_mix=Coalesce(Cast("external_rating", FloatField()), Value(0.0), output_field=FloatField()),
+            _real_ratings_count_float=Cast(F("real_ratings_count"), FloatField()),
+            _external_votes_float=Cast(F("external_votes"), FloatField()),
         )
 
     def with_my_rating(self, user):
@@ -100,27 +128,54 @@ class MovieQuerySet(models.QuerySet):
         )
 
     def with_display_rating(self):
-        return self.with_rating_stats().annotate(
-            _external_rating_float=Cast("external_rating", FloatField()),
-            _real_ratings_avg_float=Coalesce(F("real_ratings_avg"), Value(0.0), output_field=FloatField()),
-            _external_rating_for_mix=Coalesce(Cast("external_rating", FloatField()), Value(0.0), output_field=FloatField()),
-        ).annotate(
+        return self.with_rating_signals().annotate(
             display_rating=Case(
                 When(real_ratings_count=0, then=F("_external_rating_float")),
-                When(real_ratings_count__gte=100, then=F("_real_ratings_avg_float")),
+                When(real_ratings_count__gte=self.DISPLAY_RATING_THRESHOLD, then=F("_real_ratings_avg_float")),
                 default=(
                     (
-                        F("_external_rating_for_mix") * (Value(100.0) - Cast(F("real_ratings_count"), FloatField()))
+                        F("_external_rating_for_mix")
+                        * (Value(self.DISPLAY_RATING_THRESHOLD) - F("_real_ratings_count_float"))
                     ) + (
-                        F("_real_ratings_avg_float") * Cast(F("real_ratings_count"), FloatField())
+                        F("_real_ratings_avg_float") * F("_real_ratings_count_float")
                     )
-                ) / Value(100.0),
+                ) / Value(self.DISPLAY_RATING_THRESHOLD),
                 output_field=FloatField(),
             )
         )
 
+    def with_ranking_scores(self):
+        threshold = self.RANKING_CONFIDENCE_THRESHOLD
+        return self.with_rating_signals().annotate(
+            _ranking_primary_quality=Case(
+                When(real_ratings_count__gte=threshold, then=F("_real_ratings_avg_float")),
+                When(external_votes__gte=threshold, then=Coalesce(F("_external_rating_float"), F("_real_ratings_avg_float"))),
+                When(real_ratings_count__gte=F("external_votes"), then=Coalesce(F("_real_ratings_avg_float"), F("_external_rating_float"), Value(0.0))),
+                default=Coalesce(F("_external_rating_float"), F("_real_ratings_avg_float"), Value(0.0)),
+                output_field=FloatField(),
+            ),
+            _ranking_primary_votes=Case(
+                When(real_ratings_count__gte=threshold, then=F("_real_ratings_count_float")),
+                When(external_votes__gte=threshold, then=F("_external_votes_float")),
+                When(real_ratings_count__gte=F("external_votes"), then=F("_real_ratings_count_float")),
+                default=F("_external_votes_float"),
+                output_field=FloatField(),
+            ),
+        ).annotate(
+            ranking_confidence_score=Case(
+                When(_ranking_primary_votes__gte=threshold, then=Value(1.0)),
+                default=F("_ranking_primary_votes") / Value(threshold * 2.0),
+                output_field=FloatField(),
+            ),
+            ranking_quality_score=F("_ranking_primary_quality") * Case(
+                When(_ranking_primary_votes__gte=threshold, then=Value(1.0)),
+                default=F("_ranking_primary_votes") / Value(threshold * 2.0),
+                output_field=FloatField(),
+            ),
+        )
+
     def feed_for_user(self, user, include_recommendation_score=True):
-        qs = self.with_display_rating().with_my_rating(user)
+        qs = self.with_display_rating().with_ranking_scores().with_my_rating(user)
         if not include_recommendation_score:
             return qs
 

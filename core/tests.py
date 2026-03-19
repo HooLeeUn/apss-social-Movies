@@ -169,6 +169,92 @@ class MovieGenreKeyTests(TestCase):
         self.assertEqual(movie.genre_key, "Action|Comedy|Drama")
 
 
+class MovieQuerySetAnnotationTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user_model = get_user_model()
+        cls.author = cls.user_model.objects.create_user(
+            username="ratings_author", email="ratings-author@example.com", password="test1234"
+        )
+
+    def _create_movie(self, **overrides):
+        data = {
+            "author": self.author,
+            "title_english": overrides.pop("title_english", "Annotated Movie"),
+            "type": overrides.pop("type", Movie.MOVIE),
+            "external_rating": overrides.pop("external_rating", 8.0),
+            "external_votes": overrides.pop("external_votes", 0),
+        }
+        data.update(overrides)
+        return Movie.objects.create(**data)
+
+    def _bulk_rate_movie(self, movie, total_ratings, score, username_prefix):
+        users = self.user_model.objects.bulk_create(
+            [
+                self.user_model(
+                    username=f"{username_prefix}_{index}",
+                    email=f"{username_prefix}_{index}@example.com",
+                )
+                for index in range(total_ratings)
+            ],
+            batch_size=1000,
+        )
+        MovieRating.objects.bulk_create(
+            [MovieRating(user=user, movie=movie, score=score) for user in users],
+            batch_size=1000,
+        )
+
+    def test_ranking_scores_prefer_real_ratings_after_5000_votes(self):
+        movie = self._create_movie(title_english="Real Consensus", external_rating=9.8, external_votes=12000)
+        self._bulk_rate_movie(movie, total_ratings=5000, score=7, username_prefix="real_consensus")
+
+        annotated_movie = Movie.objects.with_ranking_scores().get(pk=movie.pk)
+
+        self.assertEqual(annotated_movie.real_ratings_count, 5000)
+        self.assertAlmostEqual(annotated_movie.real_ratings_avg, 7.0)
+        self.assertAlmostEqual(annotated_movie.ranking_confidence_score, 1.0)
+        self.assertAlmostEqual(annotated_movie.ranking_quality_score, 7.0)
+
+    def test_ranking_scores_prefer_external_source_when_external_votes_reach_5000_first(self):
+        movie = self._create_movie(title_english="External Consensus", external_rating=8.6, external_votes=6500)
+        self._bulk_rate_movie(movie, total_ratings=12, score=5, username_prefix="external_consensus")
+
+        annotated_movie = Movie.objects.with_ranking_scores().get(pk=movie.pk)
+
+        self.assertEqual(annotated_movie.real_ratings_count, 12)
+        self.assertAlmostEqual(annotated_movie.real_ratings_avg, 5.0)
+        self.assertAlmostEqual(annotated_movie.ranking_confidence_score, 1.0)
+        self.assertAlmostEqual(annotated_movie.ranking_quality_score, 8.6)
+
+    def test_ranking_scores_downweight_low_confidence_titles(self):
+        movie = self._create_movie(title_english="Low Confidence", external_rating=9.5, external_votes=4000)
+        self._bulk_rate_movie(movie, total_ratings=25, score=10, username_prefix="low_confidence")
+
+        annotated_movie = Movie.objects.with_ranking_scores().get(pk=movie.pk)
+
+        self.assertEqual(annotated_movie.real_ratings_count, 25)
+        self.assertAlmostEqual(annotated_movie.ranking_confidence_score, 0.4)
+        self.assertAlmostEqual(annotated_movie.ranking_quality_score, 3.8)
+
+    def test_display_rating_switches_to_real_average_at_100_votes(self):
+        movie = self._create_movie(title_english="Display Threshold", external_rating=8.0)
+        self._bulk_rate_movie(movie, total_ratings=99, score=6, username_prefix="display_threshold")
+
+        annotated_before_threshold = Movie.objects.with_display_rating().get(pk=movie.pk)
+        self.assertAlmostEqual(annotated_before_threshold.display_rating, 6.02)
+
+        extra_user = self.user_model.objects.create_user(
+            username="display_threshold_99",
+            email="display_threshold_99@example.com",
+            password="test1234",
+        )
+        MovieRating.objects.create(user=extra_user, movie=movie, score=6)
+
+        annotated_at_threshold = Movie.objects.with_display_rating().get(pk=movie.pk)
+        self.assertEqual(annotated_at_threshold.real_ratings_count, 100)
+        self.assertAlmostEqual(annotated_at_threshold.display_rating, 6.0)
+
+
 class FeedMoviesEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
