@@ -6,6 +6,7 @@ from .views import (
     ReceivedFriendshipRequestsView, SentFriendshipRequestsView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
     UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, RegisterView,
+    ReceivedDirectedCommentsView, SentDirectedCommentsView,
     MovieListView, MovieRatingView, MeTasteProfileView, FeedMoviesView,
 )
 
@@ -35,6 +36,8 @@ urlpatterns = [
     path("feed/movies/", FeedMoviesView.as_view(), name="feed-movies"),
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
     path("movies/<int:pk>/comments/", MovieCommentsListCreateView.as_view(), name="movie-comments"),
+    path("comments/directed/received/", ReceivedDirectedCommentsView.as_view(), name="directed-comments-received"),
+    path("comments/directed/sent/", SentDirectedCommentsView.as_view(), name="directed-comments-sent"),
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
     path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),
 ]

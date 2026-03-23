@@ -243,26 +243,12 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
-    target_user = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
-        required=False,
-        allow_null=True,
-    )
+    target_user = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = Comment
         fields = ["id", "author", "movie", "target_user", "body", "visibility", "created_at", "updated_at"]
-        read_only_fields = ["id", "author", "movie", "created_at", "updated_at"]
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        visibility = attrs.get("visibility", Comment.VISIBILITY_PUBLIC)
-        target_user = attrs.get("target_user")
-
-        if visibility == Comment.VISIBILITY_MENTIONED and target_user is None:
-            raise serializers.ValidationError({"target_user": "Target user is required for mentioned comments."})
-
-        return attrs
+        read_only_fields = ["id", "author", "movie", "target_user", "visibility", "created_at", "updated_at"]
 
 
 class MovieListSerializer(serializers.ModelSerializer):
