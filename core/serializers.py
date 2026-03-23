@@ -7,6 +7,7 @@ from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
 from .models import (
     Comment,
+    Friendship,
     Movie,
     Post,
     Rating,
@@ -19,35 +20,81 @@ from .models import (
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
 # porque los stats vienen por annotate() desde la vista.
-from .models import Profile
+from .models import Follow, Profile
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
-        
+    is_public = serializers.BooleanField(source="profile.is_public", read_only=True)
+
     followers_count = serializers.IntegerField(read_only=True)
     following_count = serializers.IntegerField(read_only=True)
     posts_count = serializers.IntegerField(read_only=True)
     avg_post_rating = serializers.FloatField(read_only=True)
     is_following = serializers.SerializerMethodField()
+    friendship_status = serializers.SerializerMethodField()
+    can_follow = serializers.SerializerMethodField()
+    can_send_friend_request = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "username",
-            "bio", "avatar",
+            "bio", "avatar", "is_public",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
-            "is_following",
+            "is_following", "friendship_status",
+            "can_follow", "can_send_friend_request",
         ]
         
+    def _get_friendship(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated or obj == request.user:
+            return None
+        return Friendship.between(request.user, obj).first()
+
     def get_is_following(self, obj):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
             return False
         return obj.followers.filter(follower=request.user).exists()
-    
+
+    def get_friendship_status(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return "none"
+        if obj == request.user:
+            return "self"
+
+        friendship = self._get_friendship(obj)
+        if not friendship:
+            return "none"
+        if friendship.status == Friendship.STATUS_ACCEPTED:
+            return Friendship.STATUS_ACCEPTED
+        if friendship.status == Friendship.STATUS_PENDING:
+            return "pending_sent" if friendship.requester_id == request.user.id else "pending_received"
+        return "none"
+
+    def get_can_follow(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated or obj == request.user:
+            return False
+        profile = obj.profile if hasattr(obj, "profile") else None
+        if profile and not profile.is_public:
+            return False
+        return not Follow.objects.filter(follower=request.user, following=obj).exists()
+
+    def get_can_send_friend_request(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated or obj == request.user:
+            return False
+
+        friendship = self._get_friendship(obj)
+        if not friendship:
+            return True
+        return friendship.status in {Friendship.STATUS_REJECTED, Friendship.STATUS_CANCELLED}
+
     def get_avatar(self, obj):
         if hasattr(obj, "profile") and obj.profile.avatar:
             request = self.context.get("request")
@@ -60,6 +107,7 @@ class MeSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(read_only=True)
     bio = serializers.CharField(source="profile.bio", required=False, allow_blank=True)
     avatar = serializers.ImageField(source="profile.avatar", required=False)
+    is_public = serializers.BooleanField(source="profile.is_public", required=False)
     
     # read-only stats (vienen anotados en la vista)
     followers_count = serializers.IntegerField(read_only=True)
@@ -71,7 +119,7 @@ class MeSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username","email",
-            "bio", "avatar",
+            "bio", "avatar", "is_public",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
         ]
@@ -88,6 +136,9 @@ class MeSerializer(serializers.ModelSerializer):
 
         if "avatar" in profile_data:
             profile.avatar = profile_data["avatar"]
+
+        if "is_public" in profile_data:
+            profile.is_public = profile_data["is_public"]
 
         profile.save()
         return instance
@@ -291,3 +342,39 @@ class UserTasteProfileInspectSerializer(serializers.ModelSerializer):
             "type_preferences",
             "director_preferences",
         ]
+
+
+class FriendshipUserSerializer(serializers.ModelSerializer):
+    bio = serializers.CharField(source="profile.bio", read_only=True)
+    avatar = serializers.SerializerMethodField()
+    is_public = serializers.BooleanField(source="profile.is_public", read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "bio", "avatar", "is_public"]
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class FriendshipSerializer(serializers.ModelSerializer):
+    requester = serializers.CharField(source="requester.username", read_only=True)
+    recipient = serializers.SerializerMethodField()
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Friendship
+        fields = ["id", "status", "requester", "recipient", "user", "created_at", "updated_at"]
+
+    def get_recipient(self, obj):
+        return obj.recipient.username
+
+    def get_user(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        return FriendshipUserSerializer(obj.other_user(request.user), context=self.context).data

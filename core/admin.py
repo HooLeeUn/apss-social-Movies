@@ -5,6 +5,7 @@ from .models import (
     Post,
     Rating,
     Follow,
+    Friendship,
     Comment,
     Movie,
     MovieRating,
@@ -52,6 +53,13 @@ class RatingAdmin(admin.ModelAdmin):
 class FollowAdmin(admin.ModelAdmin):
     list_display = ("id", "follower", "following", "created_at")
     search_fields = ("follower__username", "following__username")
+
+
+@admin.register(Friendship)
+class FriendshipAdmin(admin.ModelAdmin):
+    list_display = ("id", "requester", "user1", "user2", "status", "created_at", "updated_at")
+    list_filter = ("status", "created_at", "updated_at")
+    search_fields = ("requester__username", "user1__username", "user2__username")
 
 @admin.register(Comment)
 class CommentAdmin(admin.ModelAdmin):

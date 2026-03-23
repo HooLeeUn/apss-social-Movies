@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
-    UserProfileSerializer, MeSerializer, UserMiniSerializer,
+    FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
     PostWriteSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, UserTasteProfileInspectSerializer,
@@ -19,6 +19,7 @@ from .serializers import (
 from .models import (
     Comment,
     Follow,
+    Friendship,
     Movie,
     MovieRating,
     Post,
@@ -30,6 +31,7 @@ from .services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
@@ -99,17 +101,24 @@ class FollowToggleView(APIView):
 
     def post(self, request, username):
         """Seguir a username"""
-        target = User.objects.filter(username=username).first()
+        target = User.objects.filter(username=username).select_related("profile").first()
         if not target:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if target == request.user:
             return Response({"detail": "You cannot follow yourself."}, status=status.HTTP_400_BAD_REQUEST)
 
-        obj, created = Follow.objects.get_or_create(
-            follower=request.user,
-            following=target
-        )
+        profile = target.profile if hasattr(target, "profile") else None
+        if profile and not profile.is_public:
+            return Response({"detail": "You cannot follow a private profile."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            obj, created = Follow.objects.get_or_create(
+                follower=request.user,
+                following=target,
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": exc.message_dict if hasattr(exc, "message_dict") else exc.messages}, status=status.HTTP_400_BAD_REQUEST)
 
         # counts actualizados
         return Response({
@@ -173,6 +182,145 @@ class UserFollowingListView(ListAPIView):
             .distinct()
         )
         
+class FriendshipRequestCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, username):
+        target = User.objects.filter(username=username).select_related("profile").first()
+        if not target:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        if target == request.user:
+            return Response({"detail": "You cannot send a friendship request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
+
+        friendship = Friendship.between(request.user, target).first()
+        if friendship is None:
+            friendship = Friendship.objects.create(
+                requester=request.user,
+                user1=request.user,
+                user2=target,
+                status=Friendship.STATUS_PENDING,
+            )
+            serializer = FriendshipSerializer(friendship, context={"request": request})
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        if friendship.status == Friendship.STATUS_ACCEPTED:
+            return Response({"detail": "You are already friends."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if friendship.status == Friendship.STATUS_PENDING:
+            return Response({"detail": "A friendship request is already pending."}, status=status.HTTP_400_BAD_REQUEST)
+
+        friendship.requester = request.user
+        friendship.status = Friendship.STATUS_PENDING
+        friendship.save()
+        serializer = FriendshipSerializer(friendship, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class FriendshipRequestAcceptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        friendship = get_object_or_404(Friendship.objects.select_related("user1", "user2", "requester"), pk=pk)
+        if friendship.status != Friendship.STATUS_PENDING:
+            return Response({"detail": "Only pending friendship requests can be accepted."}, status=status.HTTP_400_BAD_REQUEST)
+        if friendship.requester_id == request.user.id:
+            return Response({"detail": "You cannot accept your own friendship request."}, status=status.HTTP_400_BAD_REQUEST)
+        if friendship.other_user(friendship.requester).id != request.user.id:
+            return Response({"detail": "You cannot accept this friendship request."}, status=status.HTTP_403_FORBIDDEN)
+
+        friendship.status = Friendship.STATUS_ACCEPTED
+        friendship.save()
+        return Response(FriendshipSerializer(friendship, context={"request": request}).data, status=status.HTTP_200_OK)
+
+
+class FriendshipRequestRejectView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        friendship = get_object_or_404(Friendship.objects.select_related("user1", "user2", "requester"), pk=pk)
+        if friendship.status != Friendship.STATUS_PENDING:
+            return Response({"detail": "Only pending friendship requests can be rejected."}, status=status.HTTP_400_BAD_REQUEST)
+        if friendship.requester_id == request.user.id:
+            return Response({"detail": "You cannot reject your own friendship request."}, status=status.HTTP_400_BAD_REQUEST)
+        if friendship.other_user(friendship.requester).id != request.user.id:
+            return Response({"detail": "You cannot reject this friendship request."}, status=status.HTTP_403_FORBIDDEN)
+
+        friendship.status = Friendship.STATUS_REJECTED
+        friendship.save()
+        return Response(FriendshipSerializer(friendship, context={"request": request}).data, status=status.HTTP_200_OK)
+
+
+class FriendshipRequestCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        friendship = get_object_or_404(Friendship.objects.select_related("user1", "user2", "requester"), pk=pk)
+        if friendship.status != Friendship.STATUS_PENDING:
+            return Response({"detail": "Only pending friendship requests can be cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+        if friendship.requester_id != request.user.id:
+            return Response({"detail": "You can only cancel requests you sent."}, status=status.HTTP_403_FORBIDDEN)
+
+        friendship.status = Friendship.STATUS_CANCELLED
+        friendship.save()
+        return Response(FriendshipSerializer(friendship, context={"request": request}).data, status=status.HTTP_200_OK)
+
+
+class FriendshipDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, username):
+        target = User.objects.filter(username=username).first()
+        if not target:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        friendship = Friendship.between(request.user, target).first()
+        if not friendship or friendship.status != Friendship.STATUS_ACCEPTED:
+            return Response({"detail": "Friendship not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        friendship.requester = request.user
+        friendship.status = Friendship.STATUS_CANCELLED
+        friendship.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FriendsListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendshipSerializer
+
+    def get_queryset(self):
+        return (
+            Friendship.objects
+            .filter(status=Friendship.STATUS_ACCEPTED)
+            .filter(Q(user1=self.request.user) | Q(user2=self.request.user))
+            .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
+        )
+
+
+class ReceivedFriendshipRequestsView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendshipSerializer
+
+    def get_queryset(self):
+        return (
+            Friendship.objects
+            .filter(status=Friendship.STATUS_PENDING)
+            .filter(Q(user1=self.request.user) | Q(user2=self.request.user))
+            .exclude(requester=self.request.user)
+            .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
+        )
+
+
+class SentFriendshipRequestsView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendshipSerializer
+
+    def get_queryset(self):
+        return (
+            Friendship.objects
+            .filter(status=Friendship.STATUS_PENDING, requester=self.request.user)
+            .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
+        )
+
+
 class FeedFollowingView(ListAPIView):
     """
     Posts de gente que sigo (según Follow), ordenados por -created_at.

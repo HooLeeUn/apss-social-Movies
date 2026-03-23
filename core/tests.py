@@ -12,6 +12,8 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import (
+    Follow,
+    Friendship,
     Movie,
     MovieRating,
     build_genre_key,
@@ -729,3 +731,95 @@ class MeTasteProfileEndpointTests(TestCase):
         self.assertEqual(response.data["type_preferences"], [])
         self.assertEqual(response.data["director_preferences"], [])
         self.assertTrue(UserTasteProfile.objects.filter(user=self.user).exists())
+
+
+class SocialPrivacyAndFriendshipTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="social_user", email="social@example.com", password="test1234"
+        )
+        self.public_user = get_user_model().objects.create_user(
+            username="public_user", email="public@example.com", password="test1234"
+        )
+        self.private_user = get_user_model().objects.create_user(
+            username="private_user", email="private@example.com", password="test1234"
+        )
+        self.private_user.profile.is_public = False
+        self.private_user.profile.save(update_fields=["is_public"])
+
+    def test_cannot_follow_private_profiles(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("follow-toggle", kwargs={"username": self.private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "You cannot follow a private profile.")
+        self.assertFalse(Follow.objects.filter(follower=self.user, following=self.private_user).exists())
+
+    def test_can_send_friendship_request(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("friendship-request-create", kwargs={"username": self.private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        friendship = Friendship.objects.get()
+        self.assertEqual(friendship.requester, self.user)
+        self.assertEqual(friendship.status, Friendship.STATUS_PENDING)
+
+    def test_can_accept_friendship_request(self):
+        friendship = Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.private_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        self.client.force_authenticate(user=self.private_user)
+
+        response = self.client.post(reverse("friendship-request-accept", kwargs={"pk": friendship.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        friendship.refresh_from_db()
+        self.assertEqual(friendship.status, Friendship.STATUS_ACCEPTED)
+
+    def test_avoids_duplicate_friendship_requests(self):
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.public_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("friendship-request-create", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Friendship.objects.count(), 1)
+
+    def test_prevents_self_follow_and_self_friendship(self):
+        self.client.force_authenticate(user=self.user)
+
+        follow_response = self.client.post(reverse("follow-toggle", kwargs={"username": self.user.username}))
+        friendship_response = self.client.post(reverse("friendship-request-create", kwargs={"username": self.user.username}))
+
+        self.assertEqual(follow_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(friendship_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Follow.objects.filter(follower=self.user, following=self.user).exists())
+        self.assertFalse(Friendship.objects.filter(requester=self.user, user1=self.user, user2=self.user).exists())
+
+    def test_profile_endpoint_exposes_social_status_fields(self):
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.private_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["is_public"])
+        self.assertEqual(response.data["friendship_status"], "pending_sent")
+        self.assertFalse(response.data["can_follow"])
+        self.assertFalse(response.data["can_send_friend_request"])

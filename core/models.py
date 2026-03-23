@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value
 from django.db.models.functions import Cast
@@ -425,10 +426,107 @@ class Follow(models.Model):
 
     class Meta:
         unique_together = ('follower', 'following')
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(follower=models.F("following")),
+                name="follow_cannot_follow_self",
+            ),
+        ]
+
+    def clean(self):
+        if self.follower_id and self.following_id and self.follower_id == self.following_id:
+            raise ValidationError({"following": "You cannot follow yourself."})
+
+        if self.following_id:
+            target_user = self.following if hasattr(self, "following") else User.objects.filter(pk=self.following_id).select_related("profile").first()
+            profile = target_user.profile if target_user and hasattr(target_user, "profile") else None
+            if profile and not profile.is_public:
+                raise ValidationError({"following": "You cannot follow a private profile."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.follower.username} follows {self.following.username}"
-    
+
+
+class Friendship(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REJECTED = "rejected"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="sent_friendship_requests",
+    )
+    user1 = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="friendships_as_user1",
+    )
+    user2 = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="friendships_as_user2",
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user1", "user2"], name="unique_friendship_pair"),
+            models.CheckConstraint(
+                condition=~models.Q(user1=models.F("user2")),
+                name="friendship_users_must_differ",
+            ),
+        ]
+        ordering = ["-updated_at", "-created_at"]
+
+    def clean(self):
+        if self.user1_id and self.user2_id and self.user1_id == self.user2_id:
+            raise ValidationError("A user cannot be friends with themselves.")
+
+        if self.requester_id not in {self.user1_id, self.user2_id}:
+            raise ValidationError({"requester": "Requester must belong to the friendship pair."})
+
+    def save(self, *args, **kwargs):
+        if self.user1_id and self.user2_id and self.user1_id > self.user2_id:
+            self.user1_id, self.user2_id = self.user2_id, self.user1_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def between(cls, user_a, user_b):
+        if not user_a or not user_b:
+            return cls.objects.none()
+        user1_id, user2_id = sorted((user_a.id, user_b.id))
+        return cls.objects.filter(user1_id=user1_id, user2_id=user2_id)
+
+    def other_user(self, user):
+        if user.id == self.user1_id:
+            return self.user2
+        if user.id == self.user2_id:
+            return self.user1
+        raise ValidationError("User does not belong to this friendship.")
+
+    @property
+    def recipient(self):
+        return self.user2 if self.requester_id == self.user1_id else self.user1
+
+    def __str__(self):
+        return f"Friendship({self.user1_id}, {self.user2_id}, {self.status})"
+
+
 class Profile(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -437,6 +535,7 @@ class Profile(models.Model):
     )
     bio = models.TextField(blank=True)
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    is_public = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Profile({self.user.username})"
