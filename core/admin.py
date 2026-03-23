@@ -63,11 +63,11 @@ class FriendshipAdmin(admin.ModelAdmin):
 
 @admin.register(Comment)
 class CommentAdmin(admin.ModelAdmin):
-    list_display = ("id", "movie", "author", "created_at", "updated_at")
-    search_fields = ("body", "author__username", "movie__title_english", "movie__title_spanish")
-    list_filter = ("created_at",)
-    autocomplete_fields = ("movie", "author")
-    list_select_related = ("movie", "author")
+    list_display = ("id", "movie", "author", "visibility", "target_user", "created_at", "updated_at")
+    search_fields = ("body", "author__username", "target_user__username", "movie__title_english", "movie__title_spanish")
+    list_filter = ("visibility", "created_at")
+    autocomplete_fields = ("movie", "author", "target_user")
+    list_select_related = ("movie", "author", "target_user")
 
 
 @admin.register(Movie)

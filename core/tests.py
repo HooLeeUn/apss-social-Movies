@@ -24,6 +24,7 @@ from core.models import (
     UserTasteProfile,
     UserTypePreference,
 )
+from core.serializers import CommentSerializer
 from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
@@ -625,6 +626,61 @@ class MovieRatingEndpointTests(TestCase):
         self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
 
 
+class CommentModelAndAdminTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="comment_model_user", email="comment-model@example.com", password="test1234"
+        )
+        self.target_user = get_user_model().objects.create_user(
+            username="comment_target_user", email="comment-target@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="Interstellar",
+            type=Movie.MOVIE,
+            release_year=2014,
+        )
+
+    def test_model_defaults_visibility_to_public_when_omitted(self):
+        comment = Comment.objects.create(author=self.user, movie=self.movie, body="Comentario público")
+
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
+    def test_serializer_defaults_visibility_to_public_when_omitted(self):
+        serializer = CommentSerializer(data={"body": "Serializer comment"})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        comment = serializer.save(author=self.user, movie=self.movie)
+
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
+    def test_admin_can_create_public_comment_without_target_user(self):
+        admin_user = get_user_model().objects.create_superuser(
+            username="comment_admin",
+            email="comment-admin@example.com",
+            password="test1234",
+        )
+        self.client.force_login(admin_user)
+
+        response = self.client.post(
+            reverse("admin:core_comment_add"),
+            {
+                "author": str(self.user.pk),
+                "movie": str(self.movie.pk),
+                "body": "Creado desde admin",
+                "visibility": Comment.VISIBILITY_PUBLIC,
+                "_save": "Save",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        comment = Comment.objects.get(body="Creado desde admin")
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
+
 class MovieCommentEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -653,7 +709,11 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(comment.movie, self.movie)
         self.assertEqual(comment.author, self.user)
         self.assertEqual(comment.body, "Gran película")
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
         self.assertEqual(response.data["movie"], self.movie.pk)
+        self.assertEqual(response.data["visibility"], Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(response.data["target_user"])
 
     def test_get_lists_only_comments_for_requested_movie(self):
         other_movie = Movie.objects.create(

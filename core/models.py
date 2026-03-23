@@ -547,14 +547,43 @@ class Profile(models.Model):
 
 
 class Comment(models.Model):
+    VISIBILITY_PUBLIC = "public"
+    VISIBILITY_MENTIONED = "mentioned"
+    VISIBILITY_CHOICES = [
+        (VISIBILITY_PUBLIC, "Public"),
+        (VISIBILITY_MENTIONED, "Mentioned user only"),
+    ]
+
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="comments")
     movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="comments")
+    target_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="targeted_comments",
+        null=True,
+        blank=True,
+    )
     body = models.TextField()
+    visibility = models.CharField(
+        max_length=20,
+        choices=VISIBILITY_CHOICES,
+        default=VISIBILITY_PUBLIC,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
+
+    def clean(self):
+        super().clean()
+        if self.visibility == self.VISIBILITY_MENTIONED and not self.target_user_id:
+            raise ValidationError({"target_user": "Target user is required for mentioned comments."})
+
+    def save(self, *args, **kwargs):
+        if not self.visibility:
+            self.visibility = self.VISIBILITY_PUBLIC
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Comment({self.author_id} -> {self.movie_id})"
