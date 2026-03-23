@@ -10,15 +10,17 @@ from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
-    PostWriteSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, UserTasteProfileInspectSerializer,
 )
 from .models import (
     Comment,
+    CommentReaction,
     Follow,
     Friendship,
     Movie,
@@ -36,6 +38,19 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
+
+
+def annotate_comments_for_user(queryset, user):
+    return queryset.with_reaction_stats(user)
+
+
+def can_access_directed_comment_reactions(user, comment):
+    if comment.visibility != Comment.VISIBILITY_MENTIONED:
+        return True
+    if not user or not user.is_authenticated:
+        return False
+    return user.id in {comment.author_id, comment.target_user_id}
+
 
 
 class RegisterView(generics.CreateAPIView):
@@ -436,13 +451,14 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
         return [permissions.AllowAny()]
 
     def get_queryset(self):
-        return (
+        return annotate_comments_for_user(
             Comment.objects.filter(
                 movie_id=self.kwargs["pk"],
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at")
+            .order_by("-created_at"),
+            self.request.user,
         )
 
     def _get_mentioned_friend(self, body):
@@ -493,7 +509,10 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
+        queryset = annotate_comments_for_user(
+            Comment.objects.select_related("author", "author__profile", "movie", "target_user"),
+            self.request.user,
+        )
 
         if self.request.method not in permissions.SAFE_METHODS:
             return queryset.filter(author=self.request.user)
@@ -513,13 +532,14 @@ class ReceivedDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
-        return (
+        return annotate_comments_for_user(
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
                 target_user=self.request.user,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at")
+            .order_by("-created_at"),
+            self.request.user,
         )
 
 
@@ -528,13 +548,14 @@ class SentDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
-        return (
+        return annotate_comments_for_user(
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
                 author=self.request.user,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at")
+            .order_by("-created_at"),
+            self.request.user,
         )
 
 
@@ -672,4 +693,47 @@ class MeTasteProfileView(generics.RetrieveAPIView):
 
     def get_object(self):
         return UserTasteProfile.objects.get_or_create(user=self.request.user)[0]
-            
+
+class CommentReactionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_comment(self, pk):
+        comment = get_object_or_404(
+            Comment.objects.select_related("author", "target_user", "movie"),
+            pk=pk,
+        )
+        if not can_access_directed_comment_reactions(self.request.user, comment):
+            raise PermissionDenied("You cannot react to this comment.")
+        return comment
+
+    def put(self, request, pk):
+        comment = self.get_comment(pk)
+        serializer = CommentReactionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        reaction, created = CommentReaction.objects.update_or_create(
+            comment=comment,
+            user=request.user,
+            defaults={"reaction_type": serializer.validated_data["reaction_type"]},
+        )
+
+        annotated_comment = annotate_comments_for_user(Comment.objects.filter(pk=comment.pk), request.user).get()
+        return Response(
+            {
+                "comment": comment.id,
+                "reaction_type": reaction.reaction_type,
+                "my_reaction": annotated_comment.my_reaction,
+                "likes_count": annotated_comment.likes_count,
+                "dislikes_count": annotated_comment.dislikes_count,
+                "created": created,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        comment = self.get_comment(pk)
+        deleted, _ = CommentReaction.objects.filter(comment=comment, user=request.user).delete()
+        if not deleted:
+            return Response({"detail": "Reaction not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
