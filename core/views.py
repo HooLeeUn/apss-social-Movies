@@ -1,3 +1,4 @@
+import re
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -427,6 +428,7 @@ class PostRatingView(APIView):
 
 class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
+    mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
 
     def get_permissions(self):
         if self.request.method == "POST":
@@ -435,14 +437,45 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         return (
-            Comment.objects.filter(movie_id=self.kwargs["pk"])
-            .select_related("author", "author__profile", "movie")
+            Comment.objects.filter(
+                movie_id=self.kwargs["pk"],
+                visibility=Comment.VISIBILITY_PUBLIC,
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at")
         )
 
+    def _get_mentioned_friend(self, body):
+        if not body:
+            return None
+
+        match = self.mention_pattern.search(body)
+        if not match:
+            return None
+
+        username = match.group("username")
+        target_user = User.objects.filter(username=username).first()
+        if target_user is None or target_user == self.request.user:
+            return None
+
+        friendship = Friendship.between(self.request.user, target_user).filter(
+            status=Friendship.STATUS_ACCEPTED,
+        ).first()
+        if friendship is None:
+            return None
+
+        return target_user
+
     def perform_create(self, serializer):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
-        serializer.save(author=self.request.user, movie=movie)
+        target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
+        visibility = Comment.VISIBILITY_MENTIONED if target_user else Comment.VISIBILITY_PUBLIC
+        serializer.save(
+            author=self.request.user,
+            movie=movie,
+            target_user=target_user,
+            visibility=visibility,
+        )
 
 
 class PostCommentsListCreateView(MovieCommentsListCreateView):
@@ -460,7 +493,50 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "delete", "head", "options"]
 
     def get_queryset(self):
-        return Comment.objects.select_related("author", "author__profile", "movie")
+        queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
+
+        if self.request.method not in permissions.SAFE_METHODS:
+            return queryset.filter(author=self.request.user)
+
+        if not self.request.user.is_authenticated:
+            return queryset.filter(visibility=Comment.VISIBILITY_PUBLIC)
+
+        return queryset.filter(
+            Q(visibility=Comment.VISIBILITY_PUBLIC)
+            | Q(author=self.request.user)
+            | Q(target_user=self.request.user)
+        )
+
+
+class ReceivedDirectedCommentsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=self.request.user,
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at")
+        )
+
+
+class SentDirectedCommentsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                author=self.request.user,
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at")
+        )
+
 
 class UserPostsListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
