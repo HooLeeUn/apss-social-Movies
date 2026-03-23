@@ -5,7 +5,7 @@ from .views import (
     FriendshipRequestCancelView, FriendshipDeleteView, FriendsListView,
     ReceivedFriendshipRequestsView, SentFriendshipRequestsView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
-    UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, RegisterView,
+    UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, CommentReactionView, RegisterView,
     ReceivedDirectedCommentsView, SentDirectedCommentsView,
     MovieListView, MovieRatingView, MeTasteProfileView, FeedMoviesView,
 )
@@ -40,4 +40,5 @@ urlpatterns = [
     path("comments/directed/sent/", SentDirectedCommentsView.as_view(), name="directed-comments-sent"),
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
     path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),
+    path("comments/<int:pk>/reaction/", CommentReactionView.as_view(), name="comment-reaction"),
 ]

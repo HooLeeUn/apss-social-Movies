@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 
 from core.models import (
     Comment,
+    CommentReaction,
     Follow,
     Friendship,
     Movie,
@@ -1043,3 +1044,131 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertEqual(response.data["friendship_status"], "pending_sent")
         self.assertFalse(response.data["can_follow"])
         self.assertFalse(response.data["can_send_friend_request"])
+
+class CommentReactionAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="react_user", email="react@example.com", password="test1234"
+        )
+        self.friend = get_user_model().objects.create_user(
+            username="react_friend", email="friend@example.com", password="test1234"
+        )
+        self.stranger = get_user_model().objects.create_user(
+            username="react_stranger", email="stranger@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="Reaction Movie",
+            type=Movie.MOVIE,
+        )
+        self.public_comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body="Public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        self.directed_comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body="Directed comment",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend,
+        )
+
+    def _reaction_url(self, comment):
+        return reverse("comment-reaction", kwargs={"pk": comment.pk})
+
+    def test_user_can_only_have_one_reaction_per_comment(self):
+        self.client.force_authenticate(self.user)
+
+        first_response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction_type": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        second_response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction_type": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            CommentReaction.objects.filter(comment=self.public_comment, user=self.user).count(),
+            1,
+        )
+        self.assertTrue(first_response.data["created"])
+        self.assertFalse(second_response.data["created"])
+
+    def test_switching_like_to_dislike_updates_existing_reaction(self):
+        self.client.force_authenticate(self.user)
+
+        self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction_type": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction_type": CommentReaction.REACT_DISLIKE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            CommentReaction.objects.filter(comment=self.public_comment, user=self.user).count(),
+            1,
+        )
+        reaction = CommentReaction.objects.get(comment=self.public_comment, user=self.user)
+        self.assertEqual(reaction.reaction_type, CommentReaction.REACT_DISLIKE)
+        self.assertEqual(response.data["likes_count"], 0)
+        self.assertEqual(response.data["dislikes_count"], 1)
+        self.assertEqual(response.data["my_reaction"], CommentReaction.REACT_DISLIKE)
+
+    def test_delete_reaction_removes_it(self):
+        CommentReaction.objects.create(
+            comment=self.public_comment,
+            user=self.user,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        self.client.force_authenticate(self.user)
+
+        response = self.client.delete(self._reaction_url(self.public_comment))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(CommentReaction.objects.filter(comment=self.public_comment, user=self.user).exists())
+
+    def test_stranger_cannot_react_to_directed_comment(self):
+        self.client.force_authenticate(self.stranger)
+
+        response = self.client.put(
+            self._reaction_url(self.directed_comment),
+            {"reaction_type": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CommentReaction.objects.filter(comment=self.directed_comment, user=self.stranger).exists())
+
+    def test_comment_serializer_exposes_reaction_counters_and_my_reaction(self):
+        CommentReaction.objects.create(
+            comment=self.public_comment,
+            user=self.user,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        CommentReaction.objects.create(
+            comment=self.public_comment,
+            user=self.friend,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["likes_count"], 1)
+        self.assertEqual(response.data[0]["dislikes_count"], 1)
+        self.assertEqual(response.data[0]["my_reaction"], CommentReaction.REACT_LIKE)
+

@@ -3,7 +3,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
-from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value
+from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value, CharField
 from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
@@ -546,6 +546,29 @@ class Profile(models.Model):
         return f"Profile({self.user.username})"
 
 
+
+class CommentQuerySet(models.QuerySet):
+
+    def with_reaction_stats(self, user):
+        qs = self.annotate(
+            likes_count=Count("reactions", filter=Q(reactions__reaction_type=CommentReaction.REACT_LIKE), distinct=True),
+            dislikes_count=Count("reactions", filter=Q(reactions__reaction_type=CommentReaction.REACT_DISLIKE), distinct=True),
+        )
+
+        if not user or not user.is_authenticated:
+            return qs.annotate(my_reaction=Value(None, output_field=CharField()))
+
+        return qs.annotate(
+            my_reaction=Subquery(
+                CommentReaction.objects.filter(
+                    comment_id=OuterRef("pk"),
+                    user_id=user.id,
+                ).values("reaction_type")[:1]
+            )
+        )
+
+
+
 class Comment(models.Model):
     VISIBILITY_PUBLIC = "public"
     VISIBILITY_MENTIONED = "mentioned"
@@ -572,6 +595,8 @@ class Comment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = CommentQuerySet.as_manager()
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -587,3 +612,26 @@ class Comment(models.Model):
 
     def __str__(self):
         return f"Comment({self.author_id} -> {self.movie_id})"
+
+class CommentReaction(models.Model):
+    REACT_LIKE = "like"
+    REACT_DISLIKE = "dislike"
+    REACTION_CHOICES = [
+        (REACT_LIKE, "Like"),
+        (REACT_DISLIKE, "Dislike"),
+    ]
+
+    comment = models.ForeignKey("Comment", on_delete=models.CASCADE, related_name="reactions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="comment_reactions")
+    reaction_type = models.CharField(max_length=10, choices=REACTION_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["comment", "user"], name="unique_comment_reaction_per_user")
+        ]
+
+    def __str__(self):
+        return f"CommentReaction(comment={self.comment_id}, user={self.user_id}, reaction={self.reaction_type})"
+

@@ -7,6 +7,7 @@ from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
 from .models import (
     Comment,
+    CommentReaction,
     Friendship,
     Movie,
     Post,
@@ -244,11 +245,26 @@ class RegisterSerializer(serializers.ModelSerializer):
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     target_user = serializers.PrimaryKeyRelatedField(read_only=True)
+    likes_count = serializers.IntegerField(read_only=True)
+    dislikes_count = serializers.IntegerField(read_only=True)
+    my_reaction = serializers.CharField(read_only=True, allow_null=True)
 
     class Meta:
         model = Comment
-        fields = ["id", "author", "movie", "target_user", "body", "visibility", "created_at", "updated_at"]
-        read_only_fields = ["id", "author", "movie", "target_user", "visibility", "created_at", "updated_at"]
+        fields = [
+            "id", "author", "movie", "target_user", "body", "visibility",
+            "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
+        ]
+        read_only_fields = [
+            "id", "author", "movie", "target_user", "visibility",
+            "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
+        ]
+
+
+class CommentReactionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CommentReaction
+        fields = ["reaction_type"]
 
 
 class MovieListSerializer(serializers.ModelSerializer):
