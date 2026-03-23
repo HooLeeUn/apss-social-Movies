@@ -145,6 +145,11 @@ class MovieQuerySet(models.QuerySet):
             )
         )
 
+    def with_comment_stats(self):
+        return self.annotate(
+            comments_count=Count("comments", distinct=True),
+        )
+
     def with_ranking_scores(self):
         threshold = self.RANKING_CONFIDENCE_THRESHOLD
         return self.with_rating_signals().annotate(
@@ -543,12 +548,13 @@ class Profile(models.Model):
 
 class Comment(models.Model):
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="comments")
-    post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="comments")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="comments")
     body = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Comment({self.author_id} -> {self.post_id})"
+        return f"Comment({self.author_id} -> {self.movie_id})"

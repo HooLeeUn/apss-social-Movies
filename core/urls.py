@@ -5,7 +5,7 @@ from .views import (
     FriendshipRequestCancelView, FriendshipDeleteView, FriendsListView,
     ReceivedFriendshipRequestsView, SentFriendshipRequestsView,
     FeedFollowingView, DiscoverView, PostListCreateView, PostDetailView, PostRatingView,
-    UserPostsListView, PostCommentsListCreateView, CommentDetailView, RegisterView,
+    UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, RegisterView,
     MovieListView, MovieRatingView, MeTasteProfileView, FeedMoviesView,
 )
 
@@ -34,6 +34,7 @@ urlpatterns = [
     path("movies/", MovieListView.as_view(), name="movie-list"),
     path("feed/movies/", FeedMoviesView.as_view(), name="feed-movies"),
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
+    path("movies/<int:pk>/comments/", MovieCommentsListCreateView.as_view(), name="movie-comments"),
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
     path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),
 ]

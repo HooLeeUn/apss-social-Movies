@@ -6,12 +6,14 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import (
+    Comment,
     Follow,
     Friendship,
     Movie,
@@ -621,6 +623,80 @@ class MovieRatingEndpointTests(TestCase):
                 self.client.delete(self.url)
 
         self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
+
+
+class MovieCommentEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="comment_user", email="comment@example.com", password="test1234"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="comment_other", email="comment-other@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="Arrival",
+            type=Movie.MOVIE,
+            release_year=2016,
+        )
+        self.list_url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
+
+    def test_post_creates_comment_for_movie(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(self.list_url, {"body": "Gran película"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Comment.objects.count(), 1)
+        comment = Comment.objects.get()
+        self.assertEqual(comment.movie, self.movie)
+        self.assertEqual(comment.author, self.user)
+        self.assertEqual(comment.body, "Gran película")
+        self.assertEqual(response.data["movie"], self.movie.pk)
+
+    def test_get_lists_only_comments_for_requested_movie(self):
+        other_movie = Movie.objects.create(
+            author=self.other_user,
+            title_english="Blade Runner 2049",
+            type=Movie.MOVIE,
+            release_year=2017,
+        )
+        newest = Comment.objects.create(author=self.user, movie=self.movie, body="Primero para Arrival")
+        Comment.objects.create(author=self.other_user, movie=other_movie, body="Comentario de otra movie")
+        oldest = Comment.objects.create(author=self.other_user, movie=self.movie, body="Segundo para Arrival")
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [oldest.id, newest.id])
+        self.assertTrue(all(item["movie"] == self.movie.pk for item in response.data))
+
+    def test_comment_requires_movie_relation(self):
+        with self.assertRaises(IntegrityError):
+            Comment.objects.create(author=self.user, body="Inválido")
+
+    def test_only_author_can_update_or_delete_comment(self):
+        comment = Comment.objects.create(author=self.user, movie=self.movie, body="Original")
+        detail_url = reverse("comment-detail", kwargs={"pk": comment.pk})
+
+        self.client.force_authenticate(user=self.other_user)
+        forbidden_update = self.client.put(detail_url, {"body": "Hack"}, format="json")
+        forbidden_delete = self.client.delete(detail_url)
+
+        self.assertEqual(forbidden_update.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(forbidden_delete.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.user)
+        allowed_update = self.client.put(detail_url, {"body": "Editado"}, format="json")
+        self.assertEqual(allowed_update.status_code, status.HTTP_200_OK)
+
+        comment.refresh_from_db()
+        self.assertEqual(comment.body, "Editado")
+
+        allowed_delete = self.client.delete(detail_url)
+        self.assertEqual(allowed_delete.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Comment.objects.filter(pk=comment.pk).exists())
 
 
 class MoviePreferenceServiceTests(TestCase):

@@ -425,7 +425,7 @@ class PostRatingView(APIView):
     
 
 
-class PostCommentsListCreateView(generics.ListCreateAPIView):
+class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
 
     def get_permissions(self):
@@ -435,14 +435,23 @@ class PostCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         return (
-            Comment.objects.filter(post_id=self.kwargs["pk"])
-            .select_related("author", "author__profile", "post")
+            Comment.objects.filter(movie_id=self.kwargs["pk"])
+            .select_related("author", "author__profile", "movie")
             .order_by("-created_at")
         )
 
     def perform_create(self, serializer):
-        post = get_object_or_404(Post, pk=self.kwargs["pk"])
-        serializer.save(author=self.request.user, post=post)
+        movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
+        serializer.save(author=self.request.user, movie=movie)
+
+
+class PostCommentsListCreateView(MovieCommentsListCreateView):
+    deprecated_warning = '299 - "Deprecated endpoint. Use /api/movies/<pk>/comments/ instead."'
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Warning"] = self.deprecated_warning
+        return response
 
 
 class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -451,7 +460,7 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "delete", "head", "options"]
 
     def get_queryset(self):
-        return Comment.objects.select_related("author", "author__profile", "post")
+        return Comment.objects.select_related("author", "author__profile", "movie")
 
 class UserPostsListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
@@ -481,6 +490,7 @@ class MovieListView(generics.ListAPIView):
     def get_queryset(self):
         qs = (
             Movie.objects
+            .with_comment_stats()
             .with_display_rating()
             .select_related("author", "author__profile")
         )
@@ -505,6 +515,7 @@ class FeedMoviesView(generics.ListAPIView):
         qs = (
             Movie.objects
             .feed_for_user(user, include_recommendation_score=has_preferences)
+            .with_comment_stats()
             .select_related("author", "author__profile")
         )
 
