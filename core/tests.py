@@ -15,6 +15,7 @@ from core.models import (
     Follow,
     Friendship,
     Movie,
+    Post,
     MovieRating,
     build_genre_key,
     UserDirectorPreference,
@@ -823,3 +824,105 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertEqual(response.data["friendship_status"], "pending_sent")
         self.assertFalse(response.data["can_follow"])
         self.assertFalse(response.data["can_send_friend_request"])
+
+
+class DirectedCommentsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user_model = get_user_model()
+        self.author = self.user_model.objects.create_user(
+            username="commenter1", email="commenter1@example.com", password="test1234"
+        )
+        self.friend = self.user_model.objects.create_user(
+            username="friend001", email="friend001@example.com", password="test1234"
+        )
+        self.stranger = self.user_model.objects.create_user(
+            username="stranger1", email="stranger1@example.com", password="test1234"
+        )
+        self.other_user = self.user_model.objects.create_user(
+            username="viewer001", email="viewer001@example.com", password="test1234"
+        )
+        self.post = Post.objects.create(author=self.author, text="Movie recommendation post")
+        Friendship.objects.create(
+            requester=self.author,
+            user1=self.author,
+            user2=self.friend,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+    def test_comment_with_friend_mention_becomes_directed(self):
+        self.client.force_authenticate(user=self.author)
+
+        response = self.client.post(
+            reverse("post-comments", kwargs={"pk": self.post.pk}),
+            {"body": "@friend001 you should watch this one"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["visibility"], "direct")
+        self.assertEqual(response.data["comment_type"], "direct")
+        self.assertEqual(response.data["target_user"]["username"], self.friend.username)
+
+    def test_comment_with_non_friend_mention_stays_public(self):
+        self.client.force_authenticate(user=self.author)
+
+        response = self.client.post(
+            reverse("post-comments", kwargs={"pk": self.post.pk}),
+            {"body": "@stranger1 this is public instead"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["visibility"], "public")
+        self.assertIsNone(response.data["target_user"])
+
+    def test_directed_comment_is_hidden_from_public_post_list(self):
+        self.client.force_authenticate(user=self.author)
+        create_response = self.client.post(
+            reverse("post-comments", kwargs={"pk": self.post.pk}),
+            {"body": "@friend001 private recommendation"},
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(user=None)
+        list_response = self.client.get(reverse("post-comments", kwargs={"pk": self.post.pk}))
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 0)
+        self.assertEqual(list_response.data["results"], [])
+
+    def test_directed_comment_visible_only_to_author_and_target_user(self):
+        self.client.force_authenticate(user=self.author)
+        create_response = self.client.post(
+            reverse("post-comments", kwargs={"pk": self.post.pk}),
+            {"body": "@friend001 only for you"},
+            format="json",
+        )
+        comment_id = create_response.data["id"]
+        detail_url = reverse("comment-detail", kwargs={"pk": comment_id})
+
+        sent_response = self.client.get(reverse("directed-comments-sent"))
+        self.assertEqual(sent_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(sent_response.data["results"][0]["id"], comment_id)
+
+        author_detail_response = self.client.get(detail_url)
+        self.assertEqual(author_detail_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=self.friend)
+        received_response = self.client.get(reverse("directed-comments-received"))
+        self.assertEqual(received_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(received_response.data["results"][0]["id"], comment_id)
+
+        target_detail_response = self.client.get(detail_url)
+        self.assertEqual(target_detail_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=self.other_user)
+        other_detail_response = self.client.get(detail_url)
+        self.assertEqual(other_detail_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        other_received_response = self.client.get(reverse("directed-comments-received"))
+        self.assertEqual(other_received_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(other_received_response.data["count"], 0)
+        self.assertEqual(other_received_response.data["results"], [])

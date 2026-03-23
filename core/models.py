@@ -60,7 +60,11 @@ class PostQuerySet(models.QuerySet):
     
     def with_comment_stats(self):
         return self.annotate(
-            comments_count=Count("comments", distinct=True),
+            comments_count=Count(
+                "comments",
+                filter=Q(comments__visibility=Comment.VISIBILITY_PUBLIC),
+                distinct=True,
+            ),
         )
     
 class Post(models.Model):
@@ -541,14 +545,45 @@ class Profile(models.Model):
         return f"Profile({self.user.username})"
 
 
+class CommentQuerySet(models.QuerySet):
+    def public(self):
+        return self.filter(visibility=Comment.VISIBILITY_PUBLIC)
+
+    def visible_to(self, user):
+        if not user or not user.is_authenticated:
+            return self.public()
+        return self.filter(
+            Q(visibility=Comment.VISIBILITY_PUBLIC)
+            | Q(author=user)
+            | Q(target_user=user)
+        )
+
+
 class Comment(models.Model):
+    VISIBILITY_PUBLIC = "public"
+    VISIBILITY_DIRECT = "direct"
+    VISIBILITY_CHOICES = [
+        (VISIBILITY_PUBLIC, "Public"),
+        (VISIBILITY_DIRECT, "Direct"),
+    ]
+
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="comments")
     post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="comments")
     body = models.TextField()
+    visibility = models.CharField(max_length=10, choices=VISIBILITY_CHOICES, default=VISIBILITY_PUBLIC)
+    target_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="directed_comments_received",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = CommentQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Comment({self.author_id} -> {self.post_id})"
+        return f"Comment({self.author_id} -> {self.post_id}, {self.visibility})"

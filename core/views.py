@@ -435,8 +435,9 @@ class PostCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         return (
-            Comment.objects.filter(post_id=self.kwargs["pk"])
-            .select_related("author", "author__profile", "post")
+            Comment.objects.public()
+            .filter(post_id=self.kwargs["pk"])
+            .select_related("author", "author__profile", "post", "target_user", "target_user__profile")
             .order_by("-created_at")
         )
 
@@ -445,13 +446,45 @@ class PostCommentsListCreateView(generics.ListCreateAPIView):
         serializer.save(author=self.request.user, post=post)
 
 
+class DirectedCommentsReceivedListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_DIRECT,
+                target_user=self.request.user,
+            )
+            .select_related("author", "author__profile", "post", "target_user", "target_user__profile")
+            .order_by("-created_at")
+        )
+
+
+class DirectedCommentsSentListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_DIRECT,
+                author=self.request.user,
+            )
+            .select_related("author", "author__profile", "post", "target_user", "target_user__profile")
+            .order_by("-created_at")
+        )
+
+
 class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly, IsCommentAuthorOrReadOnly]
     serializer_class = CommentSerializer
     http_method_names = ["get", "put", "delete", "head", "options"]
 
     def get_queryset(self):
-        return Comment.objects.select_related("author", "author__profile", "post")
+        return Comment.objects.visible_to(self.request.user).select_related(
+            "author", "author__profile", "post", "target_user", "target_user__profile"
+        )
 
 class UserPostsListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]

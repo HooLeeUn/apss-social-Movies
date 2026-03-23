@@ -1,3 +1,4 @@
+import re
 import socket
 
 from django.contrib.auth.models import User
@@ -242,12 +243,73 @@ class RegisterSerializer(serializers.ModelSerializer):
         return User.objects.create_user(**validated_data)
 
 class CommentSerializer(serializers.ModelSerializer):
+    MENTION_RE = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
+
     author = UserMiniSerializer(read_only=True)
+    target_user = UserMiniSerializer(read_only=True)
+    comment_type = serializers.CharField(source="visibility", read_only=True)
+    content = serializers.CharField(source="body", read_only=True)
 
     class Meta:
         model = Comment
-        fields = ["id", "author", "post", "body", "created_at"]
-        read_only_fields = ["id", "author", "post", "created_at"]
+        fields = [
+            "id",
+            "author",
+            "post",
+            "body",
+            "content",
+            "created_at",
+            "visibility",
+            "comment_type",
+            "target_user",
+        ]
+        read_only_fields = [
+            "id",
+            "author",
+            "post",
+            "created_at",
+            "visibility",
+            "comment_type",
+            "target_user",
+            "content",
+        ]
+
+    def _resolve_target_user(self, author, body):
+        match = self.MENTION_RE.search(body or "")
+        if not match or not author or not author.is_authenticated:
+            return None
+
+        username = match.group("username")
+        try:
+            mentioned_user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return None
+
+        if Friendship.between(author, mentioned_user).filter(status=Friendship.STATUS_ACCEPTED).exists():
+            return mentioned_user
+        return None
+
+    def _build_comment_attrs(self, author, body):
+        target_user = self._resolve_target_user(author=author, body=body)
+        if target_user:
+            return {
+                "visibility": Comment.VISIBILITY_DIRECT,
+                "target_user": target_user,
+            }
+        return {
+            "visibility": Comment.VISIBILITY_PUBLIC,
+            "target_user": None,
+        }
+
+    def create(self, validated_data):
+        author = validated_data.get("author") or self.context["request"].user
+        validated_data.update(self._build_comment_attrs(author=author, body=validated_data.get("body")))
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        body = validated_data.get("body", instance.body)
+        validated_data.update(self._build_comment_attrs(author=instance.author, body=body))
+        return super().update(instance, validated_data)
 
 
 class MovieListSerializer(serializers.ModelSerializer):
