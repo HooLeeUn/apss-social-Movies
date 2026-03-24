@@ -262,6 +262,26 @@ class CommentSerializer(serializers.ModelSerializer):
         ]
 
 
+class PublicCommentFeedSerializer(CommentSerializer):
+    author_followers_count = serializers.IntegerField(read_only=True)
+    is_following_author = serializers.BooleanField(read_only=True)
+    is_friend_author = serializers.BooleanField(read_only=True)
+
+    class Meta(CommentSerializer.Meta):
+        fields = [
+            *CommentSerializer.Meta.fields,
+            "author_followers_count",
+            "is_following_author",
+            "is_friend_author",
+        ]
+        read_only_fields = [
+            *CommentSerializer.Meta.read_only_fields,
+            "author_followers_count",
+            "is_following_author",
+            "is_friend_author",
+        ]
+
+
 class CommentReactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = CommentReaction

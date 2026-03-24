@@ -2,7 +2,7 @@ import re
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Avg, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value
+from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -15,7 +15,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
 )
 from .models import (
@@ -443,6 +443,57 @@ class PostRatingView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
     
 
+
+
+
+class PublicCommentsFeedView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = PublicCommentFeedSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        is_following_subquery = Follow.objects.filter(
+            follower_id=user.id,
+            following_id=OuterRef("author_id"),
+        )
+
+        is_friend_subquery = Friendship.objects.filter(
+            status=Friendship.STATUS_ACCEPTED,
+        ).filter(
+            Q(user1_id=user.id, user2_id=OuterRef("author_id"))
+            | Q(user2_id=user.id, user1_id=OuterRef("author_id"))
+        )
+
+        queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_PUBLIC,
+                author__profile__is_public=True,
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .annotate(
+                author_followers_count=Count("author__followers", distinct=True),
+                is_following_author=Exists(is_following_subquery),
+                is_friend_author=Exists(is_friend_subquery),
+            )
+            .annotate(
+                feed_category=Case(
+                    When(
+                        Q(is_following_author=False)
+                        & Q(is_friend_author=False)
+                        & ~Q(author_id=user.id),
+                        then=Value(1),
+                    ),
+                    When(is_following_author=True, then=Value(2)),
+                    When(Q(is_friend_author=True) & Q(is_following_author=False), then=Value(3)),
+                    default=Value(4),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by("feed_category", "-author_followers_count", "-created_at", "-id")
+        )
+
+        return annotate_comments_for_user(queryset, user)
 
 class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
