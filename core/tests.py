@@ -1,4 +1,5 @@
 import io
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -19,6 +21,7 @@ from core.models import (
     Friendship,
     Movie,
     MovieRating,
+    WeeklyRecommendationSnapshot,
     build_genre_key,
     UserDirectorPreference,
     UserGenrePreference,
@@ -30,6 +33,7 @@ from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
+from core.weekly_recommendations import get_previous_closed_week_window
 
 
 class ImportMoviesCommandTests(TestCase):
@@ -1172,3 +1176,156 @@ class CommentReactionAPITests(TestCase):
         self.assertEqual(response.data[0]["dislikes_count"], 1)
         self.assertEqual(response.data[0]["my_reaction"], CommentReaction.REACT_LIKE)
 
+
+class WeeklyRecommendationsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user_model = get_user_model()
+        self.viewer = self.user_model.objects.create_user(
+            username="weekly_viewer", email="viewer@example.com", password="test1234"
+        )
+        self.author = self.user_model.objects.create_user(
+            username="weekly_author", email="author@example.com", password="test1234"
+        )
+        self.followed_user = self.user_model.objects.create_user(
+            username="weekly_followed", email="followed@example.com", password="test1234"
+        )
+        Follow.objects.create(follower=self.viewer, following=self.followed_user)
+        self.url = reverse("weekly-recommendations")
+        self.reference_datetime = timezone.make_aware(datetime(2026, 3, 18, 12, 0, 0))
+        self.previous_week_window = get_previous_closed_week_window(self.reference_datetime)
+
+    def _create_movie(self, title, **overrides):
+        data = {
+            "author": self.author,
+            "title_english": title,
+            "type": Movie.MOVIE,
+            "genre": overrides.pop("genre", "Drama"),
+            "external_rating": overrides.pop("external_rating", 8.0),
+            "external_votes": overrides.pop("external_votes", 0),
+        }
+        data.update(overrides)
+        return Movie.objects.create(**data)
+
+    def _create_rating(self, *, movie, user, score, rated_at):
+        rating = MovieRating.objects.create(user=user, movie=movie, score=score)
+        MovieRating.objects.filter(pk=rating.pk).update(created_at=rated_at, updated_at=rated_at)
+        rating.refresh_from_db()
+        return rating
+
+    def _refresh_snapshot(self):
+        call_command("refresh_weekly_recommendations", reference_datetime=self.reference_datetime.isoformat())
+        return WeeklyRecommendationSnapshot.objects.get(
+            week_start=self.previous_week_window.start_date,
+            week_end=self.previous_week_window.end_date,
+        )
+
+    def test_previous_closed_week_uses_last_complete_monday_to_monday_window(self):
+        window = get_previous_closed_week_window(self.reference_datetime)
+
+        self.assertEqual(window.start_at.isoformat(), "2026-03-09T00:00:00+00:00")
+        self.assertEqual(window.end_at.isoformat(), "2026-03-16T00:00:00+00:00")
+
+    def test_snapshot_excludes_movies_without_ratings_in_closed_week(self):
+        included = self._create_movie("Included Movie", genre="Action", external_rating=7.0)
+        excluded = self._create_movie("Excluded Movie", genre="Drama", external_rating=9.0)
+        weekly_user = self.user_model.objects.create_user(
+            username="weekly_rater_1", email="weekly_rater_1@example.com", password="test1234"
+        )
+        stale_user = self.user_model.objects.create_user(
+            username="weekly_rater_2", email="weekly_rater_2@example.com", password="test1234"
+        )
+
+        self._create_rating(
+            movie=included,
+            user=weekly_user,
+            score=9,
+            rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0)),
+        )
+        self._create_rating(
+            movie=excluded,
+            user=stale_user,
+            score=10,
+            rated_at=timezone.make_aware(datetime(2026, 3, 17, 10, 0, 0)),
+        )
+
+        snapshot = self._refresh_snapshot()
+
+        self.assertEqual(list(snapshot.items.values_list("movie__title_english", flat=True)), ["Included Movie"])
+
+    def test_snapshot_respects_exact_genre_diversity(self):
+        first = self._create_movie("First Genre", genre="Action, Comedy", external_rating=9.0)
+        second = self._create_movie("Second Genre", genre="Action, Comedy", external_rating=8.5)
+        third = self._create_movie("Third Genre", genre="Comedy, Action", external_rating=8.4)
+
+        for index, movie in enumerate([first, second, third], start=1):
+            rater = self.user_model.objects.create_user(
+                username=f"genre_rater_{index}",
+                email=f"genre_rater_{index}@example.com",
+                password="test1234",
+            )
+            self._create_rating(
+                movie=movie,
+                user=rater,
+                score=10 - index,
+                rated_at=timezone.make_aware(datetime(2026, 3, 11, 9 + index, 0, 0)),
+            )
+
+        snapshot = self._refresh_snapshot()
+        titles = list(snapshot.items.values_list("movie__title_english", flat=True))
+
+        self.assertEqual(titles, ["First Genre", "Third Genre"])
+
+    def test_snapshot_limits_results_to_eight_items(self):
+        for index in range(10):
+            movie = self._create_movie(
+                f"Movie {index}",
+                genre=f"Genre {index}",
+                external_rating=10 - (index * 0.1),
+            )
+            rater = self.user_model.objects.create_user(
+                username=f"limit_rater_{index}",
+                email=f"limit_rater_{index}@example.com",
+                password="test1234",
+            )
+            self._create_rating(
+                movie=movie,
+                user=rater,
+                score=10,
+                rated_at=timezone.make_aware(datetime(2026, 3, 12, 8, index, 0)),
+            )
+
+        snapshot = self._refresh_snapshot()
+
+        self.assertEqual(snapshot.items.count(), 8)
+        self.assertEqual(list(snapshot.items.values_list("position", flat=True)), list(range(1, 9)))
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_endpoint_returns_snapshot_for_previous_closed_week_with_user_fields(self, mock_window):
+        movie = self._create_movie("Endpoint Movie", genre="Sci-Fi", external_rating=8.0)
+        rating_user = self.user_model.objects.create_user(
+            username="endpoint_rater", email="endpoint_rater@example.com", password="test1234"
+        )
+        self._create_rating(
+            movie=movie,
+            user=rating_user,
+            score=9,
+            rated_at=timezone.make_aware(datetime(2026, 3, 10, 15, 0, 0)),
+        )
+        MovieRating.objects.create(user=self.viewer, movie=movie, score=7)
+        MovieRating.objects.create(user=self.followed_user, movie=movie, score=6)
+        snapshot = self._refresh_snapshot()
+
+        mock_window.return_value = self.previous_week_window
+        self.client.force_authenticate(user=self.viewer)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        item = response.data[0]
+        self.assertEqual(item["movie"]["title_english"], "Endpoint Movie")
+        self.assertEqual(item["position"], 1)
+        self.assertEqual(float(item["weekly_score"]), float(snapshot.items.get().weekly_score))
+        self.assertAlmostEqual(item["display_rating"], item["general_rating"])
+        self.assertEqual(item["my_rating"], 7)
+        self.assertAlmostEqual(item["following_avg_rating"], 6.0)

@@ -16,6 +16,7 @@ from .models import (
     UserGenrePreference,
     UserTasteProfile,
     UserTypePreference,
+    WeeklyRecommendationItem,
 )
 
 # Importas tus modelos solo si los necesitas aquí.
@@ -290,6 +291,42 @@ class MovieListSerializer(serializers.ModelSerializer):
 
 class MovieRatingSerializer(serializers.Serializer):
     score = serializers.IntegerField(min_value=1, max_value=10)
+
+
+class WeeklyRecommendationMovieSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "genre",
+            "release_year",
+            "director",
+            "image",
+        ]
+
+
+class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
+    movie = WeeklyRecommendationMovieSerializer(read_only=True)
+    weekly_score = serializers.FloatField(read_only=True)
+    general_rating = serializers.FloatField(read_only=True)
+    display_rating = serializers.FloatField(read_only=True)
+    my_rating = serializers.IntegerField(read_only=True, allow_null=True)
+    following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+
+    class Meta:
+        model = WeeklyRecommendationItem
+        fields = [
+            "position",
+            "movie",
+            "weekly_score",
+            "general_rating",
+            "display_rating",
+            "my_rating",
+            "following_avg_rating",
+        ]
 
 
 class TastePreferenceBaseSerializer(serializers.ModelSerializer):
