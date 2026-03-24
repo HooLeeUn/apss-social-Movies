@@ -1331,6 +1331,105 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertAlmostEqual(item["following_avg_rating"], 6.0)
 
 
+class MovieListViewSearchAndFiltersTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user_model = get_user_model()
+        self.author = self.user_model.objects.create_user(
+            username="movie_catalog_author",
+            email="movie-catalog-author@example.com",
+            password="test1234",
+        )
+        self.viewer = self.user_model.objects.create_user(
+            username="movie_catalog_viewer",
+            email="movie-catalog-viewer@example.com",
+            password="test1234",
+        )
+        self.url = reverse("movie-list")
+
+    def _create_movie(self, title, **overrides):
+        data = {
+            "author": self.author,
+            "title_english": title,
+            "title_spanish": overrides.pop("title_spanish", title),
+            "type": overrides.pop("type", Movie.MOVIE),
+            "genre": overrides.pop("genre", "Drama"),
+            "release_year": overrides.pop("release_year", 2020),
+            "director": overrides.pop("director", "Director"),
+            "cast_members": overrides.pop("cast_members", "Actor"),
+            "synopsis": overrides.pop("synopsis", ""),
+            "external_rating": overrides.pop("external_rating", 7.0),
+            "external_votes": overrides.pop("external_votes", 1000),
+        }
+        data.update(overrides)
+        return Movie.objects.create(**data)
+
+    def test_search_supports_multiple_terms_across_fields(self):
+        matched = self._create_movie(
+            "Space Journey",
+            director="Christopher Nolan",
+            synopsis="A thriller happening in deep space.",
+            genre="Sci-Fi",
+        )
+        self._create_movie(
+            "Only Space",
+            director="Jane Doe",
+            synopsis="Deep space documentary.",
+            genre="Documentary",
+        )
+
+        response = self.client.get(self.url, {"search": "nolan space"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [matched.id])
+
+    def test_genre_filter_matches_individual_genre_inside_csv_string(self):
+        matched = self._create_movie("Action Comedy Mix", genre="Action, Comedy")
+        self._create_movie("Drama Piece", genre="Drama")
+
+        response = self.client.get(self.url, {"genre": "Comedy"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [matched.id])
+
+    def test_pagination_is_kept(self):
+        for index in range(12):
+            self._create_movie(f"Movie {index}", release_year=2000 + index)
+
+        response = self.client.get(self.url, {"page_size": 5})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 12)
+        self.assertEqual(len(response.data["results"]), 5)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_authenticated_ordering_uses_profile_preferences(self):
+        UserTasteProfile.objects.create(user=self.viewer, ratings_count=4)
+        UserGenrePreference.objects.create(user=self.viewer, genre="Action|Comedy", count_10=2)
+
+        preferred = self._create_movie(
+            "Preferred by Genre",
+            genre="Action, Comedy",
+            release_year=2005,
+            external_rating=6.0,
+        )
+        fallback = self._create_movie(
+            "Fallback Drama",
+            genre="Drama",
+            release_year=2024,
+            external_rating=9.0,
+        )
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ordered_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(ordered_ids[:2], [preferred.id, fallback.id])
+
+
 class PublicCommentsFeedViewTests(TestCase):
     def setUp(self):
         self.client = APIClient()
