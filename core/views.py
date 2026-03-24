@@ -2,7 +2,7 @@ import re
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Avg, F, Q
+from django.db.models import Count, Avg, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -16,7 +16,7 @@ from .serializers import (
     FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, RegisterSerializer, MovieListSerializer,
-    MovieRatingSerializer, UserTasteProfileInspectSerializer,
+    MovieRatingSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
 )
 from .models import (
     Comment,
@@ -28,12 +28,15 @@ from .models import (
     Post,
     Rating,
     UserTasteProfile,
+    WeeklyRecommendationItem,
+    WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
+from .weekly_recommendations import get_previous_closed_week_window
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 
@@ -638,6 +641,48 @@ class FeedMoviesView(generics.ListAPIView):
         return qs.order_by("-recommendation_score", "-ranking_confidence_score", release_year_desc, "-id")
 
 
+class WeeklyRecommendationsView(generics.ListAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = WeeklyRecommendationItemSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        window = get_previous_closed_week_window()
+        snapshot = WeeklyRecommendationSnapshot.objects.filter(
+            week_start=window.start_date,
+            week_end=window.end_date,
+        ).first()
+        if snapshot is None:
+            return WeeklyRecommendationItem.objects.none()
+
+        items = snapshot.items.select_related("movie").order_by("position")
+        display_rating_subquery = Movie.objects.with_display_rating().filter(
+            pk=OuterRef("movie_id")
+        ).values("display_rating")[:1]
+
+        queryset = items.annotate(
+            general_rating=Subquery(display_rating_subquery, output_field=FloatField()),
+            display_rating=Subquery(display_rating_subquery, output_field=FloatField()),
+        )
+
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return queryset.annotate(
+                my_rating=Value(None, output_field=IntegerField()),
+                following_avg_rating=Value(None, output_field=FloatField()),
+            )
+
+        return queryset.annotate(
+            my_rating=Subquery(
+                MovieRating.objects.filter(movie_id=OuterRef("movie_id"), user_id=user.id).values("score")[:1]
+            ),
+            following_avg_rating=Avg(
+                "movie__movie_ratings__score",
+                filter=Q(movie__movie_ratings__user__followers__follower=user),
+            ),
+        )
+
+
 class MovieRatingView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -736,4 +781,3 @@ class CommentReactionView(APIView):
         if not deleted:
             return Response({"detail": "Reaction not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
-

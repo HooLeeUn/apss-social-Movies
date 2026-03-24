@@ -281,6 +281,48 @@ class MovieRating(models.Model):
         return f"MovieRating(user={self.user_id}, movie={self.movie_id}, score={self.score})"
 
 
+class WeeklyRecommendationSnapshot(models.Model):
+    week_start = models.DateField()
+    week_end = models.DateField()
+    items_count = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-week_start", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["week_start", "week_end"], name="unique_weekly_recommendation_snapshot_window")
+        ]
+
+    def __str__(self):
+        return f"WeeklyRecommendationSnapshot({self.week_start} -> {self.week_end})"
+
+
+class WeeklyRecommendationItem(models.Model):
+    snapshot = models.ForeignKey(
+        "WeeklyRecommendationSnapshot",
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="weekly_recommendation_items")
+    position = models.PositiveSmallIntegerField()
+    genre = models.CharField(max_length=100, null=True, blank=True)
+    weekly_score = models.DecimalField(max_digits=6, decimal_places=3)
+    week_ratings_count = models.PositiveIntegerField(default=0)
+    week_ratings_sum = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["position", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["snapshot", "position"], name="unique_weekly_recommendation_position_per_snapshot"),
+            models.UniqueConstraint(fields=["snapshot", "movie"], name="unique_weekly_recommendation_movie_per_snapshot"),
+        ]
+
+    def __str__(self):
+        return f"WeeklyRecommendationItem(snapshot={self.snapshot_id}, movie={self.movie_id}, position={self.position})"
+
+
 class UserTasteProfile(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -634,4 +676,3 @@ class CommentReaction(models.Model):
 
     def __str__(self):
         return f"CommentReaction(comment={self.comment_id}, user={self.user_id}, reaction={self.reaction_type})"
-
