@@ -293,7 +293,9 @@ class MovieListSerializer(serializers.ModelSerializer):
     real_ratings_count = serializers.IntegerField(read_only=True)
     real_ratings_avg = serializers.FloatField(read_only=True)
     display_rating = serializers.FloatField(read_only=True)
+    general_rating = serializers.FloatField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True)
+    following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
     comments_count = serializers.IntegerField(read_only=True)
 
     class Meta:
@@ -305,7 +307,7 @@ class MovieListSerializer(serializers.ModelSerializer):
             "director", "cast_members", "synopsis",
             "image", "external_rating", "external_votes",
             "real_ratings_count", "real_ratings_avg",
-            "display_rating", "my_rating", "comments_count",
+            "display_rating", "general_rating", "my_rating", "following_avg_rating", "comments_count",
         ]
 
 

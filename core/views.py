@@ -5,7 +5,6 @@ from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
-from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
@@ -41,6 +40,41 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 
 User = get_user_model()
+
+
+def split_search_terms(search):
+    return [term for term in re.split(r"\s+", search.strip()) if term]
+
+
+def apply_movie_search(queryset, search):
+    terms = split_search_terms(search)
+    if not terms:
+        return queryset
+
+    search_fields = [
+        "title_english",
+        "title_spanish",
+        "director",
+        "cast_members",
+        "genre",
+        "synopsis",
+    ]
+
+    filters = Q()
+    score_expr = Value(0, output_field=IntegerField())
+    for term in terms:
+        term_match = Q()
+        for field in search_fields:
+            lookup = {f"{field}__icontains": term}
+            term_match |= Q(**lookup)
+            score_expr += Case(
+                When(**lookup, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        filters &= term_match
+
+    return queryset.filter(filters).annotate(search_relevance=score_expr)
 
 
 def annotate_comments_for_user(queryset, user):
@@ -633,18 +667,31 @@ class UserPostsListView(generics.ListAPIView):
 class MovieListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = MovieListSerializer
-    filter_backends = [SearchFilter, OrderingFilter]
-    search_fields = ["title_english", "title_spanish", "director", "cast_members", "genre"]
-    ordering_fields = ["created_at", "release_year", "display_rating", "real_ratings_count", "title_english"]
-    ordering = ["-release_year", "-display_rating", "-created_at", "id"]
 
     def get_queryset(self):
-        qs = (
-            Movie.objects
-            .with_comment_stats()
-            .with_display_rating()
-            .select_related("author", "author__profile")
+        user = self.request.user
+        has_preferences = user.is_authenticated and UserTasteProfile.objects.filter(
+            user_id=user.id,
+            ratings_count__gt=0,
+        ).exists()
+        if user.is_authenticated:
+            qs = Movie.objects.feed_for_user(user, include_recommendation_score=has_preferences)
+        else:
+            qs = Movie.objects.with_display_rating().with_my_rating(user)
+
+        qs = qs.with_comment_stats().select_related("author", "author__profile").annotate(
+            general_rating=F("display_rating"),
         )
+
+        if user.is_authenticated:
+            qs = qs.annotate(
+                following_avg_rating=Avg(
+                    "movie_ratings__score",
+                    filter=Q(movie_ratings__user__followers__follower=user),
+                )
+            )
+        else:
+            qs = qs.annotate(following_avg_rating=Value(None, output_field=FloatField()))
 
         if movie_type := self.request.query_params.get("type"):
             qs = qs.filter(type=movie_type)
@@ -653,7 +700,23 @@ class MovieListView(generics.ListAPIView):
         if release_year := self.request.query_params.get("release_year"):
             qs = qs.filter(release_year=release_year)
 
-        return qs.with_my_rating(self.request.user)
+        if search := self.request.query_params.get("search"):
+            qs = apply_movie_search(qs, search)
+
+        release_year_desc = F("release_year").desc(nulls_last=True)
+        if user.is_authenticated:
+            search_ordering = ["-search_relevance"] if search else []
+            return qs.order_by(
+                *search_ordering,
+                "-recommendation_score",
+                "-ranking_confidence_score",
+                "-display_rating",
+                release_year_desc,
+                "-id",
+            )
+
+        search_ordering = ["-search_relevance"] if search else []
+        return qs.order_by(*search_ordering, "-display_rating", release_year_desc, "-created_at", "-id")
 
 
 class FeedMoviesView(generics.ListAPIView):
@@ -674,13 +737,7 @@ class FeedMoviesView(generics.ListAPIView):
             qs = qs.filter(my_rating__isnull=True)
 
         if search := self.request.query_params.get("search"):
-            qs = qs.filter(
-                Q(title_english__icontains=search)
-                | Q(title_spanish__icontains=search)
-                | Q(director__icontains=search)
-                | Q(cast_members__icontains=search)
-                | Q(genre__icontains=search)
-            )
+            qs = apply_movie_search(qs, search)
 
         if movie_type := self.request.query_params.get("type"):
             qs = qs.filter(type=movie_type)
@@ -689,7 +746,15 @@ class FeedMoviesView(generics.ListAPIView):
 
         release_year_desc = F("release_year").desc(nulls_last=True)
 
-        return qs.order_by("-recommendation_score", "-ranking_confidence_score", release_year_desc, "-id")
+        search_ordering = ["-search_relevance"] if self.request.query_params.get("search") else []
+        return qs.order_by(
+            *search_ordering,
+            "-recommendation_score",
+            "-ranking_confidence_score",
+            "-display_rating",
+            release_year_desc,
+            "-id",
+        )
 
 
 class WeeklyRecommendationsView(generics.ListAPIView):
