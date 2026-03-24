@@ -1329,3 +1329,151 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertAlmostEqual(item["display_rating"], item["general_rating"])
         self.assertEqual(item["my_rating"], 7)
         self.assertAlmostEqual(item["following_avg_rating"], 6.0)
+
+
+class PublicCommentsFeedViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.viewer = get_user_model().objects.create_user(
+            username="public_feed_viewer",
+            email="public-feed-viewer@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.viewer)
+        self.url = reverse("public-comments-feed")
+        self.movie = Movie.objects.create(
+            author=self.viewer,
+            title_english="Public Feed Movie",
+            type=Movie.MOVIE,
+            genre="Drama",
+        )
+
+    def _user(self, username):
+        return get_user_model().objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="test1234",
+        )
+
+    def _add_followers(self, user, total):
+        for index in range(total):
+            follower = self._user(f"{user.username}_follower_{index}")
+            Follow.objects.create(follower=follower, following=user)
+
+    def test_public_comments_feed_orders_categories_and_excludes_non_public_items(self):
+        category_1_low = self._user("category1_low")
+        category_1_high = self._user("category1_high")
+        category_2_low = self._user("category2_low")
+        category_2_high = self._user("category2_high")
+        category_3_user = self._user("category3_friend")
+        private_user = self._user("private_category")
+
+        private_user.profile.is_public = False
+        private_user.profile.save(update_fields=["is_public"])
+
+        Follow.objects.create(follower=self.viewer, following=category_2_low)
+        Follow.objects.create(follower=self.viewer, following=category_2_high)
+
+        Friendship.objects.create(
+            requester=self.viewer,
+            user1=self.viewer,
+            user2=category_3_user,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+        self._add_followers(category_1_low, 2)
+        self._add_followers(category_1_high, 4)
+        self._add_followers(category_2_low, 1)
+        self._add_followers(category_2_high, 3)
+        self._add_followers(category_3_user, 5)
+
+        category_1_low_comment = Comment.objects.create(
+            author=category_1_low,
+            movie=self.movie,
+            body="category 1 low",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_1_high_comment = Comment.objects.create(
+            author=category_1_high,
+            movie=self.movie,
+            body="category 1 high",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_2_low_comment = Comment.objects.create(
+            author=category_2_low,
+            movie=self.movie,
+            body="category 2 low",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_2_high_comment = Comment.objects.create(
+            author=category_2_high,
+            movie=self.movie,
+            body="category 2 high",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_3_comment = Comment.objects.create(
+            author=category_3_user,
+            movie=self.movie,
+            body="category 3",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_4_old_comment = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body="category 4 old",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        category_4_new_comment = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body="category 4 new",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        Comment.objects.create(
+            author=category_1_high,
+            movie=self.movie,
+            body="directed comment",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.viewer,
+        )
+        Comment.objects.create(
+            author=private_user,
+            movie=self.movie,
+            body="private author comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_order = [
+            category_1_high_comment.id,
+            category_1_low_comment.id,
+            category_2_high_comment.id,
+            category_2_low_comment.id,
+            category_3_comment.id,
+            category_4_new_comment.id,
+            category_4_old_comment.id,
+        ]
+        self.assertEqual([item["id"] for item in response.data], expected_order)
+
+        first_item = response.data[0]
+        self.assertIn("author", first_item)
+        self.assertIn("author_followers_count", first_item)
+        self.assertIn("is_following_author", first_item)
+        self.assertIn("is_friend_author", first_item)
+        self.assertIn("likes_count", first_item)
+        self.assertIn("dislikes_count", first_item)
+        self.assertIn("my_reaction", first_item)
+        self.assertIn("movie", first_item)
+        self.assertEqual(first_item["author_followers_count"], 4)
+        self.assertFalse(first_item["is_following_author"])
+        self.assertFalse(first_item["is_friend_author"])
+
+    def test_public_comments_feed_requires_authentication(self):
+        self.client.force_authenticate(None)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
