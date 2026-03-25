@@ -1253,7 +1253,7 @@ class WeeklyRecommendationsTests(TestCase):
 
         self.assertEqual(list(snapshot.items.values_list("movie__title_english", flat=True)), ["Included Movie"])
 
-    def test_snapshot_respects_exact_genre_diversity(self):
+    def test_snapshot_deduplicates_equivalent_genre_combinations(self):
         first = self._create_movie("First Genre", genre="Action, Comedy", external_rating=9.0)
         second = self._create_movie("Second Genre", genre="Action, Comedy", external_rating=8.5)
         third = self._create_movie("Third Genre", genre="Comedy, Action", external_rating=8.4)
@@ -1274,7 +1274,7 @@ class WeeklyRecommendationsTests(TestCase):
         snapshot = self._refresh_snapshot()
         titles = list(snapshot.items.values_list("movie__title_english", flat=True))
 
-        self.assertEqual(titles, ["First Genre", "Third Genre"])
+        self.assertEqual(titles, ["First Genre"])
 
     def test_snapshot_limits_results_to_eight_items(self):
         for index in range(10):

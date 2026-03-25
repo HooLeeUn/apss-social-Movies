@@ -9,7 +9,12 @@ from django.db.models import Count, F, FloatField, Q, Sum, Value
 from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
 
-from core.models import Movie, WeeklyRecommendationItem, WeeklyRecommendationSnapshot
+from core.models import (
+    Movie,
+    WeeklyRecommendationItem,
+    WeeklyRecommendationSnapshot,
+    build_genre_key,
+)
 
 WEEKLY_RECOMMENDATIONS_LIMIT = 8
 WEEKLY_SCORE_PRECISION = Decimal("0.001")
@@ -92,7 +97,7 @@ def select_weekly_recommendation_movies(window, limit=WEEKLY_RECOMMENDATIONS_LIM
     seen_genres = set()
 
     for movie in get_weekly_recommendation_candidates(window):
-        genre_key = movie.genre if movie.genre is not None else "__none__"
+        genre_key = build_genre_key(movie.genre) or "__none__"
         if genre_key in seen_genres:
             continue
 
