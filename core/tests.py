@@ -33,7 +33,10 @@ from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
-from core.weekly_recommendations import get_previous_closed_week_window
+from core.weekly_recommendations import (
+    get_previous_closed_week_window,
+    get_weekly_recommendation_candidates,
+)
 
 
 class ImportMoviesCommandTests(TestCase):
@@ -1226,14 +1229,46 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertEqual(window.start_at.isoformat(), "2026-03-09T00:00:00+00:00")
         self.assertEqual(window.end_at.isoformat(), "2026-03-16T00:00:00+00:00")
 
-    def test_snapshot_excludes_movies_without_ratings_in_closed_week(self):
+    def test_snapshot_excludes_movie_with_zero_ratings_in_closed_week(self):
         included = self._create_movie("Included Movie", genre="Action", external_rating=7.0)
-        excluded = self._create_movie("Excluded Movie", genre="Drama", external_rating=9.0)
+        excluded_no_weekly_ratings = self._create_movie(
+            "Excluded Movie No Weekly Ratings",
+            genre="Drama",
+            external_rating=9.0,
+        )
         weekly_user = self.user_model.objects.create_user(
             username="weekly_rater_1", email="weekly_rater_1@example.com", password="test1234"
         )
-        stale_user = self.user_model.objects.create_user(
+
+        self._create_rating(
+            movie=included,
+            user=weekly_user,
+            score=9,
+            rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0)),
+        )
+
+        snapshot = self._refresh_snapshot()
+        snapshot_titles = list(snapshot.items.values_list("movie__title_english", flat=True))
+
+        self.assertIn("Included Movie", snapshot_titles)
+        self.assertNotIn("Excluded Movie No Weekly Ratings", snapshot_titles)
+        self.assertNotIn(
+            excluded_no_weekly_ratings.id,
+            set(snapshot.items.values_list("movie_id", flat=True)),
+        )
+
+    def test_snapshot_excludes_movie_with_ratings_outside_closed_week_window(self):
+        included = self._create_movie("Included Movie", genre="Action", external_rating=7.0)
+        excluded_outside_window = self._create_movie(
+            "Excluded Outside Window",
+            genre="Drama",
+            external_rating=9.0,
+        )
+        weekly_user = self.user_model.objects.create_user(
             username="weekly_rater_2", email="weekly_rater_2@example.com", password="test1234"
+        )
+        stale_user = self.user_model.objects.create_user(
+            username="weekly_rater_3", email="weekly_rater_3@example.com", password="test1234"
         )
 
         self._create_rating(
@@ -1243,15 +1278,41 @@ class WeeklyRecommendationsTests(TestCase):
             rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0)),
         )
         self._create_rating(
-            movie=excluded,
+            movie=excluded_outside_window,
             user=stale_user,
             score=10,
             rated_at=timezone.make_aware(datetime(2026, 3, 17, 10, 0, 0)),
         )
 
         snapshot = self._refresh_snapshot()
+        snapshot_titles = list(snapshot.items.values_list("movie__title_english", flat=True))
 
-        self.assertEqual(list(snapshot.items.values_list("movie__title_english", flat=True)), ["Included Movie"])
+        self.assertIn("Included Movie", snapshot_titles)
+        self.assertNotIn("Excluded Outside Window", snapshot_titles)
+
+    def test_snapshot_includes_movie_with_at_least_one_rating_inside_closed_week(self):
+        eligible = self._create_movie("Eligible Movie", genre="Thriller", external_rating=8.3)
+        rater = self.user_model.objects.create_user(
+            username="weekly_rater_4", email="weekly_rater_4@example.com", password="test1234"
+        )
+
+        self._create_rating(
+            movie=eligible,
+            user=rater,
+            score=8,
+            rated_at=timezone.make_aware(datetime(2026, 3, 12, 14, 0, 0)),
+        )
+
+        candidates = list(get_weekly_recommendation_candidates(self.previous_week_window))
+        candidate_ids = {candidate.id for candidate in candidates}
+
+        self.assertIn(eligible.id, candidate_ids)
+
+        snapshot = self._refresh_snapshot()
+        self.assertIn(
+            eligible.id,
+            set(snapshot.items.values_list("movie_id", flat=True)),
+        )
 
     def test_snapshot_deduplicates_equivalent_genre_combinations(self):
         first = self._create_movie("First Genre", genre="Action, Comedy", external_rating=9.0)
