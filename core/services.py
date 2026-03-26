@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
 from core.models import (
+    MovieRating,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -15,6 +17,7 @@ from core.models import (
 
 
 COUNT_FIELDS = [f"count_{score}" for score in range(1, 11)]
+User = get_user_model()
 
 
 def normalize_text(value):
@@ -148,3 +151,42 @@ def remove_user_preferences_for_movie_rating(user, movie, old_score):
     profile.last_updated_at = timezone.now()
     profile.save(update_fields=["ratings_count", "last_updated_at"])
 
+
+@transaction.atomic
+def rebuild_user_taste_profile(user):
+    UserGenrePreference.objects.filter(user=user).delete()
+    UserTypePreference.objects.filter(user=user).delete()
+    UserDirectorPreference.objects.filter(user=user).delete()
+
+    profile, _ = UserTasteProfile.objects.get_or_create(user=user)
+    profile.ratings_count = 0
+    profile.save(update_fields=["ratings_count", "last_updated_at"])
+
+    ratings = (
+        MovieRating.objects
+        .filter(user=user)
+        .select_related("movie")
+        .order_by("created_at", "pk")
+    )
+    for rating in ratings:
+        update_user_preferences_for_movie_rating(
+            user=user,
+            movie=rating.movie,
+            new_score=rating.score,
+        )
+
+
+@transaction.atomic
+def rebuild_taste_profiles(*, user_id=None):
+    if user_id is not None:
+        target_user_ids = [user_id]
+    else:
+        target_user_ids = list(
+            MovieRating.objects.values_list("user_id", flat=True).distinct()
+        )
+
+    for target_user_id in target_user_ids:
+        user = User.objects.get(pk=target_user_id)
+        rebuild_user_taste_profile(user)
+
+    return len(target_user_ids)

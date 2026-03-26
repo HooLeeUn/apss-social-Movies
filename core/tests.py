@@ -588,8 +588,6 @@ class MovieRatingEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
         own_rating = MovieRating.objects.create(user=self.user, movie=self.movie, score=7)
         other_rating = MovieRating.objects.create(user=self.other_user, movie=self.movie, score=10)
-        update_user_preferences_for_movie_rating(user=self.user, movie=self.movie, new_score=7)
-
         response = self.client.delete(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
@@ -617,7 +615,7 @@ class MovieRatingEndpointTests(TestCase):
     def test_put_rolls_back_rating_when_preference_update_fails(self):
         self.client.force_authenticate(user=self.user)
 
-        with patch("core.views.update_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
+        with patch("core.signals.update_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 self.client.put(self.url, {"score": 8}, format="json")
 
@@ -627,11 +625,81 @@ class MovieRatingEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
         rating = MovieRating.objects.create(user=self.user, movie=self.movie, score=8)
 
-        with patch("core.views.remove_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
+        with patch("core.signals.remove_user_preferences_for_movie_rating", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 self.client.delete(self.url)
 
         self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
+
+
+class MovieRatingSignalConsistencyTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="signal_user", email="signal@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="Signal Movie",
+            type=Movie.MOVIE,
+            genre="Action, Sci-Fi",
+            director="Nolan",
+            release_year=2014,
+        )
+
+    def test_create_update_delete_movie_rating_keeps_profile_consistent(self):
+        rating = MovieRating.objects.create(user=self.user, movie=self.movie, score=8)
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 1)
+        self.assertTrue(UserGenrePreference.objects.filter(user=self.user, genre="Action|Sci-Fi").exists())
+        self.assertTrue(UserTypePreference.objects.filter(user=self.user, content_type=Movie.MOVIE).exists())
+        self.assertTrue(UserDirectorPreference.objects.filter(user=self.user, director="Nolan").exists())
+
+        rating.score = 10
+        rating.save()
+        combo_pref = UserGenrePreference.objects.get(user=self.user, genre="Action|Sci-Fi")
+        self.assertEqual(combo_pref.count_8, 0)
+        self.assertEqual(combo_pref.count_10, 1)
+
+        rating.delete()
+        profile.refresh_from_db()
+        self.assertEqual(profile.ratings_count, 0)
+        self.assertFalse(UserGenrePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserTypePreference.objects.filter(user=self.user).exists())
+        self.assertFalse(UserDirectorPreference.objects.filter(user=self.user).exists())
+
+
+class RebuildTasteProfilesCommandTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="rebuild_user", email="rebuild@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.user,
+            title_english="Rebuild Movie",
+            type=Movie.MOVIE,
+            genre="Drama",
+            director="Villeneuve",
+            release_year=2021,
+        )
+
+    def test_command_rebuilds_existing_profile_from_movie_ratings(self):
+        MovieRating.objects.create(user=self.user, movie=self.movie, score=9)
+
+        UserTasteProfile.objects.update_or_create(user=self.user, defaults={"ratings_count": 0})
+        UserGenrePreference.objects.filter(user=self.user).delete()
+        UserTypePreference.objects.filter(user=self.user).delete()
+        UserDirectorPreference.objects.filter(user=self.user).delete()
+
+        out = io.StringIO()
+        call_command("rebuild_taste_profiles", "--user-id", str(self.user.id), stdout=out)
+
+        profile = UserTasteProfile.objects.get(user=self.user)
+        self.assertEqual(profile.ratings_count, 1)
+        self.assertTrue(UserGenrePreference.objects.filter(user=self.user, genre="Drama").exists())
+        self.assertTrue(UserTypePreference.objects.filter(user=self.user, content_type=Movie.MOVIE).exists())
+        self.assertTrue(UserDirectorPreference.objects.filter(user=self.user, director="Villeneuve").exists())
+        self.assertIn(f"user_id={self.user.id}", out.getvalue())
 
 
 class CommentModelAndAdminTests(TestCase):

@@ -31,10 +31,6 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
-from .services import (
-    remove_user_preferences_for_movie_rating,
-    update_user_preferences_for_movie_rating,
-)
 from .weekly_recommendations import get_previous_closed_week_window
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
@@ -809,19 +805,10 @@ class MovieRatingView(APIView):
         new_score = serializer.validated_data["score"]
 
         with transaction.atomic():
-            existing_rating = MovieRating.objects.select_for_update().filter(user=request.user, movie=movie).first()
-            old_score = existing_rating.score if existing_rating else None
-
             rating, created = MovieRating.objects.update_or_create(
                 user=request.user,
                 movie=movie,
                 defaults={"score": new_score},
-            )
-            update_user_preferences_for_movie_rating(
-                user=request.user,
-                movie=movie,
-                new_score=new_score,
-                old_score=old_score,
             )
 
         return Response(
@@ -836,14 +823,7 @@ class MovieRatingView(APIView):
             rating = MovieRating.objects.select_for_update().filter(user=request.user, movie=movie).first()
             if rating is None:
                 return Response({"detail": "Rating not found."}, status=status.HTTP_404_NOT_FOUND)
-
-            old_score = rating.score
             rating.delete()
-            remove_user_preferences_for_movie_rating(
-                user=request.user,
-                movie=movie,
-                old_score=old_score,
-            )
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
