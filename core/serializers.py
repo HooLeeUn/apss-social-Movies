@@ -160,6 +160,21 @@ class UserMiniSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+
+class FriendMentionSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "avatar"]
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
     
 class PostListSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)

@@ -1120,6 +1120,83 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertFalse(response.data["can_follow"])
         self.assertFalse(response.data["can_send_friend_request"])
 
+
+class FriendsListEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="friends_owner", email="friends_owner@example.com", password="test1234"
+        )
+        self.friend_one = get_user_model().objects.create_user(
+            username="julian_friend", email="julian_friend@example.com", password="test1234"
+        )
+        self.friend_two = get_user_model().objects.create_user(
+            username="maria_friend", email="maria_friend@example.com", password="test1234"
+        )
+        self.pending_user = get_user_model().objects.create_user(
+            username="pending_contact", email="pending_contact@example.com", password="test1234"
+        )
+        self.follow_only_user = get_user_model().objects.create_user(
+            username="follow_only", email="follow_only@example.com", password="test1234"
+        )
+        self.url = reverse("friends-list")
+
+    def test_requires_authentication(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_returns_only_accepted_friendships(self):
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.friend_one,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        Friendship.objects.create(
+            requester=self.friend_two,
+            user1=self.friend_two,
+            user2=self.user,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.pending_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        Follow.objects.create(follower=self.user, following=self.follow_only_user)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        usernames = [item["username"] for item in response.data["results"]]
+        self.assertEqual(usernames, ["julian_friend", "maria_friend"])
+        self.assertNotIn("pending_contact", usernames)
+        self.assertNotIn("follow_only", usernames)
+        self.assertEqual(set(response.data["results"][0].keys()), {"id", "username", "avatar"})
+
+    def test_supports_search_filter_by_username(self):
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.friend_one,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.friend_two,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"search": "jul"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["username"] for item in response.data["results"]], ["julian_friend"])
+
+
 class CommentReactionAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
