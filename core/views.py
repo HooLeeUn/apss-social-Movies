@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
-    FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
+    FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
@@ -342,6 +342,22 @@ class FriendsListView(ListAPIView):
             .filter(Q(user1=self.request.user) | Q(user2=self.request.user))
             .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
         )
+
+
+class FriendMentionListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendMentionSerializer
+
+    def get_queryset(self):
+        friends_queryset = User.objects.filter(
+            Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
+            | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
+        )
+        search = self.request.query_params.get("search")
+        if search:
+            friends_queryset = friends_queryset.filter(username__icontains=search.strip())
+
+        return friends_queryset.select_related("profile").order_by("username").distinct()
 
 
 class ReceivedFriendshipRequestsView(ListAPIView):
