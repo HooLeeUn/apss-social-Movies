@@ -31,9 +31,13 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
-from .weekly_recommendations import get_previous_closed_week_window
+from .weekly_recommendations import (
+    get_previous_closed_week_window,
+    refresh_weekly_recommendation_snapshot,
+)
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -781,7 +785,14 @@ class WeeklyRecommendationsView(generics.ListAPIView):
             week_end=window.end_date,
         ).first()
         if snapshot is None:
-            return WeeklyRecommendationItem.objects.none()
+            snapshot = refresh_weekly_recommendation_snapshot(reference_datetime=timezone.now())
+            if snapshot.week_start != window.start_date or snapshot.week_end != window.end_date:
+                snapshot = WeeklyRecommendationSnapshot.objects.filter(
+                    week_start=window.start_date,
+                    week_end=window.end_date,
+                ).first()
+            if snapshot is None:
+                return WeeklyRecommendationItem.objects.none()
 
         items = snapshot.items.select_related("movie").order_by("position")
         display_rating_subquery = Movie.objects.with_display_rating().filter(

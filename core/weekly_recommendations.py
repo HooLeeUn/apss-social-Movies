@@ -59,8 +59,8 @@ def get_previous_closed_week_window(reference_datetime=None):
 
 def get_weekly_recommendation_candidates(window):
     ratings_filter = Q(
-        movie_ratings__updated_at__gte=window.start_at,
-        movie_ratings__updated_at__lt=window.end_at,
+        movie_ratings__created_at__gte=window.start_at,
+        movie_ratings__created_at__lt=window.end_at,
     )
     return (
         Movie.objects.filter(ratings_filter)
