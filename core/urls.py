@@ -38,6 +38,7 @@ urlpatterns = [
     path("movies/", MovieListView.as_view(), name="movie-list"),
     path("feed/movies/", FeedMoviesView.as_view(), name="feed-movies"),
     path("feed/weekly-recommendations/", WeeklyRecommendationsView.as_view(), name="weekly-recommendations"),
+    path("movies/weekly/", WeeklyRecommendationsView.as_view(), name="movies-weekly"),
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
     path("movies/<int:pk>/comments/", MovieCommentsListCreateView.as_view(), name="movie-comments"),
     path("comments/directed/received/", ReceivedDirectedCommentsView.as_view(), name="directed-comments-received"),

@@ -1506,6 +1506,61 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertEqual(snapshot.items.count(), 8)
         self.assertEqual(list(snapshot.items.values_list("position", flat=True)), list(range(1, 9)))
 
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_endpoint_refreshes_snapshot_when_missing(self, mock_window):
+        movie = self._create_movie("On Demand Snapshot", genre="Mystery", external_rating=7.8)
+        rater = self.user_model.objects.create_user(
+            username="ondemand_rater", email="ondemand_rater@example.com", password="test1234"
+        )
+        self._create_rating(
+            movie=movie,
+            user=rater,
+            score=8,
+            rated_at=timezone.make_aware(datetime(2026, 3, 10, 15, 0, 0)),
+        )
+
+        mock_window.return_value = self.previous_week_window
+        self.assertFalse(
+            WeeklyRecommendationSnapshot.objects.filter(
+                week_start=self.previous_week_window.start_date,
+                week_end=self.previous_week_window.end_date,
+            ).exists()
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["movie"]["title_english"], "On Demand Snapshot")
+        self.assertTrue(
+            WeeklyRecommendationSnapshot.objects.filter(
+                week_start=self.previous_week_window.start_date,
+                week_end=self.previous_week_window.end_date,
+            ).exists()
+        )
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_movies_weekly_alias_uses_same_payload(self, mock_window):
+        movie = self._create_movie("Alias Movie", genre="Fantasy", external_rating=7.2)
+        rater = self.user_model.objects.create_user(
+            username="alias_rater", email="alias_rater@example.com", password="test1234"
+        )
+        self._create_rating(
+            movie=movie,
+            user=rater,
+            score=9,
+            rated_at=timezone.make_aware(datetime(2026, 3, 10, 16, 0, 0)),
+        )
+        self._refresh_snapshot()
+
+        mock_window.return_value = self.previous_week_window
+        response = self.client.get(reverse("movies-weekly"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["movie"]["title_english"], "Alias Movie")
+
     @patch("core.views.get_previous_closed_week_window")
     def test_endpoint_returns_snapshot_for_previous_closed_week_with_user_fields(self, mock_window):
         movie = self._create_movie("Endpoint Movie", genre="Sci-Fi", external_rating=8.0)
