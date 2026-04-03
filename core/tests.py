@@ -782,8 +782,18 @@ class MovieCommentEndpointTests(TestCase):
             status=Friendship.STATUS_ACCEPTED,
         )
         self.list_url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
+        self.movie_detail_url = reverse("movie-detail", kwargs={"pk": self.movie.pk})
+        self.movie_directed_url = reverse("movie-directed-comments", kwargs={"pk": self.movie.pk})
         self.received_url = reverse("directed-comments-received")
         self.sent_url = reverse("directed-comments-sent")
+
+    def test_get_movie_detail_returns_requested_movie(self):
+        response = self.client.get(self.movie_detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.movie.pk)
+        self.assertEqual(response.data["title_english"], "Arrival")
+        self.assertEqual(response.data["comments_count"], 0)
 
     def test_post_creates_public_comment_for_movie_without_valid_friend_mention(self):
         self.client.force_authenticate(user=self.user)
@@ -891,6 +901,45 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(other_sent_response.status_code, status.HTTP_200_OK)
         self.assertEqual(other_received_response.data, [])
         self.assertEqual(other_sent_response.data, [])
+
+    def test_directed_comments_by_movie_requires_auth_and_filters_to_participant(self):
+        other_movie = Movie.objects.create(
+            author=self.other_user,
+            title_english="Interestellar",
+            type=Movie.MOVIE,
+            release_year=2014,
+        )
+        directed_for_user = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body="Mírala hoy @comment_user",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.other_user,
+            movie=self.movie,
+            body="No visible para comment_user",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=other_movie,
+            body="Otra película @comment_user",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+
+        anonymous_response = self.client.get(self.movie_directed_url)
+        self.assertEqual(anonymous_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.movie_directed_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [directed_for_user.id])
+        self.assertTrue(all(item["movie"] == self.movie.pk for item in response.data))
 
     def test_comment_requires_movie_relation(self):
         with self.assertRaises(IntegrityError):
