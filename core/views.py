@@ -663,6 +663,25 @@ class SentDirectedCommentsView(generics.ListAPIView):
         )
 
 
+class MovieDirectedCommentsListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return annotate_comments_for_user(
+            Comment.objects.filter(
+                movie_id=self.kwargs["pk"],
+                visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .filter(
+                Q(author=self.request.user) | Q(target_user=self.request.user)
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at"),
+            self.request.user,
+        )
+
+
 class UserPostsListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = PostListSerializer
@@ -733,6 +752,36 @@ class MovieListView(generics.ListAPIView):
 
         search_ordering = ["-search_relevance"] if search else []
         return qs.order_by(*search_ordering, "-display_rating", release_year_desc, "-created_at", "-id")
+
+
+class MovieDetailView(generics.RetrieveAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = MovieListSerializer
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        user = self.request.user
+        has_preferences = user.is_authenticated and UserTasteProfile.objects.filter(
+            user_id=user.id,
+            ratings_count__gt=0,
+        ).exists()
+        if user.is_authenticated:
+            qs = Movie.objects.feed_for_user(user, include_recommendation_score=has_preferences)
+        else:
+            qs = Movie.objects.with_display_rating().with_my_rating(user)
+
+        qs = qs.with_comment_stats().select_related("author", "author__profile").annotate(
+            general_rating=F("display_rating"),
+        )
+
+        if user.is_authenticated:
+            return qs.annotate(
+                following_avg_rating=Avg(
+                    "movie_ratings__score",
+                    filter=Q(movie_ratings__user__followers__follower=user),
+                )
+            )
+        return qs.annotate(following_avg_rating=Value(None, output_field=FloatField()))
 
 
 class FeedMoviesView(generics.ListAPIView):
