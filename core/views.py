@@ -962,28 +962,33 @@ class CommentReactionView(APIView):
         serializer = CommentReactionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        reaction, created = CommentReaction.objects.update_or_create(
+        CommentReaction.objects.update_or_create(
             comment=comment,
             user=request.user,
-            defaults={"reaction_type": serializer.validated_data["reaction_type"]},
+            defaults={"reaction_type": serializer.validated_data["reaction"]},
         )
 
         annotated_comment = annotate_comments_for_user(Comment.objects.filter(pk=comment.pk), request.user).get()
         return Response(
             {
-                "comment": comment.id,
-                "reaction_type": reaction.reaction_type,
+                "comment_id": comment.id,
                 "my_reaction": annotated_comment.my_reaction,
                 "likes_count": annotated_comment.likes_count,
                 "dislikes_count": annotated_comment.dislikes_count,
-                "created": created,
             },
             status=status.HTTP_200_OK,
         )
 
     def delete(self, request, pk):
         comment = self.get_comment(pk)
-        deleted, _ = CommentReaction.objects.filter(comment=comment, user=request.user).delete()
-        if not deleted:
-            return Response({"detail": "Reaction not found."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        CommentReaction.objects.filter(comment=comment, user=request.user).delete()
+        annotated_comment = annotate_comments_for_user(Comment.objects.filter(pk=comment.pk), request.user).get()
+        return Response(
+            {
+                "comment_id": comment.id,
+                "my_reaction": None,
+                "likes_count": annotated_comment.likes_count,
+                "dislikes_count": annotated_comment.dislikes_count,
+            },
+            status=status.HTTP_200_OK,
+        )

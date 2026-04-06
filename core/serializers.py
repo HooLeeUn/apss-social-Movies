@@ -305,10 +305,16 @@ class PublicCommentFeedSerializer(CommentSerializer):
         ]
 
 
-class CommentReactionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CommentReaction
-        fields = ["reaction_type"]
+class CommentReactionSerializer(serializers.Serializer):
+    reaction = serializers.ChoiceField(
+        choices=[CommentReaction.REACT_LIKE, CommentReaction.REACT_DISLIKE],
+    )
+
+    def to_internal_value(self, data):
+        payload = dict(data)
+        if "reaction" not in payload and "reaction_type" in payload:
+            payload["reaction"] = payload["reaction_type"]
+        return super().to_internal_value(payload)
 
 
 class MovieListSerializer(serializers.ModelSerializer):

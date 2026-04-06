@@ -1389,12 +1389,12 @@ class CommentReactionAPITests(TestCase):
 
         first_response = self.client.put(
             self._reaction_url(self.public_comment),
-            {"reaction_type": CommentReaction.REACT_LIKE},
+            {"reaction": CommentReaction.REACT_LIKE},
             format="json",
         )
         second_response = self.client.put(
             self._reaction_url(self.public_comment),
-            {"reaction_type": CommentReaction.REACT_LIKE},
+            {"reaction": CommentReaction.REACT_LIKE},
             format="json",
         )
 
@@ -1404,20 +1404,20 @@ class CommentReactionAPITests(TestCase):
             CommentReaction.objects.filter(comment=self.public_comment, user=self.user).count(),
             1,
         )
-        self.assertTrue(first_response.data["created"])
-        self.assertFalse(second_response.data["created"])
+        self.assertEqual(first_response.data["comment_id"], self.public_comment.id)
+        self.assertEqual(second_response.data["comment_id"], self.public_comment.id)
 
     def test_switching_like_to_dislike_updates_existing_reaction(self):
         self.client.force_authenticate(self.user)
 
         self.client.put(
             self._reaction_url(self.public_comment),
-            {"reaction_type": CommentReaction.REACT_LIKE},
+            {"reaction": CommentReaction.REACT_LIKE},
             format="json",
         )
         response = self.client.put(
             self._reaction_url(self.public_comment),
-            {"reaction_type": CommentReaction.REACT_DISLIKE},
+            {"reaction": CommentReaction.REACT_DISLIKE},
             format="json",
         )
 
@@ -1442,7 +1442,11 @@ class CommentReactionAPITests(TestCase):
 
         response = self.client.delete(self._reaction_url(self.public_comment))
 
-        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["comment_id"], self.public_comment.id)
+        self.assertIsNone(response.data["my_reaction"])
+        self.assertEqual(response.data["likes_count"], 0)
+        self.assertEqual(response.data["dislikes_count"], 0)
         self.assertFalse(CommentReaction.objects.filter(comment=self.public_comment, user=self.user).exists())
 
     def test_stranger_cannot_react_to_directed_comment(self):
@@ -1450,12 +1454,25 @@ class CommentReactionAPITests(TestCase):
 
         response = self.client.put(
             self._reaction_url(self.directed_comment),
-            {"reaction_type": CommentReaction.REACT_LIKE},
+            {"reaction": CommentReaction.REACT_LIKE},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(CommentReaction.objects.filter(comment=self.directed_comment, user=self.stranger).exists())
+
+    def test_reaction_rejects_invalid_values(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction": "laugh"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("reaction", response.data)
+        self.assertFalse(CommentReaction.objects.filter(comment=self.public_comment, user=self.user).exists())
 
     def test_comment_serializer_exposes_reaction_counters_and_my_reaction(self):
         CommentReaction.objects.create(
