@@ -812,6 +812,36 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.data["visibility"], Comment.VISIBILITY_PUBLIC)
         self.assertIsNone(response.data["target_user"])
 
+    def test_post_creates_public_comment_without_mention_fields(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "Gran película"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Comment.objects.count(), 1)
+        comment = Comment.objects.get()
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
+    def test_post_creates_public_comment_when_mention_aliases_are_blank(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "Comentario público", "mentioned_username": "", "recipient_username": ""},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Comment.objects.count(), 1)
+        comment = Comment.objects.get()
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
     def test_post_with_accepted_friend_mention_creates_directed_comment(self):
         self.client.force_authenticate(user=self.user)
 
@@ -838,12 +868,38 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(comment.visibility, Comment.VISIBILITY_MENTIONED)
         self.assertEqual(comment.target_user, self.friend_user)
 
+    def test_post_with_explicit_recipient_username_creates_directed_comment(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "Te la recomiendo", "recipient_username": self.friend_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        comment = Comment.objects.get()
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_MENTIONED)
+        self.assertEqual(comment.target_user, self.friend_user)
+
     def test_post_with_non_friend_mentioned_username_is_rejected(self):
         self.client.force_authenticate(user=self.user)
 
         response = self.client.post(
             self.list_url,
             {"body": "No debería publicarse", "mentioned_username": self.other_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Comment.objects.count(), 0)
+
+    def test_post_with_invalid_mentioned_username_is_rejected(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "No debería publicarse", "mentioned_username": "usuario_inexistente"},
             format="json",
         )
 
