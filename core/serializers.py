@@ -279,6 +279,11 @@ class CommentSerializer(serializers.ModelSerializer):
             "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
         ]
 
+    def create(self, validated_data):
+        validated_data.pop("mentioned_username", None)
+        validated_data.pop("recipient_username", None)
+        return super().create(validated_data)
+
 
 class PublicCommentFeedSerializer(CommentSerializer):
     author_followers_count = serializers.IntegerField(read_only=True)
