@@ -9,7 +9,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
@@ -586,9 +586,28 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
         return target_user
 
+    def _get_mentioned_friend_from_payload(self, data):
+        username = (data.get("mentioned_username") or data.get("recipient_username") or "").strip()
+        if not username:
+            return None, False
+
+        target_user = User.objects.filter(username=username).first()
+        if target_user is None or target_user == self.request.user:
+            raise ValidationError({"mentioned_username": "Mentioned user is invalid."})
+
+        friendship = Friendship.between(self.request.user, target_user).filter(
+            status=Friendship.STATUS_ACCEPTED,
+        ).first()
+        if friendship is None:
+            raise ValidationError({"mentioned_username": "You can only mention users who are your friends."})
+
+        return target_user, True
+
     def perform_create(self, serializer):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
-        target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
+        target_user, has_explicit_mention = self._get_mentioned_friend_from_payload(serializer.validated_data)
+        if not has_explicit_mention:
+            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
         visibility = Comment.VISIBILITY_MENTIONED if target_user else Comment.VISIBILITY_PUBLIC
         serializer.save(
             author=self.request.user,
@@ -663,7 +682,7 @@ class SentDirectedCommentsView(generics.ListAPIView):
         )
 
 
-class MovieDirectedCommentsListView(generics.ListAPIView):
+class MovieDirectedCommentsListView(MovieCommentsListCreateView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = CommentSerializer
 
@@ -679,6 +698,21 @@ class MovieDirectedCommentsListView(generics.ListAPIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at"),
             self.request.user,
+        )
+
+    def perform_create(self, serializer):
+        movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
+        target_user, _ = self._get_mentioned_friend_from_payload(serializer.validated_data)
+        if target_user is None:
+            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
+        if target_user is None:
+            raise ValidationError({"mentioned_username": "Directed comments require a valid friend mention."})
+
+        serializer.save(
+            author=self.request.user,
+            movie=movie,
+            target_user=target_user,
+            visibility=Comment.VISIBILITY_MENTIONED,
         )
 
 

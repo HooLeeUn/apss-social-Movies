@@ -261,6 +261,8 @@ class RegisterSerializer(serializers.ModelSerializer):
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     target_user = serializers.PrimaryKeyRelatedField(read_only=True)
+    mentioned_username = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    recipient_username = serializers.CharField(write_only=True, required=False, allow_blank=True)
     likes_count = serializers.IntegerField(read_only=True)
     dislikes_count = serializers.IntegerField(read_only=True)
     my_reaction = serializers.CharField(read_only=True, allow_null=True)
@@ -269,6 +271,7 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         fields = [
             "id", "author", "movie", "target_user", "body", "visibility",
+            "mentioned_username", "recipient_username",
             "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
         ]
         read_only_fields = [

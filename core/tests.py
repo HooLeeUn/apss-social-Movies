@@ -824,6 +824,32 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.data["visibility"], Comment.VISIBILITY_MENTIONED)
         self.assertEqual(response.data["target_user"], self.friend_user.pk)
 
+    def test_post_with_explicit_mentioned_username_creates_directed_comment(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "Recomendación privada", "mentioned_username": self.friend_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        comment = Comment.objects.get()
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_MENTIONED)
+        self.assertEqual(comment.target_user, self.friend_user)
+
+    def test_post_with_non_friend_mentioned_username_is_rejected(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.list_url,
+            {"body": "No debería publicarse", "mentioned_username": self.other_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Comment.objects.count(), 0)
+
     def test_get_lists_only_public_comments_for_requested_movie(self):
         other_movie = Movie.objects.create(
             author=self.other_user,
@@ -940,6 +966,28 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["id"] for item in response.data], [directed_for_user.id])
         self.assertTrue(all(item["movie"] == self.movie.pk for item in response.data))
+
+    def test_post_directed_comment_by_movie_endpoint_requires_valid_friend_mention(self):
+        self.client.force_authenticate(user=self.user)
+
+        valid_response = self.client.post(
+            self.movie_directed_url,
+            {"body": "Solo para mi amigo", "mentioned_username": self.friend_user.username},
+            format="json",
+        )
+        self.assertEqual(valid_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Comment.objects.count(), 1)
+        created = Comment.objects.get()
+        self.assertEqual(created.visibility, Comment.VISIBILITY_MENTIONED)
+        self.assertEqual(created.target_user, self.friend_user)
+
+        invalid_response = self.client.post(
+            self.movie_directed_url,
+            {"body": "No válido", "mentioned_username": self.other_user.username},
+            format="json",
+        )
+        self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Comment.objects.count(), 1)
 
     def test_comment_requires_movie_relation(self):
         with self.assertRaises(IntegrityError):
