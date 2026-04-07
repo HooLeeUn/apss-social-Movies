@@ -77,6 +77,54 @@ def apply_movie_search(queryset, search):
     return queryset.filter(filters).annotate(search_relevance=score_expr)
 
 
+VALID_FEED_GENRES = {
+    "Action",
+    "Animation",
+    "Comedy",
+    "Documentary",
+    "Drama",
+    "Horror",
+    "Musical",
+    "Sci-Fi",
+}
+
+
+def parse_feed_genre_filters(request):
+    raw_values = []
+    for key in ("genres", "genre"):
+        value = request.query_params.get(key)
+        if value:
+            raw_values.extend(value.split(","))
+
+    normalized = []
+    seen = set()
+    for item in raw_values:
+        candidate = item.strip()
+        if not candidate:
+            continue
+        candidate = re.sub(r"\s+", " ", candidate)
+        matched_genre = next((genre for genre in VALID_FEED_GENRES if genre.lower() == candidate.lower()), None)
+        if matched_genre is None or matched_genre in seen:
+            continue
+        seen.add(matched_genre)
+        normalized.append(matched_genre)
+    return normalized[:3]
+
+
+def apply_feed_genre_filters(queryset, genres):
+    if not genres:
+        return queryset
+
+    for genre in genres:
+        queryset = queryset.filter(
+            Q(genre_key=genre)
+            | Q(genre_key__startswith=f"{genre}|")
+            | Q(genre_key__endswith=f"|{genre}")
+            | Q(genre_key__contains=f"|{genre}|")
+        )
+    return queryset
+
+
 def annotate_comments_for_user(queryset, user):
     return queryset.with_reaction_stats(user)
 
@@ -825,6 +873,7 @@ class FeedMoviesView(generics.ListAPIView):
     def get_queryset(self):
         user = self.request.user
         has_preferences = UserTasteProfile.objects.filter(user_id=user.id, ratings_count__gt=0).exists()
+        selected_genres = parse_feed_genre_filters(self.request)
         qs = (
             Movie.objects
             .feed_for_user(user, include_recommendation_score=has_preferences)
@@ -840,8 +889,7 @@ class FeedMoviesView(generics.ListAPIView):
 
         if movie_type := self.request.query_params.get("type"):
             qs = qs.filter(type=movie_type)
-        if genre := self.request.query_params.get("genre"):
-            qs = qs.filter(genre__icontains=genre)
+        qs = apply_feed_genre_filters(qs, selected_genres)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
 

@@ -429,6 +429,82 @@ class FeedMoviesEndpointTests(TestCase):
         titles = [item["title_english"] for item in response.data["results"]]
         self.assertEqual(titles[:2], [recent_movie.title_english, null_year_movie.title_english])
 
+    def test_feed_genre_filter_single_value_matches_inside_multi_genre_field(self):
+        matched = self._create_movie(
+            title_english="Action Comedy Pick",
+            genre="Action, Comedy",
+            external_votes=7000,
+        )
+        self._create_movie(
+            title_english="Drama Pick",
+            genre="Drama",
+            external_votes=7000,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"genre": "comedy", "exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles, [matched.title_english])
+
+    def test_feed_genre_filter_two_genres_uses_and_logic(self):
+        and_match = self._create_movie(
+            title_english="AND Match",
+            genre="Action, Comedy, Drama",
+            external_votes=7000,
+        )
+        self._create_movie(
+            title_english="Only Action",
+            genre="Action",
+            external_votes=7000,
+        )
+        self._create_movie(
+            title_english="Only Comedy",
+            genre="Comedy",
+            external_votes=7000,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"genres": "Action,Comedy", "exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles, [and_match.title_english])
+
+    def test_feed_genre_filter_preserves_existing_ranking_order_within_filtered_results(self):
+        UserTasteProfile.objects.create(user=self.user, ratings_count=5)
+        top_filtered = self._create_movie(
+            title_english="Top Filtered",
+            genre="Action, Comedy",
+            director="Preferred Director",
+            external_rating=7.0,
+            external_votes=8000,
+        )
+        low_filtered = self._create_movie(
+            title_english="Low Filtered",
+            genre="Action, Comedy",
+            director="Other Director",
+            external_rating=6.0,
+            external_votes=8000,
+        )
+        self._create_movie(
+            title_english="Outside Filter",
+            genre="Drama",
+            director="Preferred Director",
+            external_rating=9.5,
+            external_votes=9000,
+        )
+        UserGenrePreference.objects.create(user=self.user, genre="Action|Comedy", count_10=2)
+        UserDirectorPreference.objects.create(user=self.user, director="Preferred Director", count_10=2)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"genres": "Action,Comedy", "exclude_rated": "false"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles[:2], [top_filtered.title_english, low_filtered.title_english])
+
     def test_feed_does_not_overprioritize_high_rating_with_low_confidence(self):
         trusted_movie = self._create_movie(
             title_english="Trusted Consensus",

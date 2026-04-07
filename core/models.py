@@ -146,8 +146,14 @@ class MovieQuerySet(models.QuerySet):
         )
 
     def with_comment_stats(self):
+        comments_count_subquery = (
+            Comment.objects.filter(movie_id=OuterRef("pk"))
+            .values("movie_id")
+            .annotate(total=Count("id"))
+            .values("total")[:1]
+        )
         return self.annotate(
-            comments_count=Count("comments", distinct=True),
+            comments_count=Coalesce(Subquery(comments_count_subquery, output_field=IntegerField()), Value(0)),
         )
 
     def with_ranking_scores(self):
