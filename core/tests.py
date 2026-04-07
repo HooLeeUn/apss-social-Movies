@@ -472,6 +472,60 @@ class FeedMoviesEndpointTests(TestCase):
         titles = [item["title_english"] for item in response.data["results"]]
         self.assertEqual(titles, [and_match.title_english])
 
+    def test_feed_genre_filter_pagination_keeps_filtered_subset_across_pages(self):
+        for index in range(6):
+            self._create_movie(
+                title_english=f"Sci-Fi Match {index}",
+                genre="Sci-Fi, Action",
+                external_votes=7000,
+                release_year=2020 + index,
+            )
+        for index in range(4):
+            self._create_movie(
+                title_english=f"Outside Genre {index}",
+                genre="Drama",
+                external_votes=7000,
+                release_year=2010 + index,
+            )
+
+        self.client.force_authenticate(user=self.user)
+        first_page = self.client.get(
+            self.url,
+            {"genre": "Sci-Fi", "exclude_rated": "false", "page_size": 2},
+        )
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data["count"], 6)
+        self.assertIsNotNone(first_page.data["next"])
+        self.assertTrue(all("Sci-Fi" in item["genre"] for item in first_page.data["results"]))
+
+        second_page = self.client.get(first_page.data["next"])
+        self.assertEqual(second_page.status_code, status.HTTP_200_OK)
+        self.assertTrue(all("Sci-Fi" in item["genre"] for item in second_page.data["results"]))
+
+        third_page = self.client.get(second_page.data["next"])
+        self.assertEqual(third_page.status_code, status.HTTP_200_OK)
+        self.assertTrue(all("Sci-Fi" in item["genre"] for item in third_page.data["results"]))
+        self.assertIsNone(third_page.data["next"])
+
+    def test_feed_genre_filter_accepts_repeated_genres_query_params(self):
+        and_match = self._create_movie(
+            title_english="Repeated Params AND Match",
+            genre="Action, Comedy",
+            external_votes=7000,
+        )
+        self._create_movie(
+            title_english="Action Only",
+            genre="Action",
+            external_votes=7000,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"{self.url}?genres=Action&genres=Comedy&exclude_rated=false")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        titles = [item["title_english"] for item in response.data["results"]]
+        self.assertEqual(titles, [and_match.title_english])
+
     def test_feed_genre_filter_preserves_existing_ranking_order_within_filtered_results(self):
         UserTasteProfile.objects.create(user=self.user, ratings_count=5)
         top_filtered = self._create_movie(

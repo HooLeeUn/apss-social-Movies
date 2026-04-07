@@ -88,22 +88,36 @@ VALID_FEED_GENRES = {
     "Sci-Fi",
 }
 
+FEED_GENRE_ALIASES = {
+    "sci fi": "Sci-Fi",
+    "science fiction": "Sci-Fi",
+    "ciencia ficcion": "Sci-Fi",
+    "ciencia ficción": "Sci-Fi",
+}
+
+
+def normalize_feed_genre_candidate(value):
+    candidate = re.sub(r"\s+", " ", value.strip())
+    if not candidate:
+        return None
+    lowered = candidate.lower()
+    if lowered in FEED_GENRE_ALIASES:
+        return FEED_GENRE_ALIASES[lowered]
+    return next((genre for genre in VALID_FEED_GENRES if genre.lower() == lowered), None)
+
 
 def parse_feed_genre_filters(request):
     raw_values = []
     for key in ("genres", "genre"):
-        value = request.query_params.get(key)
-        if value:
-            raw_values.extend(value.split(","))
+        values = request.query_params.getlist(key)
+        for value in values:
+            if value:
+                raw_values.extend(value.split(","))
 
     normalized = []
     seen = set()
     for item in raw_values:
-        candidate = item.strip()
-        if not candidate:
-            continue
-        candidate = re.sub(r"\s+", " ", candidate)
-        matched_genre = next((genre for genre in VALID_FEED_GENRES if genre.lower() == candidate.lower()), None)
+        matched_genre = normalize_feed_genre_candidate(item)
         if matched_genre is None or matched_genre in seen:
             continue
         seen.add(matched_genre)
@@ -116,11 +130,14 @@ def apply_feed_genre_filters(queryset, genres):
         return queryset
 
     for genre in genres:
+        normalized_genre = re.escape(genre.lower())
+        genre_lookup = rf"(^|,\s*){normalized_genre}(\s*,|$)"
         queryset = queryset.filter(
             Q(genre_key=genre)
             | Q(genre_key__startswith=f"{genre}|")
             | Q(genre_key__endswith=f"|{genre}")
             | Q(genre_key__contains=f"|{genre}|")
+            | Q(genre__iregex=genre_lookup)
         )
     return queryset
 
