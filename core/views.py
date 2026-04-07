@@ -942,8 +942,7 @@ class FeedMoviesView(generics.ListAPIView):
         queryset = Movie.objects.all()
 
         if self.request.query_params.get("exclude_rated", "true").lower() != "false":
-            user_rating_exists = MovieRating.objects.filter(movie_id=OuterRef("pk"), user_id=user.id)
-            queryset = queryset.annotate(has_my_rating=Exists(user_rating_exists)).filter(has_my_rating=False)
+            queryset = queryset.exclude(movie_ratings__user_id=user.id)
 
         if search := self.request.query_params.get("search"):
             queryset = apply_movie_search(queryset, search, include_relevance=include_search_relevance)
@@ -974,8 +973,11 @@ class FeedMoviesView(generics.ListAPIView):
         score_start = perf_counter()
         qs = (
             filtered_base_queryset
-            .feed_for_user(user, include_recommendation_score=has_preferences)
-            .with_comment_stats()
+            .feed_for_user(
+                user,
+                include_recommendation_score=has_preferences,
+                include_my_rating=False,
+            )
             .select_related("author", "author__profile")
         )
         self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
@@ -994,6 +996,25 @@ class FeedMoviesView(generics.ListAPIView):
         )
         self._record_profile_timing("final_order_by_build_seconds", perf_counter() - order_start)
         return ordered_queryset
+
+    def _hydrate_page_metrics(self, page_items):
+        if not page_items:
+            return
+
+        movie_ids = [movie.id for movie in page_items]
+        comments_count_by_movie = dict(
+            Comment.objects.filter(movie_id__in=movie_ids)
+            .values_list("movie_id")
+            .annotate(total=Count("id"))
+        )
+        ratings_by_movie = dict(
+            MovieRating.objects.filter(user_id=self.request.user.id, movie_id__in=movie_ids)
+            .values_list("movie_id", "score")
+        )
+
+        for movie in page_items:
+            movie.comments_count = comments_count_by_movie.get(movie.id, 0)
+            movie.my_rating = ratings_by_movie.get(movie.id)
 
     def list(self, request, *args, **kwargs):
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
@@ -1014,6 +1035,10 @@ class FeedMoviesView(generics.ListAPIView):
             page_fetch_start = perf_counter()
             page_items = list(page)
             self._record_profile_timing("page_results_sql_seconds", perf_counter() - page_fetch_start)
+
+            page_hydration_start = perf_counter()
+            self._hydrate_page_metrics(page_items)
+            self._record_profile_timing("page_hydration_seconds", perf_counter() - page_hydration_start)
 
             serializer_start = perf_counter()
             serializer = self.get_serializer(page_items, many=True)
