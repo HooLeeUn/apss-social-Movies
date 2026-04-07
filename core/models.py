@@ -186,10 +186,12 @@ class MovieQuerySet(models.QuerySet):
             ),
         )
 
-    def feed_for_user(self, user, include_recommendation_score=True):
-        qs = self.with_display_rating().with_ranking_scores().with_my_rating(user).annotate(
+    def feed_for_user(self, user, include_recommendation_score=True, include_my_rating=True):
+        qs = self.with_display_rating().with_ranking_scores().annotate(
             recency_score=Coalesce(Cast("release_year", FloatField()), Value(0.0)) / Value(1000.0),
         )
+        if include_my_rating:
+            qs = qs.with_my_rating(user)
         if not include_recommendation_score:
             return qs.annotate(
                 recommendation_score=(
