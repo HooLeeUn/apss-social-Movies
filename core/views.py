@@ -1,6 +1,9 @@
 import re
+import logging
+from time import perf_counter
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from rest_framework.generics import RetrieveAPIView, ListAPIView
@@ -41,6 +44,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 def split_search_terms(search):
@@ -892,6 +896,47 @@ class FeedMoviesView(generics.ListAPIView):
     serializer_class = MovieListSerializer
     pagination_class = FeedMoviesPagination
 
+    def _is_feed_profiling_enabled(self):
+        query_flag = self.request.query_params.get("profile_feed", "").lower() in {"1", "true", "yes"}
+        return bool(getattr(settings, "FEED_PROFILING_ENABLED", False) or query_flag)
+
+    def _should_log_explain(self):
+        return self.request.query_params.get("profile_explain", "").lower() in {"1", "true", "yes"}
+
+    def _record_profile_timing(self, key, elapsed_seconds):
+        if not getattr(self, "_feed_profile_enabled", False):
+            return
+        self._feed_profile_timings[key] = round(elapsed_seconds, 6)
+
+    def _log_feed_profile_summary(self):
+        if not getattr(self, "_feed_profile_enabled", False):
+            return
+        logger.info(
+            "feed.movies.profile user_id=%s params=%s timings=%s",
+            getattr(self.request.user, "id", None),
+            dict(self.request.query_params),
+            self._feed_profile_timings,
+        )
+
+    def _log_profile_sql(self, label, queryset):
+        if not getattr(self, "_feed_profile_enabled", False):
+            return
+        try:
+            logger.info("feed.movies.profile.sql %s=%s", label, str(queryset.query))
+        except Exception as exc:
+            logger.warning("feed.movies.profile.sql_failed label=%s error=%s", label, exc)
+
+    def _log_profile_explain(self, label, queryset):
+        if not (getattr(self, "_feed_profile_enabled", False) and self._should_log_explain()):
+            return
+        try:
+            explain_start = perf_counter()
+            explain_text = queryset.explain(analyze=True, buffers=True)
+            self._record_profile_timing(f"{label}_explain_analyze_seconds", perf_counter() - explain_start)
+            logger.info("feed.movies.profile.explain %s=\n%s", label, explain_text)
+        except Exception as exc:
+            logger.warning("feed.movies.profile.explain_failed label=%s error=%s", label, exc)
+
     def _build_filtered_feed_base_queryset(self, include_search_relevance):
         user = self.request.user
         queryset = Movie.objects.all()
@@ -917,19 +962,29 @@ class FeedMoviesView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
+        self._feed_profile_enabled = self._is_feed_profiling_enabled()
+        if self._feed_profile_enabled and not hasattr(self, "_feed_profile_timings"):
+            self._feed_profile_timings = {}
+
         has_preferences = UserTasteProfile.objects.filter(user_id=user.id, ratings_count__gt=0).exists()
+        base_start = perf_counter()
         filtered_base_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=True)
+        self._record_profile_timing("base_queryset_build_seconds", perf_counter() - base_start)
+
+        score_start = perf_counter()
         qs = (
             filtered_base_queryset
             .feed_for_user(user, include_recommendation_score=has_preferences)
             .with_comment_stats()
             .select_related("author", "author__profile")
         )
+        self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
 
         search_ordering = ["-search_relevance"] if self.request.query_params.get("search") else []
-        return qs.order_by(
+        order_start = perf_counter()
+        ordered_queryset = qs.order_by(
             *search_ordering,
             "-recommendation_score",
             "-ranking_confidence_score",
@@ -937,6 +992,49 @@ class FeedMoviesView(generics.ListAPIView):
             release_year_desc,
             "-id",
         )
+        self._record_profile_timing("final_order_by_build_seconds", perf_counter() - order_start)
+        return ordered_queryset
+
+    def list(self, request, *args, **kwargs):
+        self._feed_profile_enabled = self._is_feed_profiling_enabled()
+        if self._feed_profile_enabled:
+            self._feed_profile_timings = {}
+            total_start = perf_counter()
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            page_queryset = getattr(page, "object_list", None)
+            if page_queryset is not None:
+                self._log_profile_sql("page_queryset_sql", page_queryset)
+                self._log_profile_explain("page_queryset", page_queryset)
+            self._log_profile_sql("count_queryset_sql", self.get_feed_count_queryset())
+            self._log_profile_explain("count_queryset", self.get_feed_count_queryset())
+
+            page_fetch_start = perf_counter()
+            page_items = list(page)
+            self._record_profile_timing("page_results_sql_seconds", perf_counter() - page_fetch_start)
+
+            serializer_start = perf_counter()
+            serializer = self.get_serializer(page_items, many=True)
+            serialized_data = serializer.data
+            self._record_profile_timing("serializer_seconds", perf_counter() - serializer_start)
+
+            response = self.get_paginated_response(serialized_data)
+            if self._feed_profile_enabled:
+                self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
+                self._log_feed_profile_summary()
+            return response
+
+        serializer_start = perf_counter()
+        serializer = self.get_serializer(queryset, many=True)
+        serialized_data = serializer.data
+        self._record_profile_timing("serializer_seconds", perf_counter() - serializer_start)
+        response = Response(serialized_data)
+        if self._feed_profile_enabled:
+            self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
+            self._log_feed_profile_summary()
+        return response
 
 
 class WeeklyRecommendationsView(generics.ListAPIView):
