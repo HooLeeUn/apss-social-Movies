@@ -31,6 +31,7 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
+from .pagination import FeedMoviesPagination
 from .weekly_recommendations import (
     get_previous_closed_week_window,
     refresh_weekly_recommendation_snapshot,
@@ -46,7 +47,7 @@ def split_search_terms(search):
     return [term for term in re.split(r"\s+", search.strip()) if term]
 
 
-def apply_movie_search(queryset, search):
+def apply_movie_search(queryset, search, include_relevance=True):
     terms = split_search_terms(search)
     if not terms:
         return queryset
@@ -74,7 +75,10 @@ def apply_movie_search(queryset, search):
             )
         filters &= term_match
 
-    return queryset.filter(filters).annotate(search_relevance=score_expr)
+    filtered_queryset = queryset.filter(filters)
+    if not include_relevance:
+        return filtered_queryset
+    return filtered_queryset.annotate(search_relevance=score_expr)
 
 
 VALID_FEED_GENRES = {
@@ -886,27 +890,41 @@ class MovieDetailView(generics.RetrieveAPIView):
 class FeedMoviesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MovieListSerializer
+    pagination_class = FeedMoviesPagination
+
+    def _build_filtered_feed_base_queryset(self, include_search_relevance):
+        user = self.request.user
+        queryset = Movie.objects.all()
+
+        if self.request.query_params.get("exclude_rated", "true").lower() != "false":
+            user_rating_exists = MovieRating.objects.filter(movie_id=OuterRef("pk"), user_id=user.id)
+            queryset = queryset.annotate(has_my_rating=Exists(user_rating_exists)).filter(has_my_rating=False)
+
+        if search := self.request.query_params.get("search"):
+            queryset = apply_movie_search(queryset, search, include_relevance=include_search_relevance)
+
+        if movie_type := self.request.query_params.get("type"):
+            queryset = queryset.filter(type=movie_type)
+
+        selected_genres = parse_feed_genre_filters(self.request)
+        queryset = apply_feed_genre_filters(queryset, selected_genres)
+        return queryset
+
+    def get_feed_count_queryset(self):
+        if not hasattr(self, "_feed_count_queryset"):
+            self._feed_count_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=False)
+        return self._feed_count_queryset
 
     def get_queryset(self):
         user = self.request.user
         has_preferences = UserTasteProfile.objects.filter(user_id=user.id, ratings_count__gt=0).exists()
-        selected_genres = parse_feed_genre_filters(self.request)
+        filtered_base_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=True)
         qs = (
-            Movie.objects
+            filtered_base_queryset
             .feed_for_user(user, include_recommendation_score=has_preferences)
             .with_comment_stats()
             .select_related("author", "author__profile")
         )
-
-        if self.request.query_params.get("exclude_rated", "true").lower() != "false":
-            qs = qs.filter(my_rating__isnull=True)
-
-        if search := self.request.query_params.get("search"):
-            qs = apply_movie_search(qs, search)
-
-        if movie_type := self.request.query_params.get("type"):
-            qs = qs.filter(type=movie_type)
-        qs = apply_feed_genre_filters(qs, selected_genres)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
 
