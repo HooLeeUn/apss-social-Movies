@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from rest_framework.pagination import PageNumberPagination
 
 
@@ -17,5 +19,9 @@ class FeedMoviesPagination(DefaultPagination):
     def get_count(self, queryset):
         view = getattr(self, "_view", None)
         if view and hasattr(view, "get_feed_count_queryset"):
-            return view.get_feed_count_queryset().count()
+            start = perf_counter()
+            count = view.get_feed_count_queryset().count()
+            if hasattr(view, "_record_profile_timing"):
+                view._record_profile_timing("paginated_count_sql_seconds", perf_counter() - start)
+            return count
         return super().get_count(queryset)
