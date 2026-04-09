@@ -343,7 +343,10 @@ class MovieRatingSerializer(serializers.Serializer):
 
 
 class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
+    display_rating = serializers.FloatField(read_only=True)
     general_rating = serializers.FloatField(read_only=True)
+    following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    my_rating = serializers.IntegerField(read_only=True, allow_null=True)
 
     class Meta:
         model = Movie
