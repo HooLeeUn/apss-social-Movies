@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError
@@ -2229,3 +2230,338 @@ class PublicCommentsFeedViewTests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ProfileFeedActivityViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.viewer = get_user_model().objects.create_user(
+            username="profile_feed_viewer",
+            email="profile-feed-viewer@example.com",
+            password="test1234",
+        )
+        self.actor = get_user_model().objects.create_user(
+            username="profile_feed_actor",
+            email="profile-feed-actor@example.com",
+            password="test1234",
+        )
+        self.friend = get_user_model().objects.create_user(
+            username="profile_feed_friend",
+            email="profile-feed-friend@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.viewer)
+        self.url = reverse("profile-feed-activity")
+        self.movie = Movie.objects.create(
+            author=self.viewer,
+            title_english="Profile Feed Movie",
+            title_spanish="Pelicula Feed",
+            release_year=2024,
+            type=Movie.MOVIE,
+            image="https://cdn.example.com/profile-feed.jpg",
+        )
+        self.movie_without_image = Movie.objects.create(
+            author=self.viewer,
+            title_english="No image movie",
+            release_year=2023,
+            type=Movie.MOVIE,
+        )
+
+    def _add_follow(self, actor):
+        Follow.objects.create(follower=self.viewer, following=actor)
+
+    def _add_friendship(self, friend_user):
+        Friendship.objects.create(
+            requester=self.viewer,
+            user1=min(self.viewer, friend_user, key=lambda u: u.id),
+            user2=max(self.viewer, friend_user, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+    def _fetch_ids(self, *, scope):
+        response = self.client.get(self.url, {"scope": scope})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [item["id"] for item in response.data["results"]], response
+
+    def _set_created_at(self, model_cls, object_id, created_at):
+        model_cls.objects.filter(pk=object_id).update(created_at=created_at)
+
+    def test_requires_authentication(self):
+        self.client.force_authenticate(None)
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_missing_scope_returns_400(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("scope", response.data)
+
+    def test_invalid_scope_returns_400(self):
+        response = self.client.get(self.url, {"scope": "invalid-scope"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("scope", response.data)
+
+    def test_following_returns_ratings_from_followed_users(self):
+        self._add_follow(self.actor)
+        rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertIn(f"rating:{rating.id}", ids)
+
+    def test_following_returns_public_comments_from_followed_users(self):
+        self._add_follow(self.actor)
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Public comment in following feed",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertIn(f"public_comment:{comment.id}", ids)
+
+    def test_following_returns_public_comment_likes_from_followed_users(self):
+        self._add_follow(self.actor)
+        comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="Public comment liked by followed actor",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=self.actor,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertIn(f"public_comment_like:{reaction.id}", ids)
+
+    def test_friends_returns_ratings_from_accepted_friends(self):
+        self._add_friendship(self.friend)
+        rating = MovieRating.objects.create(user=self.friend, movie=self.movie, score=7)
+
+        ids, _ = self._fetch_ids(scope="friends")
+        self.assertIn(f"rating:{rating.id}", ids)
+
+    def test_friends_returns_public_comments_from_accepted_friends(self):
+        self._add_friendship(self.friend)
+        comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="Friend public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        ids, _ = self._fetch_ids(scope="friends")
+        self.assertIn(f"public_comment:{comment.id}", ids)
+
+    def test_friends_returns_public_comment_likes_from_accepted_friends(self):
+        self._add_friendship(self.friend)
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Public comment liked by friend",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=self.friend,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="friends")
+        self.assertIn(f"public_comment_like:{reaction.id}", ids)
+
+    def test_excludes_authenticated_user_activity(self):
+        self._add_follow(self.actor)
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
+        actor_rating = MovieRating.objects.create(user=self.actor, movie=self.movie_without_image, score=6)
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertNotIn(f"rating:{own_rating.id}", ids)
+        self.assertIn(f"rating:{actor_rating.id}", ids)
+
+    def test_excludes_private_direct_comments(self):
+        self._add_follow(self.actor)
+        public_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Visible comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        private_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Mentioned only comment",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.viewer,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertIn(f"public_comment:{public_comment.id}", ids)
+        self.assertNotIn(f"public_comment:{private_comment.id}", ids)
+
+    def test_excludes_likes_on_private_direct_comments(self):
+        self._add_follow(self.actor)
+        private_comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="Private comment should not surface through likes",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.viewer,
+        )
+        private_like = CommentReaction.objects.create(
+            user=self.actor,
+            comment=private_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertNotIn(f"public_comment_like:{private_like.id}", ids)
+
+    def test_excludes_dislikes(self):
+        self._add_follow(self.actor)
+        comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="Comment disliked by followed actor",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        dislike = CommentReaction.objects.create(
+            user=self.actor,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertNotIn(f"public_comment_like:{dislike.id}", ids)
+
+    def test_only_returns_allowed_activity_types(self):
+        self._add_follow(self.actor)
+        rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Allowed public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=self.actor,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        allowed_types = {"rating", "public_comment", "public_comment_like"}
+        returned_types = {item["activity_type"] for item in response.data["results"]}
+        self.assertTrue(returned_types.issubset(allowed_types))
+        self.assertIn(f"rating:{rating.id}", [item["id"] for item in response.data["results"]])
+        self.assertIn(f"public_comment:{comment.id}", [item["id"] for item in response.data["results"]])
+        self.assertIn(f"public_comment_like:{reaction.id}", [item["id"] for item in response.data["results"]])
+
+    def test_orders_by_created_at_desc_with_stable_tie_breaker(self):
+        self._add_follow(self.actor)
+        baseline = timezone.now()
+
+        newer_rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=5)
+        older_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie_without_image,
+            body="Older public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        tie_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Tie comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        tie_like = CommentReaction.objects.create(
+            user=self.actor,
+            comment=tie_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        newer_time = baseline + timezone.timedelta(minutes=2)
+        older_time = baseline - timezone.timedelta(minutes=2)
+        tie_time = baseline
+        self._set_created_at(MovieRating, newer_rating.id, newer_time)
+        self._set_created_at(Comment, older_comment.id, older_time)
+        self._set_created_at(Comment, tie_comment.id, tie_time)
+        self._set_created_at(CommentReaction, tie_like.id, tie_time)
+
+        ids_first, _ = self._fetch_ids(scope="following")
+        ids_second, _ = self._fetch_ids(scope="following")
+
+        self.assertEqual(ids_first, ids_second)
+        self.assertEqual(ids_first[0], f"rating:{newer_rating.id}")
+        self.assertLess(ids_first.index(f"public_comment_like:{tie_like.id}"), ids_first.index(f"public_comment:{tie_comment.id}"))
+        self.assertEqual(ids_first[-1], f"public_comment:{older_comment.id}")
+
+    def test_returns_standard_paginated_format(self):
+        self._add_follow(self.actor)
+        MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
+        Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="First public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        Comment.objects.create(
+            author=self.actor,
+            movie=self.movie_without_image,
+            body="Second public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        response = self.client.get(self.url, {"scope": "following", "page_size": 2})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("count", response.data)
+        self.assertIn("next", response.data)
+        self.assertIn("previous", response.data)
+        self.assertIn("results", response.data)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertIsNotNone(response.data["next"])
+
+        next_page = self.client.get(response.data["next"])
+        self.assertEqual(next_page.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(next_page.data["previous"])
+
+    def test_actor_avatar_is_null_or_valid_string(self):
+        self._add_follow(self.actor)
+        no_avatar_rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=4)
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item_by_id = {item["id"]: item for item in response.data["results"]}
+        self.assertIsNone(item_by_id[f"rating:{no_avatar_rating.id}"]["actor"]["avatar"])
+
+        self.actor.profile.avatar = SimpleUploadedFile(
+            "avatar.jpg",
+            b"avatar-content",
+            content_type="image/jpeg",
+        )
+        self.actor.profile.save(update_fields=["avatar"])
+        avatar_rating = MovieRating.objects.create(user=self.actor, movie=self.movie_without_image, score=10)
+
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item_by_id = {item["id"]: item for item in response.data["results"]}
+        self.assertIsInstance(item_by_id[f"rating:{avatar_rating.id}"]["actor"]["avatar"], str)
+        self.assertTrue(item_by_id[f"rating:{avatar_rating.id}"]["actor"]["avatar"].startswith("http://testserver/media/avatars/"))
+
+    def test_movie_image_contract_is_consistent_with_or_without_image(self):
+        self._add_follow(self.actor)
+        rating_with_image = MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
+        rating_without_image = MovieRating.objects.create(user=self.actor, movie=self.movie_without_image, score=7)
+
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item_by_id = {item["id"]: item for item in response.data["results"]}
+
+        self.assertEqual(
+            item_by_id[f"rating:{rating_with_image.id}"]["movie"]["image"],
+            "https://cdn.example.com/profile-feed.jpg",
+        )
+        self.assertIsNone(item_by_id[f"rating:{rating_without_image.id}"]["movie"]["image"])

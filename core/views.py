@@ -15,7 +15,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
-    PostListSerializer, PostCreateSerializer, PostDetailSerializer,
+    PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
@@ -36,6 +36,7 @@ from .models import (
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .pagination import FeedMoviesPagination
+from .social_feed import SocialActivityFeedService
 from .weekly_recommendations import (
     get_previous_closed_week_window,
     refresh_weekly_recommendation_snapshot,
@@ -638,6 +639,32 @@ class PublicCommentsFeedView(generics.ListAPIView):
         )
 
         return annotate_comments_for_user(queryset, user)
+
+
+class ProfileFeedActivityView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = SocialActivitySerializer
+
+    def get_queryset(self):
+        scope = self.request.query_params.get("scope")
+        valid_scopes = {
+            SocialActivityFeedService.SCOPE_FOLLOWING,
+            SocialActivityFeedService.SCOPE_FRIENDS,
+        }
+        if scope not in valid_scopes:
+            raise ValidationError(
+                {"scope": "This query param is required and must be one of: following, friends."}
+            )
+
+        return SocialActivityFeedService.build_feed(
+            user=self.request.user,
+            scope=scope,
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["request"] = self.request
+        return context
 
 class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
