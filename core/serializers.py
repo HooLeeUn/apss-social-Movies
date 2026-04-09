@@ -3,16 +3,13 @@ import socket
 from django.contrib.auth.models import User
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
-from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
 from .models import (
     Comment,
     CommentReaction,
     Friendship,
     Movie,
-    ProfileFavoriteMovie,
     Post,
-    Rating,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -346,6 +343,8 @@ class MovieRatingSerializer(serializers.Serializer):
 
 
 class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
+    general_rating = serializers.FloatField(read_only=True)
+
     class Meta:
         model = Movie
         fields = [
@@ -357,6 +356,7 @@ class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
             "genre",
             "type",
             "display_rating",
+            "general_rating",
             "following_avg_rating",
             "my_rating",
         ]
