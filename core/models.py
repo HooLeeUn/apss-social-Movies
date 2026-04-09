@@ -289,6 +289,41 @@ class MovieRating(models.Model):
         return f"MovieRating(user={self.user_id}, movie={self.movie_id}, score={self.score})"
 
 
+class ProfileFavoriteMovie(models.Model):
+    SLOT_1 = 1
+    SLOT_2 = 2
+    SLOT_3 = 3
+    SLOT_CHOICES = [
+        (SLOT_1, "Slot 1"),
+        (SLOT_2, "Slot 2"),
+        (SLOT_3, "Slot 3"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="profile_favorite_movies",
+    )
+    slot = models.PositiveSmallIntegerField(choices=SLOT_CHOICES)
+    movie = models.ForeignKey(
+        "Movie",
+        on_delete=models.CASCADE,
+        related_name="profile_favorite_slots",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["slot", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "slot"], name="unique_profile_favorite_slot_per_user"),
+            models.UniqueConstraint(fields=["user", "movie"], name="unique_profile_favorite_movie_per_user"),
+        ]
+
+    def __str__(self):
+        return f"ProfileFavoriteMovie(user={self.user_id}, slot={self.slot}, movie={self.movie_id})"
+
+
 class WeeklyRecommendationSnapshot(models.Model):
     week_start = models.DateField()
     week_end = models.DateField()

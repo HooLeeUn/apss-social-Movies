@@ -3,7 +3,6 @@ import socket
 from django.contrib.auth.models import User
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
-from django.db.models import Avg, Count
 from rest_framework.validators import UniqueValidator
 from .models import (
     Comment,
@@ -11,7 +10,6 @@ from .models import (
     Friendship,
     Movie,
     Post,
-    Rating,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -342,6 +340,38 @@ class MovieListSerializer(serializers.ModelSerializer):
 
 class MovieRatingSerializer(serializers.Serializer):
     score = serializers.IntegerField(min_value=1, max_value=10)
+
+
+class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
+    general_rating = serializers.FloatField(read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "image",
+            "release_year",
+            "genre",
+            "type",
+            "display_rating",
+            "general_rating",
+            "following_avg_rating",
+            "my_rating",
+        ]
+
+
+class ProfileFavoriteSlotSerializer(serializers.Serializer):
+    slot = serializers.IntegerField(min_value=1, max_value=3)
+    movie = ProfileFavoriteMovieSerializer(allow_null=True)
+
+
+class ProfileFavoriteSlotWriteSerializer(serializers.Serializer):
+    movie_id = serializers.PrimaryKeyRelatedField(
+        source="movie",
+        queryset=Movie.objects.all(),
+    )
 
 
 class WeeklyRecommendationMovieSerializer(serializers.ModelSerializer):
