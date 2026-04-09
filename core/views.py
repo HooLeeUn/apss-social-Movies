@@ -1,7 +1,6 @@
 import re
 import logging
 from time import perf_counter
-from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.db import transaction
@@ -173,6 +172,7 @@ def build_profile_favorite_movie_payload_by_id(user, movie_ids):
         .with_display_rating()
         .with_my_rating(user)
         .annotate(
+            general_rating=F("display_rating"),
             following_avg_rating=Avg(
                 "movie_ratings__score",
                 filter=Q(movie_ratings__user__followers__follower=user),
