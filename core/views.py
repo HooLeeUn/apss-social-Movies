@@ -647,11 +647,7 @@ class ProfileFeedActivityView(generics.ListAPIView):
 
     def get_queryset(self):
         scope = self.request.query_params.get("scope")
-        valid_scopes = {
-            SocialActivityFeedService.SCOPE_FOLLOWING,
-            SocialActivityFeedService.SCOPE_FRIENDS,
-        }
-        if scope not in valid_scopes:
+        if not SocialActivityFeedService.is_valid_scope(scope):
             raise ValidationError(
                 {"scope": "This query param is required and must be one of: following, friends."}
             )

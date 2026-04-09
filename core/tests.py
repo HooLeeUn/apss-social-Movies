@@ -2500,6 +2500,30 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertLess(ids_first.index(f"public_comment_like:{tie_like.id}"), ids_first.index(f"public_comment:{tie_comment.id}"))
         self.assertEqual(ids_first[-1], f"public_comment:{older_comment.id}")
 
+    def test_tie_breaker_uses_numeric_entity_id_not_lexicographic_id(self):
+        self._add_follow(self.actor)
+        baseline = timezone.now()
+
+        first_rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=4)
+        second_rating = MovieRating.objects.create(user=self.actor, movie=self.movie_without_image, score=6)
+        # Fuerza IDs con distinta longitud para detectar orden lexicográfico incorrecto (p.ej. 10 vs 2).
+        extra_count = max(0, 10 - second_rating.id)
+        for _ in range(extra_count):
+            MovieRating.objects.create(user=self.friend, movie=self.movie, score=5)
+        tenth_rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=7)
+
+        self._set_created_at(MovieRating, first_rating.id, baseline)
+        self._set_created_at(MovieRating, second_rating.id, baseline)
+        self._set_created_at(MovieRating, tenth_rating.id, baseline)
+
+        ids, _ = self._fetch_ids(scope="following")
+        first_idx = ids.index(f"rating:{first_rating.id}")
+        second_idx = ids.index(f"rating:{second_rating.id}")
+        tenth_idx = ids.index(f"rating:{tenth_rating.id}")
+
+        self.assertLess(tenth_idx, second_idx)
+        self.assertLess(second_idx, first_idx)
+
     def test_returns_standard_paginated_format(self):
         self._add_follow(self.actor)
         MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)

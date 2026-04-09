@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Iterable, Literal
 
 from django.db.models import Case, F, IntegerField, Q, When
@@ -9,21 +8,6 @@ from .models import Comment, CommentReaction, Follow, Friendship, MovieRating
 
 
 SocialFeedScope = Literal["following", "friends"]
-
-
-@dataclass(frozen=True)
-class SocialActivity:
-    """
-    Estructura interna neutral para exponer actividades heterogéneas
-    (ratings, comentarios públicos y likes en comentarios públicos).
-    """
-
-    id: str
-    activity_type: str
-    created_at: object
-    actor: dict
-    movie: dict
-    payload: dict
 
 
 class SocialActivityFeedService:
@@ -35,6 +19,16 @@ class SocialActivityFeedService:
     SCOPE_FRIENDS: SocialFeedScope = "friends"
 
     COMMENT_EXCERPT_LENGTH = 120
+    VALID_SCOPES = frozenset({SCOPE_FOLLOWING, SCOPE_FRIENDS})
+    _ACTIVITY_SORT_PRIORITY = {
+        ACTIVITY_RATING: 3,
+        ACTIVITY_PUBLIC_COMMENT: 2,
+        ACTIVITY_PUBLIC_COMMENT_LIKE: 1,
+    }
+
+    @classmethod
+    def is_valid_scope(cls, scope: str | None) -> bool:
+        return scope in cls.VALID_SCOPES
 
     @classmethod
     def build_feed(cls, *, user, scope: SocialFeedScope) -> list[dict]:
@@ -45,6 +39,9 @@ class SocialActivityFeedService:
         Nota: devolvemos dicts listos para DRF Serializer, así la vista futura
         no duplica lógica de composición.
         """
+        if not cls.is_valid_scope(scope):
+            raise ValueError(f"Unsupported social feed scope: {scope}")
+
         actor_ids = cls._get_actor_ids_for_scope(user=user, scope=scope)
         actor_ids = [actor_id for actor_id in set(actor_ids) if actor_id != user.id]
         if not actor_ids:
@@ -58,7 +55,14 @@ class SocialActivityFeedService:
 
         # Orden global unificado entre modelos distintos con desempate estable
         # por `id` para paginación por páginas (infinite scroll).
-        activities.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
+        activities.sort(
+            key=lambda item: (
+                item["created_at"],
+                item["_sort_entity_id"],
+                item["_sort_activity_priority"],
+            ),
+            reverse=True,
+        )
         return activities
 
     @classmethod
@@ -86,6 +90,7 @@ class SocialActivityFeedService:
                 ).values_list("friend_id", flat=True)
             )
 
+        # build_feed() valida scope antes de llegar aquí.
         raise ValueError(f"Unsupported social feed scope: {scope}")
 
     @classmethod
@@ -101,6 +106,8 @@ class SocialActivityFeedService:
                 "id": f"rating:{rating.id}",
                 "activity_type": cls.ACTIVITY_RATING,
                 "created_at": rating.created_at,
+                "_sort_entity_id": rating.id,
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_RATING],
                 "actor": cls._serialize_actor(rating.user),
                 "movie": cls._serialize_movie(rating.movie),
                 "payload": {
@@ -126,6 +133,8 @@ class SocialActivityFeedService:
                 "id": f"public_comment:{comment.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
                 "created_at": comment.created_at,
+                "_sort_entity_id": comment.id,
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
                 "actor": cls._serialize_actor(comment.author),
                 "movie": cls._serialize_movie(comment.movie),
                 "payload": {
@@ -160,6 +169,8 @@ class SocialActivityFeedService:
                 "id": f"public_comment_like:{reaction.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT_LIKE,
                 "created_at": reaction.created_at,
+                "_sort_entity_id": reaction.id,
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_LIKE],
                 "actor": cls._serialize_actor(reaction.user),
                 "movie": cls._serialize_movie(reaction.comment.movie),
                 "payload": {
