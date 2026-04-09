@@ -10,6 +10,7 @@ from .models import (
     CommentReaction,
     Friendship,
     Movie,
+    ProfileFavoriteMovie,
     Post,
     Rating,
     UserDirectorPreference,
@@ -342,6 +343,35 @@ class MovieListSerializer(serializers.ModelSerializer):
 
 class MovieRatingSerializer(serializers.Serializer):
     score = serializers.IntegerField(min_value=1, max_value=10)
+
+
+class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "image",
+            "release_year",
+            "genre",
+            "type",
+            "display_rating",
+            "following_avg_rating",
+            "my_rating",
+        ]
+
+
+class ProfileFavoriteSlotSerializer(serializers.Serializer):
+    slot = serializers.IntegerField(min_value=1, max_value=3)
+    movie = ProfileFavoriteMovieSerializer(allow_null=True)
+
+
+class ProfileFavoriteSlotWriteSerializer(serializers.Serializer):
+    movie_id = serializers.PrimaryKeyRelatedField(
+        source="movie",
+        queryset=Movie.objects.all(),
+    )
 
 
 class WeeklyRecommendationMovieSerializer(serializers.ModelSerializer):

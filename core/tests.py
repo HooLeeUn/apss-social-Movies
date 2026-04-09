@@ -20,6 +20,7 @@ from core.models import (
     Follow,
     Friendship,
     Movie,
+    ProfileFavoriteMovie,
     MovieRating,
     WeeklyRecommendationSnapshot,
     build_genre_key,
@@ -760,6 +761,97 @@ class MovieRatingEndpointTests(TestCase):
                 self.client.delete(self.url)
 
         self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
+
+
+class ProfileFavoritesEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="favorites_user", email="favorites@example.com", password="test1234"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="favorites_other", email="favorites-other@example.com", password="test1234"
+        )
+        self.author = get_user_model().objects.create_user(
+            username="favorites_author", email="favorites-author@example.com", password="test1234"
+        )
+        self.movie_1 = Movie.objects.create(author=self.author, title_english="Movie 1", type=Movie.MOVIE, release_year=2001)
+        self.movie_2 = Movie.objects.create(author=self.author, title_english="Movie 2", type=Movie.MOVIE, release_year=2002)
+        self.movie_3 = Movie.objects.create(author=self.author, title_english="Movie 3", type=Movie.SERIES, release_year=2003)
+        self.list_url = reverse("profile-favorites")
+
+    def test_get_returns_three_slots_even_when_empty(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [
+            {"slot": 1, "movie": None},
+            {"slot": 2, "movie": None},
+            {"slot": 3, "movie": None},
+        ])
+
+    def test_put_creates_favorite_for_empty_slot(self):
+        self.client.force_authenticate(user=self.user)
+        slot_url = reverse("profile-favorite-slot", kwargs={"slot": 1})
+
+        response = self.client.put(slot_url, {"movie_id": self.movie_1.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["slot"], 1)
+        self.assertEqual(response.data["movie"]["id"], self.movie_1.id)
+        favorite = ProfileFavoriteMovie.objects.get(user=self.user, slot=1)
+        self.assertEqual(favorite.movie_id, self.movie_1.id)
+
+    def test_put_replaces_existing_favorite_for_slot(self):
+        ProfileFavoriteMovie.objects.create(user=self.user, slot=1, movie=self.movie_1)
+        self.client.force_authenticate(user=self.user)
+        slot_url = reverse("profile-favorite-slot", kwargs={"slot": 1})
+
+        response = self.client.put(slot_url, {"movie_id": self.movie_2.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(ProfileFavoriteMovie.objects.filter(user=self.user, slot=1).count(), 1)
+        favorite = ProfileFavoriteMovie.objects.get(user=self.user, slot=1)
+        self.assertEqual(favorite.movie_id, self.movie_2.id)
+
+    def test_put_rejects_repeated_movie_in_another_slot(self):
+        ProfileFavoriteMovie.objects.create(user=self.user, slot=1, movie=self.movie_1)
+        self.client.force_authenticate(user=self.user)
+        slot_url = reverse("profile-favorite-slot", kwargs={"slot": 2})
+
+        response = self.client.put(slot_url, {"movie_id": self.movie_1.id}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["movie_id"][0],
+            "This movie is already assigned to another slot.",
+        )
+        self.assertFalse(ProfileFavoriteMovie.objects.filter(user=self.user, slot=2).exists())
+
+    def test_delete_clears_slot(self):
+        ProfileFavoriteMovie.objects.create(user=self.user, slot=2, movie=self.movie_2)
+        self.client.force_authenticate(user=self.user)
+        slot_url = reverse("profile-favorite-slot", kwargs={"slot": 2})
+
+        response = self.client.delete(slot_url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProfileFavoriteMovie.objects.filter(user=self.user, slot=2).exists())
+
+    def test_get_returns_only_authenticated_user_favorites(self):
+        ProfileFavoriteMovie.objects.create(user=self.user, slot=1, movie=self.movie_1)
+        ProfileFavoriteMovie.objects.create(user=self.other_user, slot=1, movie=self.movie_3)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["slot"], 1)
+        self.assertEqual(response.data[0]["movie"]["id"], self.movie_1.id)
+        self.assertIsNone(response.data[1]["movie"])
+        self.assertIsNone(response.data[2]["movie"])
 
 
 class MovieRatingSignalConsistencyTests(TestCase):

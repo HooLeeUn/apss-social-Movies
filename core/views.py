@@ -18,7 +18,8 @@ from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
-    MovieRatingSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
+    MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
+    ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
 )
 from .models import (
     Comment,
@@ -27,6 +28,7 @@ from .models import (
     Friendship,
     Movie,
     MovieRating,
+    ProfileFavoriteMovie,
     Post,
     Rating,
     UserTasteProfile,
@@ -160,6 +162,25 @@ def can_access_directed_comment_reactions(user, comment):
     if not user or not user.is_authenticated:
         return False
     return user.id in {comment.author_id, comment.target_user_id}
+
+
+def build_profile_favorite_movie_payload_by_id(user, movie_ids):
+    if not movie_ids:
+        return {}
+
+    movies = (
+        Movie.objects.filter(id__in=movie_ids)
+        .with_display_rating()
+        .with_my_rating(user)
+        .annotate(
+            following_avg_rating=Avg(
+                "movie_ratings__score",
+                filter=Q(movie_ratings__user__followers__follower=user),
+            )
+        )
+    )
+    serialized_movies = ProfileFavoriteMovieSerializer(movies, many=True)
+    return {item["id"]: item for item in serialized_movies.data}
 
 
 
@@ -889,6 +910,65 @@ class MovieDetailView(generics.RetrieveAPIView):
                 )
             )
         return qs.annotate(following_avg_rating=Value(None, output_field=FloatField()))
+
+
+class ProfileFavoritesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        favorites = list(
+            ProfileFavoriteMovie.objects.filter(user=request.user)
+            .select_related("movie")
+            .order_by("slot")
+        )
+        movie_ids = [favorite.movie_id for favorite in favorites]
+        movie_payload_by_id = build_profile_favorite_movie_payload_by_id(request.user, movie_ids)
+        movie_id_by_slot = {favorite.slot: favorite.movie_id for favorite in favorites}
+
+        payload = [
+            {
+                "slot": slot,
+                "movie": movie_payload_by_id.get(movie_id_by_slot.get(slot)),
+            }
+            for slot in (1, 2, 3)
+        ]
+        return Response(ProfileFavoriteSlotSerializer(payload, many=True).data, status=status.HTTP_200_OK)
+
+
+class ProfileFavoriteSlotDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @staticmethod
+    def _validate_slot(slot):
+        if slot not in (1, 2, 3):
+            raise ValidationError({"slot": "Slot must be 1, 2, or 3."})
+
+    def put(self, request, slot):
+        self._validate_slot(slot)
+        serializer = ProfileFavoriteSlotWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        movie = serializer.validated_data["movie"]
+
+        duplicated_movie = ProfileFavoriteMovie.objects.filter(
+            user=request.user,
+            movie=movie,
+        ).exclude(slot=slot).exists()
+        if duplicated_movie:
+            raise ValidationError({"movie_id": "This movie is already assigned to another slot."})
+
+        ProfileFavoriteMovie.objects.update_or_create(
+            user=request.user,
+            slot=slot,
+            defaults={"movie": movie},
+        )
+        movie_payload = build_profile_favorite_movie_payload_by_id(request.user, [movie.id]).get(movie.id)
+        response_payload = {"slot": slot, "movie": movie_payload}
+        return Response(ProfileFavoriteSlotSerializer(response_payload).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, slot):
+        self._validate_slot(slot)
+        ProfileFavoriteMovie.objects.filter(user=request.user, slot=slot).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class FeedMoviesView(generics.ListAPIView):
