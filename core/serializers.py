@@ -160,6 +160,34 @@ class UserMiniSerializer(serializers.ModelSerializer):
         return None
 
 
+
+
+class SocialActivityActorSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    avatar = serializers.CharField(allow_null=True)
+
+
+class SocialActivityMovieSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    title_english = serializers.CharField()
+    title_spanish = serializers.CharField(allow_null=True)
+    release_year = serializers.IntegerField(allow_null=True)
+    image = serializers.CharField(allow_null=True)
+
+
+class SocialActivitySerializer(serializers.Serializer):
+    id = serializers.CharField()
+    activity_type = serializers.ChoiceField(choices=[
+        "rating",
+        "public_comment",
+        "public_comment_like",
+    ])
+    created_at = serializers.DateTimeField()
+    actor = SocialActivityActorSerializer()
+    movie = SocialActivityMovieSerializer()
+    payload = serializers.DictField()
+
 class FriendMentionSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField()
 
