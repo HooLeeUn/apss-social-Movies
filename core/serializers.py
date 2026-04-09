@@ -184,9 +184,36 @@ class SocialActivitySerializer(serializers.Serializer):
         "public_comment_like",
     ])
     created_at = serializers.DateTimeField()
-    actor = SocialActivityActorSerializer()
-    movie = SocialActivityMovieSerializer()
+    actor = serializers.SerializerMethodField()
+    movie = serializers.SerializerMethodField()
     payload = serializers.DictField()
+
+    def get_actor(self, obj):
+        actor = obj.get("actor") or {}
+        avatar = actor.get("avatar")
+        return {
+            "id": actor.get("id"),
+            "username": actor.get("username"),
+            "avatar": self._build_absolute_media_url(avatar),
+        }
+
+    def get_movie(self, obj):
+        movie = obj.get("movie") or {}
+        return {
+            "id": movie.get("id"),
+            "title_english": movie.get("title_english"),
+            "title_spanish": movie.get("title_spanish"),
+            "release_year": movie.get("release_year"),
+            "image": self._build_absolute_media_url(movie.get("image")),
+        }
+
+    def _build_absolute_media_url(self, value):
+        if not value:
+            return None
+        request = self.context.get("request")
+        if request and isinstance(value, str) and value.startswith("/"):
+            return request.build_absolute_uri(value)
+        return value
 
 class FriendMentionSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField()

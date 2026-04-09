@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError
@@ -2229,3 +2230,121 @@ class PublicCommentsFeedViewTests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ProfileFeedActivityViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.viewer = get_user_model().objects.create_user(
+            username="profile_feed_viewer",
+            email="profile-feed-viewer@example.com",
+            password="test1234",
+        )
+        self.actor = get_user_model().objects.create_user(
+            username="profile_feed_actor",
+            email="profile-feed-actor@example.com",
+            password="test1234",
+        )
+        self.friend = get_user_model().objects.create_user(
+            username="profile_feed_friend",
+            email="profile-feed-friend@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.viewer)
+        self.url = reverse("profile-feed-activity")
+        self.movie = Movie.objects.create(
+            author=self.viewer,
+            title_english="Profile Feed Movie",
+            title_spanish="Pelicula Feed",
+            release_year=2024,
+            type=Movie.MOVIE,
+            image="https://cdn.example.com/profile-feed.jpg",
+        )
+
+    def test_requires_valid_scope(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("scope", response.data)
+
+        response = self.client.get(self.url, {"scope": "invalid"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("scope", response.data)
+
+    def test_returns_paginated_following_activity_with_supported_types(self):
+        Follow.objects.create(follower=self.viewer, following=self.actor)
+        self.actor.profile.avatar = SimpleUploadedFile(
+            "avatar.jpg",
+            b"fake-avatar-content",
+            content_type="image/jpeg",
+        )
+        self.actor.profile.save(update_fields=["avatar"])
+
+        rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
+        public_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Great movie from public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        private_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Hidden mentioned comment",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.viewer,
+        )
+        comment_like = CommentReaction.objects.create(
+            user=self.actor,
+            comment=public_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        CommentReaction.objects.create(
+            user=self.actor,
+            comment=public_comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+        CommentReaction.objects.create(
+            user=self.actor,
+            comment=private_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(self.url, {"scope": "following", "page_size": 2})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertIsNotNone(response.data["next"])
+
+        first_item = response.data["results"][0]
+        self.assertIn(first_item["activity_type"], {"rating", "public_comment", "public_comment_like"})
+        self.assertTrue(first_item["id"].count(":") == 1)
+        self.assertEqual(first_item["actor"]["id"], self.actor.id)
+        self.assertTrue(first_item["actor"]["avatar"].startswith("http://testserver/media/avatars/"))
+
+        first_page_ids = [item["id"] for item in response.data["results"]]
+        page_2_response = self.client.get(response.data["next"])
+        self.assertEqual(page_2_response.status_code, status.HTTP_200_OK)
+        second_page_ids = [item["id"] for item in page_2_response.data["results"]]
+
+        self.assertEqual(set(first_page_ids).intersection(set(second_page_ids)), set())
+        returned_ids = first_page_ids + second_page_ids
+        self.assertIn(f"rating:{rating.id}", returned_ids)
+        self.assertIn(f"public_comment:{public_comment.id}", returned_ids)
+        self.assertIn(f"public_comment_like:{comment_like.id}", returned_ids)
+
+    def test_returns_friend_scope_and_excludes_own_activity(self):
+        Friendship.objects.create(
+            requester=self.viewer,
+            user1=min(self.viewer, self.friend, key=lambda u: u.id),
+            user2=max(self.viewer, self.friend, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        friend_rating = MovieRating.objects.create(user=self.friend, movie=self.movie, score=7)
+        MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
+
+        response = self.client.get(self.url, {"scope": "friends"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], f"rating:{friend_rating.id}")

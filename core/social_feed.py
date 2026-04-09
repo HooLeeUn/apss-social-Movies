@@ -56,7 +56,8 @@ class SocialActivityFeedService:
             *cls._serialize_public_comment_like_activities(actor_ids=actor_ids),
         ]
 
-        # Orden global unificado entre modelos distintos.
+        # Orden global unificado entre modelos distintos con desempate estable
+        # por `id` para paginación por páginas (infinite scroll).
         activities.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
         return activities
 
@@ -164,11 +165,18 @@ class SocialActivityFeedService:
                 "payload": {
                     "comment_id": reaction.comment_id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
-                    "comment_author": cls._serialize_actor(reaction.comment.author),
+                    "comment_author": cls._serialize_compact_user(reaction.comment.author),
                 },
             }
             for reaction in queryset
         ]
+
+    @classmethod
+    def _serialize_compact_user(cls, user) -> dict:
+        return {
+            "id": user.id,
+            "username": user.username,
+        }
 
     @classmethod
     def _serialize_actor(cls, user) -> dict:
