@@ -20,6 +20,7 @@ from .serializers import (
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
+    PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer,
 )
 from .models import (
     Comment,
@@ -32,6 +33,7 @@ from .models import (
     Post,
     Rating,
     UserTasteProfile,
+    UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
 )
@@ -41,6 +43,10 @@ from .social_feed import SocialActivityFeedService
 from .weekly_recommendations import (
     get_previous_closed_week_window,
     refresh_weekly_recommendation_snapshot,
+)
+from .visibility import (
+    can_view_user_profile,
+    filter_out_authors_who_blocked_viewer,
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
@@ -220,6 +226,12 @@ class UserProfileView(RetrieveAPIView):
         )
     )
 
+    def get_object(self):
+        obj = super().get_object()
+        if not can_view_user_profile(obj, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
+        return obj
+
 class MeView(generics.RetrieveUpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MeSerializer
@@ -255,8 +267,8 @@ class FollowToggleView(APIView):
             return Response({"detail": "You cannot follow yourself."}, status=status.HTTP_400_BAD_REQUEST)
 
         profile = target.profile if hasattr(target, "profile") else None
-        if profile and not profile.is_public:
-            return Response({"detail": "You cannot follow a private profile."}, status=status.HTTP_400_BAD_REQUEST)
+        if profile and profile.visibility == profile.Visibility.PRIVATE:
+            return Response({"detail": "You cannot follow a private profile."}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             obj, created = Follow.objects.get_or_create(
@@ -298,6 +310,9 @@ class UserFollowersListView(ListAPIView):
 
     def get_queryset(self):
         username = self.kwargs["username"]
+        target = get_object_or_404(User.objects.select_related("profile"), username=username)
+        if not can_view_user_profile(target, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
         follower_ids = Follow.objects.filter(
             following__username=username
         ).values_list("follower_id", flat=True)
@@ -316,6 +331,9 @@ class UserFollowingListView(ListAPIView):
 
     def get_queryset(self):
         username = self.kwargs["username"]
+        target = get_object_or_404(User.objects.select_related("profile"), username=username)
+        if not can_view_user_profile(target, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
         following_ids = Follow.objects.filter(
             follower__username=username
         ).values_list("following_id", flat=True)
@@ -611,7 +629,7 @@ class PublicCommentsFeedView(generics.ListAPIView):
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_PUBLIC,
-                author__profile__is_public=True,
+                author__profile__visibility="public",
             )
             .select_related("author", "author__profile", "movie", "target_user")
             .annotate(
@@ -636,6 +654,7 @@ class PublicCommentsFeedView(generics.ListAPIView):
             .order_by("feed_category", "-author_followers_count", "-created_at", "-id")
         )
 
+        queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
         return annotate_comments_for_user(queryset, user)
 
 
@@ -665,20 +684,19 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
     mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
 
     def get_permissions(self):
-        if self.request.method == "POST":
-            return [permissions.IsAuthenticated()]
-        return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
-        return annotate_comments_for_user(
+        queryset = (
             Comment.objects.filter(
                 movie_id=self.kwargs["pk"],
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at"),
-            self.request.user,
+            .order_by("-created_at")
         )
+        queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
+        return annotate_comments_for_user(queryset, self.request.user)
 
     def _get_mentioned_friend(self, body):
         if not body:
@@ -751,6 +769,7 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
             Comment.objects.select_related("author", "author__profile", "movie", "target_user"),
             self.request.user,
         )
+        queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
 
         if self.request.method not in permissions.SAFE_METHODS:
             return queryset.filter(author=self.request.user)
@@ -837,6 +856,8 @@ class UserPostsListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = get_object_or_404(User, username=self.kwargs["username"])
+        if not can_view_user_profile(user, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
         
         qs = (
             Post.objects.filter(author=user)
@@ -937,6 +958,50 @@ class ProfileFavoritesView(APIView):
             for slot in (1, 2, 3)
         ]
         return Response(ProfileFavoriteSlotSerializer(payload, many=True).data, status=status.HTTP_200_OK)
+
+
+class ProfilePrivacyView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        serializer = PrivacySettingsSerializer(request.user.profile)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = PrivacySettingsSerializer(request.user.profile, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ProfilePrivacyBlockedUsersView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        blocks = UserVisibilityBlock.objects.filter(owner=request.user).select_related("blocked_user")
+        return Response(UserVisibilityBlockSerializer(blocks, many=True).data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = CreateUserVisibilityBlockSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        block = serializer.save()
+        return Response(
+            UserVisibilityBlockSerializer(block).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ProfilePrivacyBlockedUserDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, user_id):
+        deleted, _ = UserVisibilityBlock.objects.filter(
+            owner=request.user,
+            blocked_user_id=user_id,
+        ).delete()
+        if not deleted:
+            return Response({"detail": "Blocked user not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ProfileFavoriteSlotDetailView(APIView):

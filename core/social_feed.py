@@ -5,7 +5,7 @@ from typing import Iterable, Literal
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 
-from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating
+from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating, UserVisibilityBlock
 
 
 SocialFeedScope = Literal["following", "friends"]
@@ -72,10 +72,17 @@ class SocialActivityFeedService:
     @classmethod
     def _get_actor_ids_for_scope(cls, *, user, scope: SocialFeedScope) -> list[int]:
         if scope == cls.SCOPE_FOLLOWING:
-            return list(
+            actor_ids = list(
                 Follow.objects.filter(follower_id=user.id)
                 .values_list("following_id", flat=True)
             )
+            blocked_actor_ids = set(
+                UserVisibilityBlock.objects.filter(
+                    blocked_user_id=user.id,
+                    owner_id__in=actor_ids,
+                ).values_list("owner_id", flat=True)
+            )
+            return [actor_id for actor_id in actor_ids if actor_id not in blocked_actor_ids]
 
         if scope == cls.SCOPE_FRIENDS:
             friend_pairs = Friendship.objects.filter(
@@ -84,7 +91,7 @@ class SocialActivityFeedService:
                 Q(user1_id=user.id) | Q(user2_id=user.id)
             )
 
-            return list(
+            actor_ids = list(
                 friend_pairs.annotate(
                     friend_id=Case(
                         When(user1_id=user.id, then=F("user2_id")),
@@ -93,6 +100,13 @@ class SocialActivityFeedService:
                     )
                 ).values_list("friend_id", flat=True)
             )
+            blocked_actor_ids = set(
+                UserVisibilityBlock.objects.filter(
+                    blocked_user_id=user.id,
+                    owner_id__in=actor_ids,
+                ).values_list("owner_id", flat=True)
+            )
+            return [actor_id for actor_id in actor_ids if actor_id not in blocked_actor_ids]
 
         # build_feed() valida scope antes de llegar aquí.
         raise ValueError(f"Unsupported social feed scope: {scope}")
@@ -238,6 +252,9 @@ class SocialActivityFeedService:
                 user_id__in=actor_ids,
                 reaction_type=reaction_type,
                 comment__visibility=Comment.VISIBILITY_PUBLIC,
+            )
+            .exclude(
+                comment__author__visibility_blocks__blocked_user_id=viewer.id,
             )
             .select_related(
                 "user",

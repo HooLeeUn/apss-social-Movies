@@ -9,6 +9,8 @@ from .models import (
     Comment,
     Movie,
     MovieRating,
+    Profile,
+    UserVisibilityBlock,
     UserTasteProfile,
     UserGenrePreference,
     UserTypePreference,
@@ -143,3 +145,18 @@ class UserDirectorPreferenceAdmin(PreferenceDistributionAdmin):
     list_display = ("id", "user", "director", "ratings_count", "score", "count_1", "count_10")
     search_fields = ("user__username", "director")
     list_filter = ("director", "score", "ratings_count")
+
+
+@admin.register(Profile)
+class ProfileAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "is_public", "visibility")
+    search_fields = ("user__username",)
+    list_filter = ("is_public", "visibility")
+    autocomplete_fields = ("user",)
+
+
+@admin.register(UserVisibilityBlock)
+class UserVisibilityBlockAdmin(admin.ModelAdmin):
+    list_display = ("id", "owner", "blocked_user", "created_at")
+    search_fields = ("owner__username", "blocked_user__username")
+    autocomplete_fields = ("owner", "blocked_user")

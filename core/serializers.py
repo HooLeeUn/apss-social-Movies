@@ -10,6 +10,7 @@ from .models import (
     Friendship,
     Movie,
     Post,
+    UserVisibilityBlock,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -27,6 +28,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
     is_public = serializers.BooleanField(source="profile.is_public", read_only=True)
+    visibility = serializers.CharField(source="profile.visibility", read_only=True)
 
     followers_count = serializers.IntegerField(read_only=True)
     following_count = serializers.IntegerField(read_only=True)
@@ -41,7 +43,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username",
-            "bio", "avatar", "is_public",
+            "bio", "avatar", "is_public", "visibility",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
             "is_following", "friendship_status",
@@ -81,7 +83,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated or obj == request.user:
             return False
         profile = obj.profile if hasattr(obj, "profile") else None
-        if profile and not profile.is_public:
+        if profile and profile.visibility == Profile.Visibility.PRIVATE:
             return False
         return not Follow.objects.filter(follower=request.user, following=obj).exists()
 
@@ -139,9 +141,53 @@ class MeSerializer(serializers.ModelSerializer):
 
         if "is_public" in profile_data:
             profile.is_public = profile_data["is_public"]
+            profile.visibility = Profile.Visibility.PUBLIC if profile.is_public else Profile.Visibility.PRIVATE
 
         profile.save()
         return instance
+
+
+class PrivacySettingsSerializer(serializers.ModelSerializer):
+    visibility = serializers.ChoiceField(choices=Profile.Visibility.choices)
+
+    class Meta:
+        model = Profile
+        fields = ["visibility"]
+
+    def update(self, instance, validated_data):
+        visibility = validated_data.get("visibility")
+        if visibility is not None:
+            instance.is_public = visibility == Profile.Visibility.PUBLIC
+        return super().update(instance, validated_data)
+
+
+class UserVisibilityBlockSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="blocked_user_id", read_only=True)
+    username = serializers.CharField(source="blocked_user.username", read_only=True)
+
+    class Meta:
+        model = UserVisibilityBlock
+        fields = ["id", "username", "created_at"]
+
+
+class CreateUserVisibilityBlockSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
+
+    def validate_user_id(self, value):
+        request = self.context["request"]
+        if value == request.user.id:
+            raise serializers.ValidationError("You cannot block yourself.")
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("User not found.")
+        return value
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        block, _ = UserVisibilityBlock.objects.get_or_create(
+            owner=request.user,
+            blocked_user_id=validated_data["user_id"],
+        )
+        return block
 
 class UserMiniSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)

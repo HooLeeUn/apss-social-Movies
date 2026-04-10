@@ -563,7 +563,7 @@ class Follow(models.Model):
         if self.following_id:
             target_user = self.following if hasattr(self, "following") else User.objects.filter(pk=self.following_id).select_related("profile").first()
             profile = target_user.profile if target_user and hasattr(target_user, "profile") else None
-            if profile and not profile.is_public:
+            if profile and profile.visibility == Profile.Visibility.PRIVATE:
                 raise ValidationError({"following": "You cannot follow a private profile."})
 
     def save(self, *args, **kwargs):
@@ -651,6 +651,10 @@ class Friendship(models.Model):
 
 
 class Profile(models.Model):
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Public"
+        PRIVATE = "private", "Private"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -659,9 +663,49 @@ class Profile(models.Model):
     bio = models.TextField(blank=True)
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     is_public = models.BooleanField(default=True)
+    visibility = models.CharField(
+        max_length=10,
+        choices=Visibility.choices,
+        default=Visibility.PUBLIC,
+    )
 
     def __str__(self):
         return f"Profile({self.user.username})"
+
+
+class UserVisibilityBlock(models.Model):
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="visibility_blocks",
+    )
+    blocked_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="blocked_by_visibility_users",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "blocked_user"],
+                name="unique_user_visibility_block",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(owner=models.F("blocked_user")),
+                name="user_visibility_block_cannot_block_self",
+            ),
+        ]
+        ordering = ["-created_at", "-id"]
+
+    def clean(self):
+        if self.owner_id and self.blocked_user_id and self.owner_id == self.blocked_user_id:
+            raise ValidationError({"blocked_user": "You cannot block yourself."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 
