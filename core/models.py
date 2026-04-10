@@ -128,6 +128,39 @@ class MovieQuerySet(models.QuerySet):
             )
         )
 
+    def with_following_rating_stats(self, user):
+        if not user or not user.is_authenticated:
+            return self.annotate(
+                following_avg_rating=Value(None, output_field=FloatField()),
+                following_ratings_count=Value(0, output_field=IntegerField()),
+            )
+
+        followed_user_ids = Follow.objects.filter(
+            follower_id=user.id,
+        ).exclude(
+            following_id=user.id,
+        ).values("following_id")
+
+        following_ratings = MovieRating.objects.filter(
+            movie_id=OuterRef("pk"),
+            user_id__in=followed_user_ids,
+        ).values("movie_id")
+
+        following_avg_subquery = following_ratings.annotate(
+            avg_score=Avg("score"),
+        ).values("avg_score")[:1]
+        following_count_subquery = following_ratings.annotate(
+            total=Count("id"),
+        ).values("total")[:1]
+
+        return self.annotate(
+            following_avg_rating=Subquery(following_avg_subquery, output_field=FloatField()),
+            following_ratings_count=Coalesce(
+                Subquery(following_count_subquery, output_field=IntegerField()),
+                Value(0),
+            ),
+        )
+
     def with_display_rating(self):
         return self.with_rating_signals().annotate(
             display_rating=Case(

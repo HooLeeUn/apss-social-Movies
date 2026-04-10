@@ -178,6 +178,8 @@ class SocialActivityMovieSerializer(serializers.Serializer):
     genre = serializers.CharField(allow_null=True)
     display_rating = serializers.FloatField(allow_null=True)
     my_rating = serializers.IntegerField(allow_null=True)
+    following_avg_rating = serializers.FloatField(allow_null=True)
+    following_ratings_count = serializers.IntegerField()
 
 
 class SocialActivitySerializer(serializers.Serializer):
@@ -214,6 +216,8 @@ class SocialActivitySerializer(serializers.Serializer):
             "genre": movie.get("genre"),
             "display_rating": movie.get("display_rating"),
             "my_rating": movie.get("my_rating"),
+            "following_avg_rating": movie.get("following_avg_rating"),
+            "following_ratings_count": movie.get("following_ratings_count", 0),
         }
 
     def _build_absolute_media_url(self, value):
@@ -387,6 +391,7 @@ class MovieListSerializer(serializers.ModelSerializer):
     general_rating = serializers.FloatField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True)
     following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    following_ratings_count = serializers.IntegerField(read_only=True)
     comments_count = serializers.IntegerField(read_only=True)
 
     class Meta:
@@ -398,7 +403,7 @@ class MovieListSerializer(serializers.ModelSerializer):
             "director", "cast_members", "synopsis",
             "image", "external_rating", "external_votes",
             "real_ratings_count", "real_ratings_avg",
-            "display_rating", "general_rating", "my_rating", "following_avg_rating", "comments_count",
+            "display_rating", "general_rating", "my_rating", "following_avg_rating", "following_ratings_count", "comments_count",
         ]
 
 
@@ -410,6 +415,7 @@ class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
     display_rating = serializers.FloatField(read_only=True)
     general_rating = serializers.FloatField(read_only=True)
     following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    following_ratings_count = serializers.IntegerField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True, allow_null=True)
 
     class Meta:
@@ -425,6 +431,7 @@ class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
             "display_rating",
             "general_rating",
             "following_avg_rating",
+            "following_ratings_count",
             "my_rating",
         ]
 
@@ -463,6 +470,7 @@ class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
     display_rating = serializers.FloatField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True, allow_null=True)
     following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    following_ratings_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = WeeklyRecommendationItem
@@ -474,6 +482,7 @@ class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
             "display_rating",
             "my_rating",
             "following_avg_rating",
+            "following_ratings_count",
         ]
 
 
