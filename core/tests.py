@@ -1420,14 +1420,26 @@ class SocialPrivacyAndFriendshipTests(TestCase):
             username="private_user", email="private@example.com", password="test1234"
         )
         self.private_user.profile.is_public = False
-        self.private_user.profile.save(update_fields=["is_public"])
+        self.private_user.profile.visibility = Profile.Visibility.PRIVATE
+        self.private_user.profile.save(update_fields=["is_public", "visibility"])
+
+    def test_private_user_can_follow_public_profile(self):
+        self.private_user.profile.visibility = Profile.Visibility.PRIVATE
+        self.private_user.profile.is_public = False
+        self.private_user.profile.save(update_fields=["visibility", "is_public"])
+        self.client.force_authenticate(user=self.private_user)
+
+        response = self.client.post(reverse("follow-toggle", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Follow.objects.filter(follower=self.private_user, following=self.public_user).exists())
 
     def test_cannot_follow_private_profiles(self):
         self.client.force_authenticate(user=self.user)
 
         response = self.client.post(reverse("follow-toggle", kwargs={"username": self.private_user.username}))
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["detail"], "You cannot follow a private profile.")
         self.assertFalse(Follow.objects.filter(follower=self.user, following=self.private_user).exists())
 
@@ -2156,7 +2168,8 @@ class PublicCommentsFeedViewTests(TestCase):
         private_user = self._user("private_category")
 
         private_user.profile.is_public = False
-        private_user.profile.save(update_fields=["is_public"])
+        private_user.profile.visibility = Profile.Visibility.PRIVATE
+        private_user.profile.save(update_fields=["is_public", "visibility"])
 
         Follow.objects.create(follower=self.viewer, following=category_2_low)
         Follow.objects.create(follower=self.viewer, following=category_2_high)
@@ -2224,7 +2237,7 @@ class PublicCommentsFeedViewTests(TestCase):
             visibility=Comment.VISIBILITY_MENTIONED,
             target_user=self.viewer,
         )
-        Comment.objects.create(
+        private_user_comment = Comment.objects.create(
             author=private_user,
             movie=self.movie,
             body="private author comment",
@@ -2237,6 +2250,7 @@ class PublicCommentsFeedViewTests(TestCase):
         expected_order = [
             category_1_high_comment.id,
             category_1_low_comment.id,
+            private_user_comment.id,
             category_2_high_comment.id,
             category_2_low_comment.id,
             category_3_comment.id,
@@ -2744,6 +2758,98 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.client.force_authenticate(self.viewer)
         response = self.client.post(reverse("follow-toggle", kwargs={"username": self.owner.username}))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_transition_public_to_private_removes_followers_but_keeps_outgoing_follows(self):
+        target_public = get_user_model().objects.create_user(
+            username="pubtarget",
+            email="pubtarget@example.com",
+            password="test1234",
+        )
+        follower_a = get_user_model().objects.create_user(
+            username="followera",
+            email="followera@example.com",
+            password="test1234",
+        )
+        follower_b = get_user_model().objects.create_user(
+            username="followerb",
+            email="followerb@example.com",
+            password="test1234",
+        )
+        Follow.objects.create(follower=follower_a, following=self.owner)
+        Follow.objects.create(follower=follower_b, following=self.owner)
+        Follow.objects.create(follower=self.owner, following=target_public)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(
+            reverse("profile-privacy"),
+            {"visibility": Profile.Visibility.PRIVATE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.owner.profile.refresh_from_db()
+        self.assertEqual(self.owner.profile.visibility, Profile.Visibility.PRIVATE)
+        self.assertFalse(self.owner.profile.is_public)
+        self.assertFalse(Follow.objects.filter(following=self.owner).exists())
+        self.assertTrue(Follow.objects.filter(follower=self.owner, following=target_public).exists())
+
+    def test_private_author_public_comment_detail_visible_to_unblocked_user(self):
+        self.owner.profile.visibility = Profile.Visibility.PRIVATE
+        self.owner.profile.is_public = False
+        self.owner.profile.save(update_fields=["visibility", "is_public"])
+        comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body="private author public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(reverse("comment-detail", kwargs={"pk": comment.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], comment.id)
+
+    def test_private_author_public_comment_accepts_reactions_for_unblocked_user(self):
+        self.owner.profile.visibility = Profile.Visibility.PRIVATE
+        self.owner.profile.is_public = False
+        self.owner.profile.save(update_fields=["visibility", "is_public"])
+        comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body="private author can still be reacted",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        self.client.force_authenticate(self.viewer)
+
+        response = self.client.put(
+            reverse("comment-reaction", kwargs={"pk": comment.id}),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["likes_count"], 1)
+        self.assertTrue(CommentReaction.objects.filter(comment=comment, user=self.viewer).exists())
+
+    def test_blocked_user_cannot_react_to_public_comment(self):
+        comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body="blocked user cannot react",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+        self.client.force_authenticate(self.viewer)
+
+        response = self.client.put(
+            reverse("comment-reaction", kwargs={"pk": comment.id}),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(CommentReaction.objects.filter(comment=comment, user=self.viewer).exists())
 
     def test_autoblock_not_allowed_and_unique_constraint_works(self):
         self.client.force_authenticate(self.owner)

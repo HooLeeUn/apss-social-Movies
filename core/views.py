@@ -171,6 +171,18 @@ def can_access_directed_comment_reactions(user, comment):
     return user.id in {comment.author_id, comment.target_user_id}
 
 
+def filter_comments_visible_to_user(queryset, user):
+    queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
+    if not user or not user.is_authenticated:
+        return queryset.filter(visibility=Comment.VISIBILITY_PUBLIC)
+
+    return queryset.filter(
+        Q(visibility=Comment.VISIBILITY_PUBLIC)
+        | Q(author=user)
+        | Q(target_user=user)
+    )
+
+
 def build_profile_favorite_movie_payload_by_id(user, movie_ids):
     if not movie_ids:
         return {}
@@ -629,7 +641,6 @@ class PublicCommentsFeedView(generics.ListAPIView):
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_PUBLIC,
-                author__profile__visibility="public",
             )
             .select_related("author", "author__profile", "movie", "target_user")
             .annotate(
@@ -765,22 +776,14 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = annotate_comments_for_user(
-            Comment.objects.select_related("author", "author__profile", "movie", "target_user"),
-            self.request.user,
-        )
-        queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
+        queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
 
         if self.request.method not in permissions.SAFE_METHODS:
-            return queryset.filter(author=self.request.user)
+            return annotate_comments_for_user(queryset.filter(author=self.request.user), self.request.user)
 
-        if not self.request.user.is_authenticated:
-            return queryset.filter(visibility=Comment.VISIBILITY_PUBLIC)
-
-        return queryset.filter(
-            Q(visibility=Comment.VISIBILITY_PUBLIC)
-            | Q(author=self.request.user)
-            | Q(target_user=self.request.user)
+        return annotate_comments_for_user(
+            filter_comments_visible_to_user(queryset, self.request.user),
+            self.request.user,
         )
 
 
@@ -1324,10 +1327,8 @@ class CommentReactionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_comment(self, pk):
-        comment = get_object_or_404(
-            Comment.objects.select_related("author", "target_user", "movie"),
-            pk=pk,
-        )
+        base_queryset = Comment.objects.select_related("author", "target_user", "movie")
+        comment = get_object_or_404(filter_comments_visible_to_user(base_queryset, self.request.user), pk=pk)
         if not can_access_directed_comment_reactions(self.request.user, comment):
             raise PermissionDenied("You cannot react to this comment.")
         return comment
