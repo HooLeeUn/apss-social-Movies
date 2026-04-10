@@ -14,6 +14,7 @@ class SocialActivityFeedService:
     ACTIVITY_RATING = "rating"
     ACTIVITY_PUBLIC_COMMENT = "public_comment"
     ACTIVITY_PUBLIC_COMMENT_LIKE = "public_comment_like"
+    ACTIVITY_PUBLIC_COMMENT_DISLIKE = "public_comment_dislike"
 
     SCOPE_FOLLOWING: SocialFeedScope = "following"
     SCOPE_FRIENDS: SocialFeedScope = "friends"
@@ -24,6 +25,7 @@ class SocialActivityFeedService:
         ACTIVITY_RATING: 3,
         ACTIVITY_PUBLIC_COMMENT: 2,
         ACTIVITY_PUBLIC_COMMENT_LIKE: 1,
+        ACTIVITY_PUBLIC_COMMENT_DISLIKE: 0,
     }
 
     @classmethod
@@ -51,6 +53,7 @@ class SocialActivityFeedService:
             *cls._serialize_rating_activities(actor_ids=actor_ids),
             *cls._serialize_public_comment_activities(actor_ids=actor_ids),
             *cls._serialize_public_comment_like_activities(actor_ids=actor_ids),
+            *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids),
         ]
 
         # Orden global unificado entre modelos distintos con desempate estable
@@ -147,10 +150,32 @@ class SocialActivityFeedService:
 
     @classmethod
     def _serialize_public_comment_like_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+        return cls._serialize_public_comment_reaction_activities(
+            actor_ids=actor_ids,
+            reaction_type=CommentReaction.REACT_LIKE,
+            activity_type=cls.ACTIVITY_PUBLIC_COMMENT_LIKE,
+        )
+
+    @classmethod
+    def _serialize_public_comment_dislike_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+        return cls._serialize_public_comment_reaction_activities(
+            actor_ids=actor_ids,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+            activity_type=cls.ACTIVITY_PUBLIC_COMMENT_DISLIKE,
+        )
+
+    @classmethod
+    def _serialize_public_comment_reaction_activities(
+        cls,
+        *,
+        actor_ids: list[int],
+        reaction_type: str,
+        activity_type: str,
+    ) -> Iterable[dict]:
         queryset = (
             CommentReaction.objects.filter(
                 user_id__in=actor_ids,
-                reaction_type=CommentReaction.REACT_LIKE,
+                reaction_type=reaction_type,
                 comment__visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related(
@@ -166,11 +191,11 @@ class SocialActivityFeedService:
 
         return [
             {
-                "id": f"public_comment_like:{reaction.id}",
-                "activity_type": cls.ACTIVITY_PUBLIC_COMMENT_LIKE,
+                "id": f"{activity_type}:{reaction.id}",
+                "activity_type": activity_type,
                 "created_at": reaction.created_at,
                 "_sort_entity_id": reaction.id,
-                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_LIKE],
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
                 "actor": cls._serialize_actor(reaction.user),
                 "movie": cls._serialize_movie(reaction.comment.movie),
                 "payload": {
