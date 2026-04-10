@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Iterable, Literal
 
-from django.db.models import Case, F, IntegerField, Q, When
+from django.db.models import Case, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 
-from .models import Comment, CommentReaction, Follow, Friendship, MovieRating
+from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating
 
 
 SocialFeedScope = Literal["following", "friends"]
@@ -50,10 +50,10 @@ class SocialActivityFeedService:
             return []
 
         activities = [
-            *cls._serialize_rating_activities(actor_ids=actor_ids),
-            *cls._serialize_public_comment_activities(actor_ids=actor_ids),
-            *cls._serialize_public_comment_like_activities(actor_ids=actor_ids),
-            *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids),
+            *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=user),
+            *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=user),
+            *cls._serialize_public_comment_like_activities(actor_ids=actor_ids, viewer=user),
+            *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids, viewer=user),
         ]
 
         # Orden global unificado entre modelos distintos con desempate estable
@@ -97,10 +97,19 @@ class SocialActivityFeedService:
         raise ValueError(f"Unsupported social feed scope: {scope}")
 
     @classmethod
-    def _serialize_rating_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+    def _serialize_rating_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
+        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
+        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+            viewer=viewer,
+            movie_id_ref="movie_id",
+        )
         queryset = (
             MovieRating.objects.filter(user_id__in=actor_ids)
             .select_related("user", "user__profile", "movie")
+            .annotate(
+                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
+                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+            )
             .order_by("-created_at", "-id")
         )
 
@@ -112,7 +121,11 @@ class SocialActivityFeedService:
                 "_sort_entity_id": rating.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_RATING],
                 "actor": cls._serialize_actor(rating.user),
-                "movie": cls._serialize_movie(rating.movie),
+                "movie": cls._serialize_movie(
+                    rating.movie,
+                    display_rating=rating.movie_display_rating,
+                    my_rating=rating.viewer_movie_rating,
+                ),
                 "payload": {
                     "score": rating.score,
                 },
@@ -121,13 +134,22 @@ class SocialActivityFeedService:
         ]
 
     @classmethod
-    def _serialize_public_comment_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+    def _serialize_public_comment_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
+        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
+        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+            viewer=viewer,
+            movie_id_ref="movie_id",
+        )
         queryset = (
             Comment.objects.filter(
                 author_id__in=actor_ids,
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie")
+            .annotate(
+                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
+                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+            )
             .order_by("-created_at", "-id")
         )
 
@@ -139,7 +161,11 @@ class SocialActivityFeedService:
                 "_sort_entity_id": comment.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
                 "actor": cls._serialize_actor(comment.author),
-                "movie": cls._serialize_movie(comment.movie),
+                "movie": cls._serialize_movie(
+                    comment.movie,
+                    display_rating=comment.movie_display_rating,
+                    my_rating=comment.viewer_movie_rating,
+                ),
                 "payload": {
                     "comment_id": comment.id,
                     "content": comment.body,
@@ -149,17 +175,19 @@ class SocialActivityFeedService:
         ]
 
     @classmethod
-    def _serialize_public_comment_like_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+    def _serialize_public_comment_like_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
         return cls._serialize_public_comment_reaction_activities(
             actor_ids=actor_ids,
+            viewer=viewer,
             reaction_type=CommentReaction.REACT_LIKE,
             activity_type=cls.ACTIVITY_PUBLIC_COMMENT_LIKE,
         )
 
     @classmethod
-    def _serialize_public_comment_dislike_activities(cls, *, actor_ids: list[int]) -> Iterable[dict]:
+    def _serialize_public_comment_dislike_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
         return cls._serialize_public_comment_reaction_activities(
             actor_ids=actor_ids,
+            viewer=viewer,
             reaction_type=CommentReaction.REACT_DISLIKE,
             activity_type=cls.ACTIVITY_PUBLIC_COMMENT_DISLIKE,
         )
@@ -169,9 +197,15 @@ class SocialActivityFeedService:
         cls,
         *,
         actor_ids: list[int],
+        viewer,
         reaction_type: str,
         activity_type: str,
     ) -> Iterable[dict]:
+        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="comment__movie_id")
+        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+            viewer=viewer,
+            movie_id_ref="comment__movie_id",
+        )
         queryset = (
             CommentReaction.objects.filter(
                 user_id__in=actor_ids,
@@ -186,6 +220,10 @@ class SocialActivityFeedService:
                 "comment__author__profile",
                 "comment__movie",
             )
+            .annotate(
+                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
+                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+            )
             .order_by("-created_at", "-id")
         )
 
@@ -197,7 +235,11 @@ class SocialActivityFeedService:
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
                 "actor": cls._serialize_actor(reaction.user),
-                "movie": cls._serialize_movie(reaction.comment.movie),
+                "movie": cls._serialize_movie(
+                    reaction.comment.movie,
+                    display_rating=reaction.movie_display_rating,
+                    my_rating=reaction.viewer_movie_rating,
+                ),
                 "payload": {
                     "comment_id": reaction.comment_id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
@@ -227,14 +269,34 @@ class SocialActivityFeedService:
         }
 
     @classmethod
-    def _serialize_movie(cls, movie) -> dict:
+    def _serialize_movie(cls, movie, *, display_rating=None, my_rating=None) -> dict:
         return {
             "id": movie.id,
             "title_english": movie.title_english,
             "title_spanish": movie.title_spanish,
             "release_year": movie.release_year,
             "image": movie.image,
+            "type": movie.type,
+            "genre": movie.genre,
+            "display_rating": display_rating,
+            "my_rating": my_rating,
         }
+
+    @classmethod
+    def _movie_display_rating_subquery(cls, *, movie_id_ref: str):
+        return Movie.objects.with_display_rating().filter(
+            pk=OuterRef(movie_id_ref),
+        ).values("display_rating")[:1]
+
+    @classmethod
+    def _viewer_movie_rating_subquery(cls, *, viewer, movie_id_ref: str):
+        if not viewer or not viewer.is_authenticated:
+            return MovieRating.objects.none().values("score")[:1]
+
+        return MovieRating.objects.filter(
+            user_id=viewer.id,
+            movie_id=OuterRef(movie_id_ref),
+        ).values("score")[:1]
 
     @classmethod
     def _truncate_excerpt(cls, value: str) -> str:

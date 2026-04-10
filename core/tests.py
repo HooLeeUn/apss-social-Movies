@@ -2637,3 +2637,22 @@ class ProfileFeedActivityViewTests(TestCase):
             "https://cdn.example.com/profile-feed.jpg",
         )
         self.assertIsNone(item_by_id[f"rating:{rating_without_image.id}"]["movie"]["image"])
+
+    def test_movie_metadata_includes_type_genre_display_rating_and_my_rating(self):
+        self._add_follow(self.actor)
+        self.movie.genre = "Action, Comedy"
+        self.movie.external_rating = 8.5
+        self.movie.external_votes = 1200
+        self.movie.save(update_fields=["genre", "external_rating", "external_votes", "genre_key"])
+        MovieRating.objects.create(user=self.actor, movie=self.movie, score=9)
+        MovieRating.objects.create(user=self.viewer, movie=self.movie, score=7)
+
+        response = self.client.get(self.url, {"scope": "following"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        first_item = response.data["results"][0]
+        movie_payload = first_item["movie"]
+
+        self.assertEqual(movie_payload["type"], Movie.MOVIE)
+        self.assertEqual(movie_payload["genre"], "Action, Comedy")
+        self.assertAlmostEqual(movie_payload["display_rating"], 8.485, places=3)
+        self.assertEqual(movie_payload["my_rating"], 7)
