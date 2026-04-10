@@ -684,9 +684,7 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
     mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
 
     def get_permissions(self):
-        if self.request.method == "POST":
-            return [permissions.IsAuthenticated()]
-        return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
         queryset = (

@@ -28,6 +28,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
     is_public = serializers.BooleanField(source="profile.is_public", read_only=True)
+    visibility = serializers.CharField(source="profile.visibility", read_only=True)
 
     followers_count = serializers.IntegerField(read_only=True)
     following_count = serializers.IntegerField(read_only=True)
@@ -42,7 +43,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username",
-            "bio", "avatar", "is_public",
+            "bio", "avatar", "is_public", "visibility",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
             "is_following", "friendship_status",
@@ -152,6 +153,12 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
         fields = ["visibility"]
+
+    def update(self, instance, validated_data):
+        visibility = validated_data.get("visibility")
+        if visibility is not None:
+            instance.is_public = visibility == Profile.Visibility.PUBLIC
+        return super().update(instance, validated_data)
 
 
 class UserVisibilityBlockSerializer(serializers.ModelSerializer):
