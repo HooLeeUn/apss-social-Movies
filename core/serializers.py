@@ -182,6 +182,7 @@ class SocialActivitySerializer(serializers.Serializer):
         "rating",
         "public_comment",
         "public_comment_like",
+        "public_comment_dislike",
     ])
     created_at = serializers.DateTimeField()
     actor = serializers.SerializerMethodField()

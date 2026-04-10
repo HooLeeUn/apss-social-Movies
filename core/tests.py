@@ -2420,7 +2420,7 @@ class ProfileFeedActivityViewTests(TestCase):
         ids, _ = self._fetch_ids(scope="following")
         self.assertNotIn(f"public_comment_like:{private_like.id}", ids)
 
-    def test_excludes_dislikes(self):
+    def test_following_returns_public_comment_dislikes_from_followed_users(self):
         self._add_follow(self.actor)
         comment = Comment.objects.create(
             author=self.friend,
@@ -2435,7 +2435,42 @@ class ProfileFeedActivityViewTests(TestCase):
         )
 
         ids, _ = self._fetch_ids(scope="following")
-        self.assertNotIn(f"public_comment_like:{dislike.id}", ids)
+        self.assertIn(f"public_comment_dislike:{dislike.id}", ids)
+
+    def test_friends_returns_public_comment_dislikes_from_accepted_friends(self):
+        self._add_friendship(self.friend)
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Public comment disliked by friend",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        dislike = CommentReaction.objects.create(
+            user=self.friend,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="friends")
+        self.assertIn(f"public_comment_dislike:{dislike.id}", ids)
+
+    def test_excludes_dislikes_on_private_direct_comments(self):
+        self._add_follow(self.actor)
+        private_comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="Private comment should not surface through dislikes",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.viewer,
+        )
+        private_dislike = CommentReaction.objects.create(
+            user=self.actor,
+            comment=private_comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+
+        ids, _ = self._fetch_ids(scope="following")
+        self.assertNotIn(f"public_comment_dislike:{private_dislike.id}", ids)
 
     def test_only_returns_allowed_activity_types(self):
         self._add_follow(self.actor)
@@ -2451,15 +2486,21 @@ class ProfileFeedActivityViewTests(TestCase):
             comment=comment,
             reaction_type=CommentReaction.REACT_LIKE,
         )
+        dislike = CommentReaction.objects.create(
+            user=self.actor,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
 
         response = self.client.get(self.url, {"scope": "following"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        allowed_types = {"rating", "public_comment", "public_comment_like"}
+        allowed_types = {"rating", "public_comment", "public_comment_like", "public_comment_dislike"}
         returned_types = {item["activity_type"] for item in response.data["results"]}
         self.assertTrue(returned_types.issubset(allowed_types))
         self.assertIn(f"rating:{rating.id}", [item["id"] for item in response.data["results"]])
         self.assertIn(f"public_comment:{comment.id}", [item["id"] for item in response.data["results"]])
         self.assertIn(f"public_comment_like:{reaction.id}", [item["id"] for item in response.data["results"]])
+        self.assertIn(f"public_comment_dislike:{dislike.id}", [item["id"] for item in response.data["results"]])
 
     def test_orders_by_created_at_desc_with_stable_tie_breaker(self):
         self._add_follow(self.actor)
@@ -2483,6 +2524,11 @@ class ProfileFeedActivityViewTests(TestCase):
             comment=tie_comment,
             reaction_type=CommentReaction.REACT_LIKE,
         )
+        tie_dislike = CommentReaction.objects.create(
+            user=self.actor,
+            comment=tie_comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
 
         newer_time = baseline + timezone.timedelta(minutes=2)
         older_time = baseline - timezone.timedelta(minutes=2)
@@ -2491,12 +2537,14 @@ class ProfileFeedActivityViewTests(TestCase):
         self._set_created_at(Comment, older_comment.id, older_time)
         self._set_created_at(Comment, tie_comment.id, tie_time)
         self._set_created_at(CommentReaction, tie_like.id, tie_time)
+        self._set_created_at(CommentReaction, tie_dislike.id, tie_time)
 
         ids_first, _ = self._fetch_ids(scope="following")
         ids_second, _ = self._fetch_ids(scope="following")
 
         self.assertEqual(ids_first, ids_second)
         self.assertEqual(ids_first[0], f"rating:{newer_rating.id}")
+        self.assertLess(ids_first.index(f"public_comment_dislike:{tie_dislike.id}"), ids_first.index(f"public_comment_like:{tie_like.id}"))
         self.assertLess(ids_first.index(f"public_comment_like:{tie_like.id}"), ids_first.index(f"public_comment:{tie_comment.id}"))
         self.assertEqual(ids_first[-1], f"public_comment:{older_comment.id}")
 
