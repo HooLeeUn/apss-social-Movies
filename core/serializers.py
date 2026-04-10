@@ -174,6 +174,10 @@ class SocialActivityMovieSerializer(serializers.Serializer):
     title_spanish = serializers.CharField(allow_null=True)
     release_year = serializers.IntegerField(allow_null=True)
     image = serializers.CharField(allow_null=True)
+    type = serializers.CharField(allow_null=True)
+    genre = serializers.CharField(allow_null=True)
+    display_rating = serializers.FloatField(allow_null=True)
+    my_rating = serializers.IntegerField(allow_null=True)
 
 
 class SocialActivitySerializer(serializers.Serializer):
@@ -206,6 +210,10 @@ class SocialActivitySerializer(serializers.Serializer):
             "title_spanish": movie.get("title_spanish"),
             "release_year": movie.get("release_year"),
             "image": self._build_absolute_media_url(movie.get("image")),
+            "type": movie.get("type"),
+            "genre": movie.get("genre"),
+            "display_rating": movie.get("display_rating"),
+            "my_rating": movie.get("my_rating"),
         }
 
     def _build_absolute_media_url(self, value):
