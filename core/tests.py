@@ -21,8 +21,10 @@ from core.models import (
     Follow,
     Friendship,
     Movie,
+    Profile,
     ProfileFavoriteMovie,
     MovieRating,
+    UserVisibilityBlock,
     WeeklyRecommendationSnapshot,
     build_genre_key,
     UserDirectorPreference,
@@ -2690,3 +2692,109 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertEqual(movie_payload["my_rating"], 7)
         self.assertAlmostEqual(movie_payload["following_avg_rating"], 9.0)
         self.assertEqual(movie_payload["following_ratings_count"], 1)
+
+
+class ProfilePrivacyVisibilityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = get_user_model().objects.create_user(username="owneruser", email="owner@example.com", password="test1234")
+        self.viewer = get_user_model().objects.create_user(username="vieweruser", email="viewer@example.com", password="test1234")
+        self.friend = get_user_model().objects.create_user(username="frienduser", email="friend@example.com", password="test1234")
+        self.third = get_user_model().objects.create_user(username="thirduser1", email="third@example.com", password="test1234")
+        self.movie = Movie.objects.create(author=self.owner, title_english="Privacy Movie", type=Movie.MOVIE, external_rating=8.0)
+
+    def test_profile_public_is_visible_to_authenticated_user(self):
+        self.owner.profile.visibility = Profile.Visibility.PUBLIC
+        self.owner.profile.save(update_fields=["visibility"])
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_profile_private_is_not_visible_to_non_friend(self):
+        self.owner.profile.visibility = Profile.Visibility.PRIVATE
+        self.owner.profile.save(update_fields=["visibility"])
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_profile_private_is_visible_to_accepted_friend(self):
+        self.owner.profile.visibility = Profile.Visibility.PRIVATE
+        self.owner.profile.save(update_fields=["visibility"])
+        Friendship.objects.create(requester=self.owner, user1=self.owner, user2=self.friend, status=Friendship.STATUS_ACCEPTED)
+        self.client.force_authenticate(self.friend)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_blocked_user_cannot_view_public_profile_and_owner_can_view_self(self):
+        self.owner.profile.visibility = Profile.Visibility.PUBLIC
+        self.owner.profile.save(update_fields=["visibility"])
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+
+        self.client.force_authenticate(self.viewer)
+        blocked_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+        self.assertEqual(blocked_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.owner)
+        own_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+        self.assertEqual(own_response.status_code, status.HTTP_200_OK)
+
+    def test_cannot_follow_private_profile(self):
+        self.owner.profile.visibility = Profile.Visibility.PRIVATE
+        self.owner.profile.save(update_fields=["visibility"])
+        self.client.force_authenticate(self.viewer)
+        response = self.client.post(reverse("follow-toggle", kwargs={"username": self.owner.username}))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_autoblock_not_allowed_and_unique_constraint_works(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(reverse("profile-privacy-blocked-users"), {"user_id": self.owner.id}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+        with self.assertRaises(IntegrityError):
+            UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+
+    def test_movie_public_comments_are_hidden_only_for_blocked_viewer(self):
+        hidden_comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body="hidden from blocked",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        visible_comment = Comment.objects.create(
+            author=self.friend,
+            movie=self.movie,
+            body="visible for blocked",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+
+        self.client.force_authenticate(self.viewer)
+        blocked_response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.id}))
+        blocked_ids = {item["id"] for item in blocked_response.data}
+        self.assertNotIn(hidden_comment.id, blocked_ids)
+        self.assertIn(visible_comment.id, blocked_ids)
+
+        self.client.force_authenticate(self.third)
+        third_response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.id}))
+        third_ids = {item["id"] for item in third_response.data}
+        self.assertIn(hidden_comment.id, third_ids)
+        self.assertIn(visible_comment.id, third_ids)
+
+    def test_movie_aggregated_ratings_remain_unchanged_after_block(self):
+        MovieRating.objects.create(user=self.owner, movie=self.movie, score=10)
+        MovieRating.objects.create(user=self.friend, movie=self.movie, score=6)
+
+        self.client.force_authenticate(self.viewer)
+        before = self.client.get(reverse("movie-detail", kwargs={"pk": self.movie.id}))
+        before_general = before.data["general_rating"]
+        before_display = before.data["display_rating"]
+        before_count = before.data["real_ratings_count"]
+
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+        after = self.client.get(reverse("movie-detail", kwargs={"pk": self.movie.id}))
+
+        self.assertEqual(after.status_code, status.HTTP_200_OK)
+        self.assertEqual(after.data["general_rating"], before_general)
+        self.assertEqual(after.data["display_rating"], before_display)
+        self.assertEqual(after.data["real_ratings_count"], before_count)

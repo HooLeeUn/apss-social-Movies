@@ -9,7 +9,8 @@ from .views import (
     UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, CommentReactionView, RegisterView,
     ReceivedDirectedCommentsView, SentDirectedCommentsView,
     MovieListView, MovieDetailView, MovieDirectedCommentsListView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
-    ProfileFavoritesView, ProfileFavoriteSlotDetailView,
+    ProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
+    ProfilePrivacyBlockedUserDetailView,
 )
 
 urlpatterns = [
@@ -20,6 +21,9 @@ urlpatterns = [
     path("me/taste-profile/", MeTasteProfileView.as_view(), name="me-taste-profile"),
     path("profile/favorites/", ProfileFavoritesView.as_view(), name="profile-favorites"),
     path("profile/favorites/<int:slot>/", ProfileFavoriteSlotDetailView.as_view(), name="profile-favorite-slot"),
+    path("profile/privacy/", ProfilePrivacyView.as_view(), name="profile-privacy"),
+    path("profile/privacy/blocked-users/", ProfilePrivacyBlockedUsersView.as_view(), name="profile-privacy-blocked-users"),
+    path("profile/privacy/blocked-users/<int:user_id>/", ProfilePrivacyBlockedUserDetailView.as_view(), name="profile-privacy-blocked-user-detail"),
     path("follow/<str:username>/", FollowToggleView.as_view(), name="follow-toggle"),
     path("users/<str:username>/followers/", UserFollowersListView.as_view(), name="user-followers"),
     path("users/<str:username>/following/", UserFollowingListView.as_view(), name="user-following"),
