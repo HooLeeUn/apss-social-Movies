@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable, Literal
 
-from django.db.models import Case, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models.functions import Coalesce
 
 from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating
 
@@ -109,6 +110,17 @@ class SocialActivityFeedService:
             .annotate(
                 movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
                 viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+                movie_following_avg_rating=Subquery(
+                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                    output_field=FloatField(),
+                ),
+                movie_following_ratings_count=Coalesce(
+                    Subquery(
+                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
             )
             .order_by("-created_at", "-id")
         )
@@ -125,6 +137,8 @@ class SocialActivityFeedService:
                     rating.movie,
                     display_rating=rating.movie_display_rating,
                     my_rating=rating.viewer_movie_rating,
+                    following_avg_rating=rating.movie_following_avg_rating,
+                    following_ratings_count=rating.movie_following_ratings_count,
                 ),
                 "payload": {
                     "score": rating.score,
@@ -149,6 +163,17 @@ class SocialActivityFeedService:
             .annotate(
                 movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
                 viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+                movie_following_avg_rating=Subquery(
+                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                    output_field=FloatField(),
+                ),
+                movie_following_ratings_count=Coalesce(
+                    Subquery(
+                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
             )
             .order_by("-created_at", "-id")
         )
@@ -165,6 +190,8 @@ class SocialActivityFeedService:
                     comment.movie,
                     display_rating=comment.movie_display_rating,
                     my_rating=comment.viewer_movie_rating,
+                    following_avg_rating=comment.movie_following_avg_rating,
+                    following_ratings_count=comment.movie_following_ratings_count,
                 ),
                 "payload": {
                     "comment_id": comment.id,
@@ -223,6 +250,17 @@ class SocialActivityFeedService:
             .annotate(
                 movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
                 viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+                movie_following_avg_rating=Subquery(
+                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="comment__movie_id"),
+                    output_field=FloatField(),
+                ),
+                movie_following_ratings_count=Coalesce(
+                    Subquery(
+                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="comment__movie_id"),
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
             )
             .order_by("-created_at", "-id")
         )
@@ -239,6 +277,8 @@ class SocialActivityFeedService:
                     reaction.comment.movie,
                     display_rating=reaction.movie_display_rating,
                     my_rating=reaction.viewer_movie_rating,
+                    following_avg_rating=reaction.movie_following_avg_rating,
+                    following_ratings_count=reaction.movie_following_ratings_count,
                 ),
                 "payload": {
                     "comment_id": reaction.comment_id,
@@ -269,7 +309,15 @@ class SocialActivityFeedService:
         }
 
     @classmethod
-    def _serialize_movie(cls, movie, *, display_rating=None, my_rating=None) -> dict:
+    def _serialize_movie(
+        cls,
+        movie,
+        *,
+        display_rating=None,
+        my_rating=None,
+        following_avg_rating=None,
+        following_ratings_count=0,
+    ) -> dict:
         return {
             "id": movie.id,
             "title_english": movie.title_english,
@@ -280,6 +328,8 @@ class SocialActivityFeedService:
             "genre": movie.genre,
             "display_rating": display_rating,
             "my_rating": my_rating,
+            "following_avg_rating": following_avg_rating,
+            "following_ratings_count": following_ratings_count,
         }
 
     @classmethod
@@ -297,6 +347,40 @@ class SocialActivityFeedService:
             user_id=viewer.id,
             movie_id=OuterRef(movie_id_ref),
         ).values("score")[:1]
+
+    @classmethod
+    def _viewer_following_ratings_queryset(cls, *, viewer, movie_id_ref: str):
+        if not viewer or not viewer.is_authenticated:
+            return MovieRating.objects.none().values("movie_id")
+
+        followed_user_ids = Follow.objects.filter(
+            follower_id=viewer.id,
+        ).exclude(
+            following_id=viewer.id,
+        ).values("following_id")
+
+        return MovieRating.objects.filter(
+            movie_id=OuterRef(movie_id_ref),
+            user_id__in=followed_user_ids,
+        ).values("movie_id")
+
+    @classmethod
+    def _viewer_following_avg_rating_subquery(cls, *, viewer, movie_id_ref: str):
+        return cls._viewer_following_ratings_queryset(
+            viewer=viewer,
+            movie_id_ref=movie_id_ref,
+        ).annotate(
+            avg_score=Avg("score"),
+        ).values("avg_score")[:1]
+
+    @classmethod
+    def _viewer_following_ratings_count_subquery(cls, *, viewer, movie_id_ref: str):
+        return cls._viewer_following_ratings_queryset(
+            viewer=viewer,
+            movie_id_ref=movie_id_ref,
+        ).annotate(
+            total=Count("id"),
+        ).values("total")[:1]
 
     @classmethod
     def _truncate_excerpt(cls, value: str) -> str:

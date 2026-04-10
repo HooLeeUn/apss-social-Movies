@@ -1983,6 +1983,7 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertAlmostEqual(item["display_rating"], item["general_rating"])
         self.assertEqual(item["my_rating"], 7)
         self.assertAlmostEqual(item["following_avg_rating"], 6.0)
+        self.assertEqual(item["following_ratings_count"], 1)
 
 
 class MovieListViewSearchAndFiltersTests(TestCase):
@@ -2037,6 +2038,37 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids, [matched.id])
+
+    def test_list_includes_following_stats_excluding_viewer_rating(self):
+        followed_user = self.user_model.objects.create_user(
+            username="movie_catalog_followed",
+            email="movie-catalog-followed@example.com",
+            password="test1234",
+        )
+        movie = self._create_movie("Following Stats Movie")
+        Follow.objects.create(follower=self.viewer, following=followed_user)
+        MovieRating.objects.create(user=followed_user, movie=movie, score=9)
+        MovieRating.objects.create(user=self.viewer, movie=movie, score=4)
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(self.url, {"search": "Following Stats Movie"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["results"][0]
+        self.assertEqual(payload["following_avg_rating"], 9.0)
+        self.assertEqual(payload["following_ratings_count"], 1)
+
+    def test_list_includes_null_avg_and_zero_count_without_followed_ratings(self):
+        movie = self._create_movie("No Followed Ratings Movie")
+        MovieRating.objects.create(user=self.viewer, movie=movie, score=8)
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(self.url, {"search": "No Followed Ratings Movie"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["results"][0]
+        self.assertIsNone(payload["following_avg_rating"])
+        self.assertEqual(payload["following_ratings_count"], 0)
 
     def test_genre_filter_matches_individual_genre_inside_csv_string(self):
         matched = self._create_movie("Action Comedy Mix", genre="Action, Comedy")
@@ -2656,3 +2688,5 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertEqual(movie_payload["genre"], "Action, Comedy")
         self.assertAlmostEqual(movie_payload["display_rating"], 8.485, places=3)
         self.assertEqual(movie_payload["my_rating"], 7)
+        self.assertAlmostEqual(movie_payload["following_avg_rating"], 9.0)
+        self.assertEqual(movie_payload["following_ratings_count"], 1)

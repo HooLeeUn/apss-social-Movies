@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models.functions import Coalesce
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
@@ -172,12 +173,9 @@ def build_profile_favorite_movie_payload_by_id(user, movie_ids):
         Movie.objects.filter(id__in=movie_ids)
         .with_display_rating()
         .with_my_rating(user)
+        .with_following_rating_stats(user)
         .annotate(
             general_rating=F("display_rating"),
-            following_avg_rating=Avg(
-                "movie_ratings__score",
-                filter=Q(movie_ratings__user__followers__follower=user),
-            )
         )
     )
     serialized_movies = ProfileFavoriteMovieSerializer(movies, many=True)
@@ -868,16 +866,7 @@ class MovieListView(generics.ListAPIView):
         qs = qs.with_comment_stats().select_related("author", "author__profile").annotate(
             general_rating=F("display_rating"),
         )
-
-        if user.is_authenticated:
-            qs = qs.annotate(
-                following_avg_rating=Avg(
-                    "movie_ratings__score",
-                    filter=Q(movie_ratings__user__followers__follower=user),
-                )
-            )
-        else:
-            qs = qs.annotate(following_avg_rating=Value(None, output_field=FloatField()))
+        qs = qs.with_following_rating_stats(user)
 
         if movie_type := self.request.query_params.get("type"):
             qs = qs.filter(type=movie_type)
@@ -924,15 +913,7 @@ class MovieDetailView(generics.RetrieveAPIView):
         qs = qs.with_comment_stats().select_related("author", "author__profile").annotate(
             general_rating=F("display_rating"),
         )
-
-        if user.is_authenticated:
-            return qs.annotate(
-                following_avg_rating=Avg(
-                    "movie_ratings__score",
-                    filter=Q(movie_ratings__user__followers__follower=user),
-                )
-            )
-        return qs.annotate(following_avg_rating=Value(None, output_field=FloatField()))
+        return qs.with_following_rating_stats(user)
 
 
 class ProfileFavoritesView(APIView):
@@ -1081,6 +1062,7 @@ class FeedMoviesView(generics.ListAPIView):
                 include_recommendation_score=has_preferences,
                 include_my_rating=False,
             )
+            .with_following_rating_stats(user)
             .select_related("author", "author__profile")
         )
         self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
@@ -1201,15 +1183,34 @@ class WeeklyRecommendationsView(generics.ListAPIView):
             return queryset.annotate(
                 my_rating=Value(None, output_field=IntegerField()),
                 following_avg_rating=Value(None, output_field=FloatField()),
+                following_ratings_count=Value(0, output_field=IntegerField()),
             )
+
+        followed_user_ids = Follow.objects.filter(
+            follower_id=user.id,
+        ).exclude(
+            following_id=user.id,
+        ).values("following_id")
+        following_ratings = MovieRating.objects.filter(
+            movie_id=OuterRef("movie_id"),
+            user_id__in=followed_user_ids,
+        ).values("movie_id")
+
+        following_avg_subquery = following_ratings.annotate(
+            avg_score=Avg("score"),
+        ).values("avg_score")[:1]
+        following_count_subquery = following_ratings.annotate(
+            total=Count("id"),
+        ).values("total")[:1]
 
         return queryset.annotate(
             my_rating=Subquery(
                 MovieRating.objects.filter(movie_id=OuterRef("movie_id"), user_id=user.id).values("score")[:1]
             ),
-            following_avg_rating=Avg(
-                "movie__movie_ratings__score",
-                filter=Q(movie__movie_ratings__user__followers__follower=user),
+            following_avg_rating=Subquery(following_avg_subquery, output_field=FloatField()),
+            following_ratings_count=Coalesce(
+                Subquery(following_count_subquery, output_field=IntegerField()),
+                Value(0),
             ),
         )
 
