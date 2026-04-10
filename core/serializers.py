@@ -156,9 +156,18 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         visibility = validated_data.get("visibility")
+        previous_visibility = instance.visibility
         if visibility is not None:
             instance.is_public = visibility == Profile.Visibility.PUBLIC
-        return super().update(instance, validated_data)
+        instance = super().update(instance, validated_data)
+
+        if (
+            visibility == Profile.Visibility.PRIVATE
+            and previous_visibility == Profile.Visibility.PUBLIC
+        ):
+            Follow.objects.filter(following=instance.user).delete()
+
+        return instance
 
 
 class UserVisibilityBlockSerializer(serializers.ModelSerializer):
