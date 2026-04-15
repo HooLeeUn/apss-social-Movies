@@ -2904,3 +2904,34 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(after.data["general_rating"], before_general)
         self.assertEqual(after.data["display_rating"], before_display)
         self.assertEqual(after.data["real_ratings_count"], before_count)
+
+    def test_user_search_endpoint_returns_partial_matches_without_self_or_blocked_users(self):
+        dennisse = get_user_model().objects.create_user(
+            username="Dennisse",
+            email="dennisse@example.com",
+            password="test1234",
+        )
+        get_user_model().objects.create_user(
+            username="dennys",
+            email="dennys@example.com",
+            password="test1234",
+        )
+        get_user_model().objects.create_user(
+            username="den_owner_match",
+            email="den-owner@example.com",
+            password="test1234",
+        )
+        self.owner.username = "den_owner"
+        self.owner.save(update_fields=["username"])
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=dennisse)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(reverse("user-search"), {"q": "den"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(response.data, list)
+        usernames = [item["username"] for item in response.data]
+        self.assertIn("dennys", usernames)
+        self.assertNotIn(self.owner.username, usernames)
+        self.assertNotIn("Dennisse", usernames)
+        self.assertEqual(set(response.data[0].keys()), {"id", "username"})

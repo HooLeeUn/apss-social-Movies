@@ -215,6 +215,12 @@ class UserMiniSerializer(serializers.ModelSerializer):
         return None
 
 
+class UserSearchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "username"]
+
+
 
 
 class SocialActivityActorSerializer(serializers.Serializer):

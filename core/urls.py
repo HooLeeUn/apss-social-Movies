@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    UserProfileView, MeView, FollowToggleView, UserFollowersListView, UserFollowingListView,
+    UserSearchView, UserProfileView, MeView, FollowToggleView, UserFollowersListView, UserFollowingListView,
     FriendshipRequestCreateView, FriendshipRequestAcceptView, FriendshipRequestRejectView,
     FriendshipRequestCancelView, FriendshipDeleteView, FriendsListView,
     FriendMentionListView,
@@ -15,6 +15,7 @@ from .views import (
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
+    path("users/search/", UserSearchView.as_view(), name="user-search"),
     path("users/<str:username>/", UserProfileView.as_view(), name="user-profile"),
     path("users/<str:username>/posts/", UserPostsListView.as_view(), name="user-posts"),
     path("me/", MeView.as_view(), name="me"), 
