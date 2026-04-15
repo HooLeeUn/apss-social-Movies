@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Cast, Coalesce
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
@@ -33,6 +33,9 @@ from .models import (
     Post,
     Rating,
     UserTasteProfile,
+    UserDirectorPreference,
+    UserGenrePreference,
+    UserTypePreference,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
@@ -1077,6 +1080,9 @@ class FeedMoviesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MovieListSerializer
     pagination_class = FeedMoviesPagination
+    FEED_CANDIDATE_MULTIPLIER = 20
+    FEED_CANDIDATE_MIN_POOL = 1000
+    FEED_CANDIDATE_MAX_POOL = 20000
 
     def _is_feed_profiling_enabled(self):
         query_flag = self.request.query_params.get("profile_feed", "").lower() in {"1", "true", "yes"}
@@ -1141,6 +1147,91 @@ class FeedMoviesView(generics.ListAPIView):
             self._feed_count_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=False)
         return self._feed_count_queryset
 
+    def _resolve_page_size(self):
+        paginator = self.paginator
+        if not paginator:
+            return self.FEED_CANDIDATE_MIN_POOL
+        page_size = paginator.get_page_size(self.request)
+        if page_size:
+            return int(page_size)
+        return int(getattr(paginator, "page_size", self.FEED_CANDIDATE_MIN_POOL))
+
+    def _resolve_page_number(self):
+        raw_page = self.request.query_params.get("page", 1)
+        try:
+            page_number = int(raw_page)
+        except (TypeError, ValueError):
+            return 1
+        return max(page_number, 1)
+
+    def _resolve_candidate_pool_size(self):
+        page_size = self._resolve_page_size()
+        page_number = self._resolve_page_number()
+        raw_pool_size = page_size * page_number * self.FEED_CANDIDATE_MULTIPLIER
+        return max(self.FEED_CANDIDATE_MIN_POOL, min(raw_pool_size, self.FEED_CANDIDATE_MAX_POOL))
+
+    def _build_candidate_ids_queryset(self, filtered_base_queryset, has_preferences):
+        user = self.request.user
+
+        candidate_queryset = filtered_base_queryset.annotate(
+            candidate_recency_score=Coalesce(F("release_year"), Value(0), output_field=IntegerField()),
+        )
+
+        if has_preferences:
+            genre_pref_score_subquery = UserGenrePreference.objects.filter(
+                user_id=user.id,
+                genre=OuterRef("genre_key"),
+            ).values("score")[:1]
+            type_pref_score_subquery = UserTypePreference.objects.filter(
+                user_id=user.id,
+                content_type=OuterRef("type"),
+            ).values("score")[:1]
+            director_pref_score_subquery = UserDirectorPreference.objects.filter(
+                user_id=user.id,
+                director=OuterRef("director"),
+            ).values("score")[:1]
+
+            candidate_queryset = candidate_queryset.annotate(
+                candidate_genre_score=Coalesce(Subquery(genre_pref_score_subquery), Value(0.0), output_field=FloatField()),
+                candidate_type_score=Coalesce(Subquery(type_pref_score_subquery), Value(0.0), output_field=FloatField()),
+                candidate_director_score=Coalesce(Subquery(director_pref_score_subquery), Value(0.0), output_field=FloatField()),
+            ).annotate(
+                candidate_affinity_score=(
+                    F("candidate_genre_score") * Value(0.60)
+                    + F("candidate_director_score") * Value(0.25)
+                    + F("candidate_type_score") * Value(0.15)
+                ),
+                candidate_quality_hint=Coalesce(F("external_rating"), Value(0.0), output_field=FloatField()),
+                candidate_popularity_hint=Coalesce(F("external_votes"), Value(0), output_field=IntegerField()),
+            ).annotate(
+                candidate_priority=(
+                    F("candidate_affinity_score") * Value(0.70)
+                    + F("candidate_quality_hint") * Value(0.20)
+                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0015)
+                    + Cast(F("candidate_popularity_hint"), FloatField()) * Value(0.00001)
+                )
+            )
+        else:
+            candidate_queryset = candidate_queryset.annotate(
+                candidate_quality_hint=Coalesce(F("external_rating"), Value(0.0), output_field=FloatField()),
+                candidate_popularity_hint=Coalesce(F("external_votes"), Value(0), output_field=IntegerField()),
+                candidate_priority=(
+                    F("candidate_quality_hint") * Value(0.70)
+                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0025)
+                    + Cast(F("candidate_popularity_hint"), FloatField()) * Value(0.00001)
+                ),
+            )
+
+        search_ordering = ["-search_relevance"] if self.request.query_params.get("search") else []
+        candidate_pool_size = self._resolve_candidate_pool_size()
+        self._record_profile_timing("candidate_pool_size", float(candidate_pool_size))
+        return candidate_queryset.order_by(
+            *search_ordering,
+            "-candidate_priority",
+            "-candidate_recency_score",
+            "-id",
+        ).values("id")[:candidate_pool_size]
+
     def get_queryset(self):
         user = self.request.user
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
@@ -1152,9 +1243,15 @@ class FeedMoviesView(generics.ListAPIView):
         filtered_base_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=True)
         self._record_profile_timing("base_queryset_build_seconds", perf_counter() - base_start)
 
+        candidates_start = perf_counter()
+        candidate_ids_queryset = self._build_candidate_ids_queryset(filtered_base_queryset, has_preferences)
+        self._record_profile_timing("candidate_universe_build_seconds", perf_counter() - candidates_start)
+        self._log_profile_sql("candidate_ids_sql", candidate_ids_queryset)
+        self._log_profile_explain("candidate_ids", candidate_ids_queryset)
+
         score_start = perf_counter()
         qs = (
-            filtered_base_queryset
+            Movie.objects.filter(id__in=Subquery(candidate_ids_queryset))
             .feed_for_user(
                 user,
                 include_recommendation_score=has_preferences,
