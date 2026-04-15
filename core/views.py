@@ -3,9 +3,10 @@ import logging
 from time import perf_counter
 from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, Mod
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
@@ -1080,9 +1081,10 @@ class FeedMoviesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MovieListSerializer
     pagination_class = FeedMoviesPagination
-    FEED_CANDIDATE_MULTIPLIER = 20
-    FEED_CANDIDATE_MIN_POOL = 1000
-    FEED_CANDIDATE_MAX_POOL = 20000
+    FEED_CANDIDATE_MULTIPLIER = 12
+    FEED_CANDIDATE_MIN_POOL = 400
+    FEED_CANDIDATE_MAX_POOL = 12000
+    FEED_PAGE_CACHE_TTL_SECONDS = 120
 
     def _is_feed_profiling_enabled(self):
         query_flag = self.request.query_params.get("profile_feed", "").lower() in {"1", "true", "yes"}
@@ -1170,6 +1172,27 @@ class FeedMoviesView(generics.ListAPIView):
         raw_pool_size = page_size * page_number * self.FEED_CANDIDATE_MULTIPLIER
         return max(self.FEED_CANDIDATE_MIN_POOL, min(raw_pool_size, self.FEED_CANDIDATE_MAX_POOL))
 
+    def _resolve_rotation_bucket(self):
+        # Buckets cortos para permitir refresh dinámico, pero orden estable
+        # dentro de la misma ventana.
+        return int(timezone.now().timestamp() // self.FEED_PAGE_CACHE_TTL_SECONDS)
+
+    def _build_feed_cache_key(self):
+        genres = parse_feed_genre_filters(self.request)
+        return "|".join(
+            [
+                "feed_movies_v2",
+                f"user:{self.request.user.id}",
+                f"page:{self._resolve_page_number()}",
+                f"page_size:{self._resolve_page_size()}",
+                f"search:{(self.request.query_params.get('search') or '').strip().lower()}",
+                f"type:{(self.request.query_params.get('type') or '').strip().lower()}",
+                f"genres:{','.join(genres)}",
+                f"exclude_rated:{self.request.query_params.get('exclude_rated', 'true').lower()}",
+                f"rotation:{self._resolve_rotation_bucket()}",
+            ]
+        )
+
     def _build_candidate_ids_queryset(self, filtered_base_queryset, has_preferences):
         user = self.request.user
 
@@ -1197,17 +1220,17 @@ class FeedMoviesView(generics.ListAPIView):
                 candidate_director_score=Coalesce(Subquery(director_pref_score_subquery), Value(0.0), output_field=FloatField()),
             ).annotate(
                 candidate_affinity_score=(
-                    F("candidate_genre_score") * Value(0.60)
-                    + F("candidate_director_score") * Value(0.25)
-                    + F("candidate_type_score") * Value(0.15)
+                    F("candidate_genre_score") * Value(0.72)
+                    + F("candidate_type_score") * Value(0.18)
+                    + F("candidate_director_score") * Value(0.10)
                 ),
                 candidate_quality_hint=Coalesce(F("external_rating"), Value(0.0), output_field=FloatField()),
                 candidate_popularity_hint=Coalesce(F("external_votes"), Value(0), output_field=IntegerField()),
             ).annotate(
                 candidate_priority=(
-                    F("candidate_affinity_score") * Value(0.70)
-                    + F("candidate_quality_hint") * Value(0.20)
-                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0015)
+                    F("candidate_affinity_score") * Value(0.75)
+                    + F("candidate_quality_hint") * Value(0.23)
+                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0008)
                     + Cast(F("candidate_popularity_hint"), FloatField()) * Value(0.00001)
                 )
             )
@@ -1216,8 +1239,8 @@ class FeedMoviesView(generics.ListAPIView):
                 candidate_quality_hint=Coalesce(F("external_rating"), Value(0.0), output_field=FloatField()),
                 candidate_popularity_hint=Coalesce(F("external_votes"), Value(0), output_field=IntegerField()),
                 candidate_priority=(
-                    F("candidate_quality_hint") * Value(0.70)
-                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0025)
+                    F("candidate_quality_hint") * Value(0.88)
+                    + Cast(F("candidate_recency_score"), FloatField()) * Value(0.0010)
                     + Cast(F("candidate_popularity_hint"), FloatField()) * Value(0.00001)
                 ),
             )
@@ -1260,6 +1283,16 @@ class FeedMoviesView(generics.ListAPIView):
             .with_following_rating_stats(user)
             .select_related("author", "author__profile")
         )
+
+        rotation_seed = (self._resolve_rotation_bucket() * 31) + user.id
+        controlled_jitter_base = Mod(
+            F("id") * Value(1103515245) + Value(rotation_seed),
+            Value(1000),
+        )
+        qs = qs.annotate(
+            controlled_jitter=Cast(controlled_jitter_base, FloatField()) * Value(0.000001),
+            recommendation_final_score=F("recommendation_score") + F("controlled_jitter"),
+        )
         self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
@@ -1268,7 +1301,7 @@ class FeedMoviesView(generics.ListAPIView):
         order_start = perf_counter()
         ordered_queryset = qs.order_by(
             *search_ordering,
-            "-recommendation_score",
+            "-recommendation_final_score",
             "-ranking_confidence_score",
             "-display_rating",
             release_year_desc,
@@ -1302,6 +1335,11 @@ class FeedMoviesView(generics.ListAPIView):
             self._feed_profile_timings = {}
             total_start = perf_counter()
 
+        cache_key = self._build_feed_cache_key()
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         if page is not None:
@@ -1326,6 +1364,7 @@ class FeedMoviesView(generics.ListAPIView):
             self._record_profile_timing("serializer_seconds", perf_counter() - serializer_start)
 
             response = self.get_paginated_response(serialized_data)
+            cache.set(cache_key, response.data, timeout=self.FEED_PAGE_CACHE_TTL_SECONDS)
             if self._feed_profile_enabled:
                 self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
                 self._log_feed_profile_summary()
@@ -1336,6 +1375,7 @@ class FeedMoviesView(generics.ListAPIView):
         serialized_data = serializer.data
         self._record_profile_timing("serializer_seconds", perf_counter() - serializer_start)
         response = Response(serialized_data)
+        cache.set(cache_key, serialized_data, timeout=self.FEED_PAGE_CACHE_TTL_SECONDS)
         if self._feed_profile_enabled:
             self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
             self._log_feed_profile_summary()

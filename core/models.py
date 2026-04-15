@@ -228,9 +228,9 @@ class MovieQuerySet(models.QuerySet):
         if not include_recommendation_score:
             return qs.annotate(
                 recommendation_score=(
-                    F("ranking_quality_score") * Value(0.90)
-                    + F("ranking_confidence_score") * Value(1.00)
-                    + F("recency_score") * Value(0.15)
+                    F("ranking_quality_score") * Value(1.20)
+                    + F("ranking_confidence_score") * Value(0.80)
+                    + F("recency_score") * Value(0.05)
                 )
             )
 
@@ -238,31 +238,62 @@ class MovieQuerySet(models.QuerySet):
             user_id=user.id,
             genre=OuterRef("genre_key"),
         ).values("score")[:1]
+        genre_count_subquery = UserGenrePreference.objects.filter(
+            user_id=user.id,
+            genre=OuterRef("genre_key"),
+        ).values("ratings_count")[:1]
         director_score_subquery = UserDirectorPreference.objects.filter(
             user_id=user.id,
             director=OuterRef("director"),
         ).values("score")[:1]
+        director_count_subquery = UserDirectorPreference.objects.filter(
+            user_id=user.id,
+            director=OuterRef("director"),
+        ).values("ratings_count")[:1]
         type_score_subquery = UserTypePreference.objects.filter(
             user_id=user.id,
             content_type=OuterRef("type"),
         ).values("score")[:1]
+        type_count_subquery = UserTypePreference.objects.filter(
+            user_id=user.id,
+            content_type=OuterRef("type"),
+        ).values("ratings_count")[:1]
 
         return qs.annotate(
             genre_combo_score=Coalesce(Cast(Subquery(genre_score_subquery), FloatField()), Value(0.0)),
             director_score=Coalesce(Cast(Subquery(director_score_subquery), FloatField()), Value(0.0)),
             type_score=Coalesce(Cast(Subquery(type_score_subquery), FloatField()), Value(0.0)),
+            genre_pref_ratings_count=Coalesce(Cast(Subquery(genre_count_subquery), FloatField()), Value(0.0)),
+            director_pref_ratings_count=Coalesce(Cast(Subquery(director_count_subquery), FloatField()), Value(0.0)),
+            type_pref_ratings_count=Coalesce(Cast(Subquery(type_count_subquery), FloatField()), Value(0.0)),
+        ).annotate(
+            genre_pref_confidence=Case(
+                When(genre_pref_ratings_count__gte=8.0, then=Value(1.0)),
+                default=F("genre_pref_ratings_count") / Value(8.0),
+                output_field=FloatField(),
+            ),
+            director_pref_confidence=Case(
+                When(director_pref_ratings_count__gte=5.0, then=Value(1.0)),
+                default=F("director_pref_ratings_count") / Value(5.0),
+                output_field=FloatField(),
+            ),
+            type_pref_confidence=Case(
+                When(type_pref_ratings_count__gte=4.0, then=Value(1.0)),
+                default=F("type_pref_ratings_count") / Value(4.0),
+                output_field=FloatField(),
+            ),
         ).annotate(
             user_affinity_score=(
-                F("genre_combo_score") * Value(0.60)
-                + F("director_score") * Value(0.25)
-                + F("type_score") * Value(0.15)
+                F("genre_combo_score") * F("genre_pref_confidence") * Value(0.72)
+                + F("type_score") * F("type_pref_confidence") * Value(0.18)
+                + F("director_score") * F("director_pref_confidence") * Value(0.10)
             )
         ).annotate(
             recommendation_score=(
-                F("user_affinity_score") * Value(0.55)
-                + F("ranking_quality_score") * Value(0.30)
-                + F("ranking_confidence_score") * Value(1.00)
-                + F("recency_score") * Value(0.15)
+                F("user_affinity_score") * Value(0.65)
+                + F("ranking_quality_score") * Value(0.45)
+                + F("ranking_confidence_score") * Value(0.55)
+                + F("recency_score") * Value(0.04)
             )
         )
 
