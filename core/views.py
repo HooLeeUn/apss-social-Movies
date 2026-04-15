@@ -229,7 +229,7 @@ class UserSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        query = (request.query_params.get("q") or "").strip()
+        query = self._normalize_query(request.query_params.get("q"))
         if not query:
             return Response([], status=status.HTTP_200_OK)
 
@@ -242,6 +242,13 @@ class UserSearchView(APIView):
             .order_by("username")
         )
         return Response(UserSearchSerializer(queryset, many=True).data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _normalize_query(raw_query):
+        query = (raw_query or "").strip()
+        if query.startswith("@"):
+            query = query[1:].strip()
+        return query
 
 
 class UserProfileView(RetrieveAPIView):
