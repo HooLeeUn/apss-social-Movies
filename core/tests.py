@@ -2962,6 +2962,32 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["username"] for item in response.data], ["Dennisse"])
 
+    def test_user_search_endpoint_returns_empty_list_when_query_is_blank_after_normalization(self):
+        get_user_model().objects.create_user(
+            username="Dennisse",
+            email="dennisse-empty@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get(reverse("user-search"), {"q": "   @   "})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_user_search_endpoint_works_without_trailing_slash(self):
+        get_user_model().objects.create_user(
+            username="Dennisse",
+            email="dennisse-noslash@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get("/api/users/search", {"q": "den"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Dennisse", [item["username"] for item in response.data])
+
     def test_user_search_endpoint_route_does_not_conflict_with_user_profile_dynamic_route(self):
         search_user = get_user_model().objects.create_user(
             username="search",
