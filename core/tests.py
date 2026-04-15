@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -274,6 +275,7 @@ class MovieQuerySetAnnotationTests(TestCase):
 
 class FeedMoviesEndpointTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         self.user = get_user_model().objects.create_user(
             username="feed_user", email="feed@example.com", password="test1234"
@@ -667,6 +669,62 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.data["results"][0]["title_english"], "Public Catalog Movie")
         self.assertEqual(response.data["results"][0]["external_votes"], 0)
         self.assertEqual(response.data["results"][0]["synopsis"], "")
+
+    def test_feed_reuses_ranking_cache_between_pages(self):
+        from core.views import FeedMoviesView
+
+        for index in range(40):
+            self._create_movie(
+                title_english=f"Cache Candidate {index}",
+                genre="Drama",
+                external_rating=7.5 + (index % 3) * 0.1,
+                external_votes=6000 + index,
+                release_year=2000 + index,
+            )
+
+        self.client.force_authenticate(user=self.user)
+        original_builder = FeedMoviesView._build_ranking_cache_payload
+        with patch.object(
+            FeedMoviesView,
+            "_build_ranking_cache_payload",
+            wraps=original_builder,
+        ) as ranking_builder:
+            first_page = self.client.get(self.url, {"exclude_rated": "false", "page_size": 10, "page": 1})
+            second_page = self.client.get(self.url, {"exclude_rated": "false", "page_size": 10, "page": 2})
+
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(ranking_builder.call_count, 1)
+
+    def test_feed_rotation_changes_close_scores_without_displacing_clear_winner(self):
+        winner = self._create_movie(
+            title_english="Clear Winner",
+            external_rating=9.6,
+            external_votes=9000,
+            release_year=2023,
+        )
+        for index in range(5):
+            self._create_movie(
+                title_english=f"Close Match {index}",
+                external_rating=8.0,
+                external_votes=6500 + index,
+                release_year=2020,
+            )
+
+        self.client.force_authenticate(user=self.user)
+        with patch("core.views.FeedMoviesView._resolve_rotation_bucket", return_value=100):
+            first_bucket = self.client.get(self.url, {"exclude_rated": "false", "page_size": 6})
+        with patch("core.views.FeedMoviesView._resolve_rotation_bucket", return_value=101):
+            second_bucket = self.client.get(self.url, {"exclude_rated": "false", "page_size": 6})
+
+        self.assertEqual(first_bucket.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_bucket.status_code, status.HTTP_200_OK)
+        first_titles = [item["title_english"] for item in first_bucket.data["results"]]
+        second_titles = [item["title_english"] for item in second_bucket.data["results"]]
+
+        self.assertEqual(first_titles[0], winner.title_english)
+        self.assertEqual(second_titles[0], winner.title_english)
+        self.assertNotEqual(first_titles[1:], second_titles[1:])
 
 
 class MovieRatingEndpointTests(TestCase):
