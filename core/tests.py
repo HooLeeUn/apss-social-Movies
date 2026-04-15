@@ -2935,3 +2935,45 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertNotIn(self.owner.username, usernames)
         self.assertNotIn("Dennisse", usernames)
         self.assertEqual(set(response.data[0].keys()), {"id", "username"})
+
+    def test_user_search_endpoint_is_case_insensitive(self):
+        get_user_model().objects.create_user(
+            username="Dennisse",
+            email="dennisse-case@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get(reverse("user-search"), {"q": "dennisse"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["username"] for item in response.data], ["Dennisse"])
+
+    def test_user_search_endpoint_accepts_at_prefix_and_normalizes_query(self):
+        get_user_model().objects.create_user(
+            username="Dennisse",
+            email="dennisse-at@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get(reverse("user-search"), {"q": "@Dennisse"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["username"] for item in response.data], ["Dennisse"])
+
+    def test_user_search_endpoint_route_does_not_conflict_with_user_profile_dynamic_route(self):
+        search_user = get_user_model().objects.create_user(
+            username="search",
+            email="search-user@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.owner)
+
+        search_response = self.client.get(reverse("user-search"), {"q": "sea"})
+        profile_response = self.client.get(reverse("user-profile", kwargs={"username": search_user.username}))
+
+        self.assertEqual(search_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertIn("search", [item["username"] for item in search_response.data])
+        self.assertEqual(profile_response.data["username"], "search")
