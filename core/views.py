@@ -227,27 +227,30 @@ class RegisterView(generics.CreateAPIView):
 
 class UserSearchView(APIView):
     permission_classes = [IsAuthenticated]
+    RESULTS_LIMIT = 20
 
     def get(self, request):
         query = self._normalize_query(request.query_params.get("q"))
         if not query:
             return Response([], status=status.HTTP_200_OK)
 
-        blocked_user_ids = UserVisibilityBlock.objects.filter(owner=request.user).values_list("blocked_user_id", flat=True)
+        blocked_user_ids = UserVisibilityBlock.objects.filter(
+            owner=request.user,
+        ).values_list("blocked_user_id", flat=True)
 
         queryset = (
             User.objects.filter(username__icontains=query)
             .exclude(id=request.user.id)
             .exclude(id__in=blocked_user_ids)
-            .order_by("username")
+            .order_by("username")[: self.RESULTS_LIMIT]
         )
-        return Response(UserSearchSerializer(queryset, many=True).data, status=status.HTTP_200_OK)
+        serializer = UserSearchSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @staticmethod
     def _normalize_query(raw_query):
         query = (raw_query or "").strip()
-        if query.startswith("@"):
-            query = query[1:].strip()
+        query = query.lstrip("@").strip()
         return query
 
 
