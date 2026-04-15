@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0023_movie_feed_indexes"),
+        ("core", "0025_profile_visibility_uservisibilityblock"),
     ]
 
     operations = [
