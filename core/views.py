@@ -20,7 +20,7 @@ from .serializers import (
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
-    PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer,
+    PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
 )
 from .models import (
     Comment,
@@ -223,6 +223,26 @@ class RegisterView(generics.CreateAPIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class UserSearchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        query = (request.query_params.get("q") or "").strip()
+        if not query:
+            return Response([], status=status.HTTP_200_OK)
+
+        blocked_user_ids = UserVisibilityBlock.objects.filter(owner=request.user).values_list("blocked_user_id", flat=True)
+
+        queryset = (
+            User.objects.filter(username__icontains=query)
+            .exclude(id=request.user.id)
+            .exclude(id__in=blocked_user_ids)
+            .order_by("username")
+        )
+        return Response(UserSearchSerializer(queryset, many=True).data, status=status.HTTP_200_OK)
+
 
 class UserProfileView(RetrieveAPIView):
     serializer_class = UserProfileSerializer
