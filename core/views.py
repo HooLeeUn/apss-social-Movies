@@ -23,6 +23,7 @@ from .serializers import (
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
+    SocialListUserSerializer,
 )
 from .models import (
     Comment,
@@ -392,6 +393,32 @@ class UserFollowingListView(ListAPIView):
             .order_by("username")
             .distinct()
         )
+
+
+class SocialFollowingListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SocialListUserSerializer
+
+    def get_queryset(self):
+        blocked_by_me_ids = UserVisibilityBlock.objects.filter(
+            owner=self.request.user,
+        ).values_list("blocked_user_id", flat=True)
+        blocked_me_subquery = UserVisibilityBlock.objects.filter(
+            owner_id=OuterRef("id"),
+            blocked_user_id=self.request.user.id,
+        )
+        return (
+            User.objects
+            .filter(followers__follower=self.request.user)
+            .exclude(id=self.request.user.id)
+            .exclude(id__in=blocked_by_me_ids)
+            .annotate(_blocked_me=Exists(blocked_me_subquery))
+            .filter(_blocked_me=False)
+            .select_related("profile")
+            .annotate(followers_count=Count("followers", distinct=True))
+            .order_by("username")
+            .distinct()
+        )
         
 class FriendshipRequestCreateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -520,6 +547,36 @@ class FriendMentionListView(ListAPIView):
             friends_queryset = friends_queryset.filter(username__icontains=search.strip())
 
         return friends_queryset.select_related("profile").order_by("username").distinct()
+
+
+class SocialFriendsListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SocialListUserSerializer
+
+    def get_queryset(self):
+        blocked_by_me_ids = UserVisibilityBlock.objects.filter(
+            owner=self.request.user,
+        ).values_list("blocked_user_id", flat=True)
+        blocked_me_subquery = UserVisibilityBlock.objects.filter(
+            owner_id=OuterRef("id"),
+            blocked_user_id=self.request.user.id,
+        )
+        friends_queryset = (
+            User.objects
+            .filter(
+                Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
+                | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
+            )
+            .exclude(id=self.request.user.id)
+            .exclude(id__in=blocked_by_me_ids)
+            .annotate(_blocked_me=Exists(blocked_me_subquery))
+            .filter(_blocked_me=False)
+            .select_related("profile")
+            .annotate(followers_count=Count("followers", distinct=True))
+            .order_by("username")
+            .distinct()
+        )
+        return friends_queryset
 
 
 class ReceivedFriendshipRequestsView(ListAPIView):
