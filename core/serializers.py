@@ -251,10 +251,37 @@ class SocialActivitySerializer(serializers.Serializer):
         "public_comment_like",
         "public_comment_dislike",
     ])
+    type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
     actor = serializers.SerializerMethodField()
     movie = serializers.SerializerMethodField()
     payload = serializers.DictField()
+    score = serializers.SerializerMethodField()
+    target_user = serializers.SerializerMethodField()
+    comment_text = serializers.SerializerMethodField()
+    comment_id = serializers.SerializerMethodField()
+
+    def get_type(self, obj):
+        mapping = {
+            "rating": "rating",
+            "public_comment": "comment",
+            "public_comment_like": "like",
+            "public_comment_dislike": "dislike",
+        }
+        return mapping.get(obj.get("activity_type"), obj.get("activity_type"))
+
+    def get_score(self, obj):
+        return (obj.get("payload") or {}).get("score")
+
+    def get_target_user(self, obj):
+        return (obj.get("payload") or {}).get("comment_author")
+
+    def get_comment_text(self, obj):
+        payload = obj.get("payload") or {}
+        return payload.get("content") or payload.get("comment_excerpt")
+
+    def get_comment_id(self, obj):
+        return (obj.get("payload") or {}).get("comment_id")
 
     def get_actor(self, obj):
         actor = obj.get("actor") or {}

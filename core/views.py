@@ -709,11 +709,9 @@ class ProfileFeedActivityView(generics.ListAPIView):
     serializer_class = SocialActivitySerializer
 
     def get_queryset(self):
-        scope = self.request.query_params.get("scope")
-        if not SocialActivityFeedService.is_valid_scope(scope):
-            raise ValidationError(
-                {"scope": "This query param is required and must be one of: following, friends."}
-            )
+        scope = SocialActivityFeedService.normalize_scope(
+            self.request.query_params.get("scope")
+        )
 
         return SocialActivityFeedService.build_feed(
             user=self.request.user,
