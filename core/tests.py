@@ -2397,15 +2397,23 @@ class ProfileFeedActivityViewTests(TestCase):
         response = self.client.get(self.url, {"scope": "following"})
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_missing_scope_returns_400(self):
-        response = self.client.get(self.url)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("scope", response.data)
+    def test_missing_scope_defaults_to_me(self):
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
 
-    def test_invalid_scope_returns_400(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(f"rating:{own_rating.id}", ids)
+
+    def test_invalid_scope_falls_back_to_me(self):
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=6)
+
         response = self.client.get(self.url, {"scope": "invalid-scope"})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("scope", response.data)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(f"rating:{own_rating.id}", ids)
 
     def test_following_returns_ratings_from_followed_users(self):
         self._add_follow(self.actor)
@@ -2487,6 +2495,40 @@ class ProfileFeedActivityViewTests(TestCase):
         ids, _ = self._fetch_ids(scope="following")
         self.assertNotIn(f"rating:{own_rating.id}", ids)
         self.assertIn(f"rating:{actor_rating.id}", ids)
+
+    def test_scope_me_returns_authenticated_user_activity(self):
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
+        own_comment = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body="Own public comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        comment_to_react = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie_without_image,
+            body="Someone else comment",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        own_like = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=comment_to_react,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        own_dislike = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=comment_to_react,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+
+        ids, response = self._fetch_ids(scope="me")
+
+        self.assertIn(f"rating:{own_rating.id}", ids)
+        self.assertIn(f"public_comment:{own_comment.id}", ids)
+        self.assertIn(f"public_comment_like:{own_like.id}", ids)
+        self.assertIn(f"public_comment_dislike:{own_dislike.id}", ids)
+        returned_types = {item["activity_type"] for item in response.data["results"]}
+        self.assertTrue({"rating", "public_comment", "public_comment_like", "public_comment_dislike"}.issubset(returned_types))
 
     def test_excludes_private_direct_comments(self):
         self._add_follow(self.actor)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Literal
+from typing import Iterable, Literal, cast
 
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
@@ -8,7 +8,7 @@ from django.db.models.functions import Coalesce
 from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating, UserVisibilityBlock
 
 
-SocialFeedScope = Literal["following", "friends"]
+SocialFeedScope = Literal["following", "friends", "me"]
 
 
 class SocialActivityFeedService:
@@ -17,11 +17,13 @@ class SocialActivityFeedService:
     ACTIVITY_PUBLIC_COMMENT_LIKE = "public_comment_like"
     ACTIVITY_PUBLIC_COMMENT_DISLIKE = "public_comment_dislike"
 
+    SCOPE_ME: SocialFeedScope = "me"
     SCOPE_FOLLOWING: SocialFeedScope = "following"
     SCOPE_FRIENDS: SocialFeedScope = "friends"
 
+    DEFAULT_SCOPE: SocialFeedScope = SCOPE_ME
     COMMENT_EXCERPT_LENGTH = 120
-    VALID_SCOPES = frozenset({SCOPE_FOLLOWING, SCOPE_FRIENDS})
+    VALID_SCOPES = frozenset({SCOPE_ME, SCOPE_FOLLOWING, SCOPE_FRIENDS})
     _ACTIVITY_SORT_PRIORITY = {
         ACTIVITY_RATING: 3,
         ACTIVITY_PUBLIC_COMMENT: 2,
@@ -32,6 +34,12 @@ class SocialActivityFeedService:
     @classmethod
     def is_valid_scope(cls, scope: str | None) -> bool:
         return scope in cls.VALID_SCOPES
+
+    @classmethod
+    def normalize_scope(cls, scope: str | None) -> SocialFeedScope:
+        if scope in cls.VALID_SCOPES:
+            return cast(SocialFeedScope, scope)
+        return cls.DEFAULT_SCOPE
 
     @classmethod
     def build_feed(cls, *, user, scope: SocialFeedScope) -> list[dict]:
@@ -46,7 +54,7 @@ class SocialActivityFeedService:
             raise ValueError(f"Unsupported social feed scope: {scope}")
 
         actor_ids = cls._get_actor_ids_for_scope(user=user, scope=scope)
-        actor_ids = [actor_id for actor_id in set(actor_ids) if actor_id != user.id]
+        actor_ids = list(set(actor_ids))
         if not actor_ids:
             return []
 
@@ -71,6 +79,9 @@ class SocialActivityFeedService:
 
     @classmethod
     def _get_actor_ids_for_scope(cls, *, user, scope: SocialFeedScope) -> list[int]:
+        if scope == cls.SCOPE_ME:
+            return [user.id]
+
         if scope == cls.SCOPE_FOLLOWING:
             actor_ids = list(
                 Follow.objects.filter(follower_id=user.id)
