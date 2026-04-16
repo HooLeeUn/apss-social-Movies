@@ -14,7 +14,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
@@ -377,19 +377,44 @@ class UserFollowingListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = UserMiniSerializer
 
+    def get_serializer_class(self):
+        username = self.kwargs.get("username", "")
+        if username.lower() == "me":
+            return SocialListUserSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         username = self.kwargs["username"]
-        target = get_object_or_404(User.objects.select_related("profile"), username=username)
-        if not can_view_user_profile(target, self.request.user):
-            raise PermissionDenied("You do not have permission to view this profile.")
-        following_ids = Follow.objects.filter(
-            follower__username=username
-        ).values_list("following_id", flat=True)
+        if username.lower() == "me":
+            if not self.request.user.is_authenticated:
+                raise NotAuthenticated("Authentication credentials were not provided.")
+            target = self.request.user
+        else:
+            target = get_object_or_404(User.objects.select_related("profile"), username=username)
+            if not can_view_user_profile(target, self.request.user):
+                raise PermissionDenied("You do not have permission to view this profile.")
 
         return (
             User.objects
-            .filter(followers__follower__username=username)  # users que <username> está siguiendo
+            .filter(followers__follower=target)  # users que <target> está siguiendo
             .select_related("profile")
+            .annotate(followers_count=Count("followers", distinct=True))
+            .order_by("username")
+            .distinct()
+        )
+
+
+class MeFollowingListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SocialListUserSerializer
+
+    def get_queryset(self):
+        return (
+            User.objects
+            .filter(followers__follower=self.request.user)
+            .exclude(id=self.request.user.id)
+            .select_related("profile")
+            .annotate(followers_count=Count("followers", distinct=True))
             .order_by("username")
             .distinct()
         )
