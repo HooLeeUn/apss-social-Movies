@@ -409,12 +409,24 @@ class MeFollowingListView(ListAPIView):
     serializer_class = SocialListUserSerializer
 
     def get_queryset(self):
+        followers_count_subquery = (
+            Follow.objects
+            .filter(following_id=OuterRef("pk"))
+            .values("following_id")
+            .annotate(total=Count("id"))
+            .values("total")
+        )
         return (
             User.objects
             .filter(followers__follower=self.request.user)
             .exclude(id=self.request.user.id)
             .select_related("profile")
-            .annotate(followers_count=Count("followers", distinct=True))
+            .annotate(
+                followers_count=Coalesce(
+                    Subquery(followers_count_subquery, output_field=IntegerField()),
+                    Value(0),
+                )
+            )
             .order_by("username")
             .distinct()
         )
