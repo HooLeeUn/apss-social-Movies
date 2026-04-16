@@ -329,6 +329,28 @@ class FriendMentionSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+
+class SocialListUserSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
+    followers_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "display_name", "avatar_url", "followers_count"]
+
+    def get_display_name(self, obj):
+        profile = getattr(obj, "profile", None)
+        display_name = getattr(profile, "display_name", None)
+        return display_name or obj.username
+
+    def get_avatar_url(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
     
 class PostListSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
