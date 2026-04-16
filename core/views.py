@@ -1,12 +1,13 @@
 import re
 import logging
+import random
 from time import perf_counter
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Cast, Coalesce, Mod
+from django.db.models.functions import Cast, Coalesce
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
@@ -1085,6 +1086,10 @@ class FeedMoviesView(generics.ListAPIView):
     FEED_CANDIDATE_MIN_POOL = 400
     FEED_CANDIDATE_MAX_POOL = 12000
     FEED_PAGE_CACHE_TTL_SECONDS = 120
+    FEED_RANKING_CACHE_TTL_SECONDS = 600
+    FEED_ROTATION_SCORE_BAND = 0.12
+    FEED_ROTATION_WINDOW_MIN = 24
+    FEED_ROTATION_WINDOW_MAX = 72
 
     def _is_feed_profiling_enabled(self):
         query_flag = self.request.query_params.get("profile_feed", "").lower() in {"1", "true", "yes"}
@@ -1097,6 +1102,11 @@ class FeedMoviesView(generics.ListAPIView):
         if not getattr(self, "_feed_profile_enabled", False):
             return
         self._feed_profile_timings[key] = round(elapsed_seconds, 6)
+
+    def _record_profile_marker(self, key, value):
+        if not getattr(self, "_feed_profile_enabled", False):
+            return
+        self._feed_profile_timings[key] = value
 
     def _log_feed_profile_summary(self):
         if not getattr(self, "_feed_profile_enabled", False):
@@ -1172,6 +1182,12 @@ class FeedMoviesView(generics.ListAPIView):
         raw_pool_size = page_size * page_number * self.FEED_CANDIDATE_MULTIPLIER
         return max(self.FEED_CANDIDATE_MIN_POOL, min(raw_pool_size, self.FEED_CANDIDATE_MAX_POOL))
 
+    def _resolve_ranking_pool_size(self):
+        page_size = self._resolve_page_size()
+        page_number = max(self._resolve_page_number(), 3)
+        raw_pool_size = page_size * page_number * self.FEED_CANDIDATE_MULTIPLIER
+        return max(self.FEED_CANDIDATE_MIN_POOL, min(raw_pool_size, self.FEED_CANDIDATE_MAX_POOL))
+
     def _resolve_rotation_bucket(self):
         # Buckets cortos para permitir refresh dinámico, pero orden estable
         # dentro de la misma ventana.
@@ -1190,6 +1206,19 @@ class FeedMoviesView(generics.ListAPIView):
                 f"genres:{','.join(genres)}",
                 f"exclude_rated:{self.request.query_params.get('exclude_rated', 'true').lower()}",
                 f"rotation:{self._resolve_rotation_bucket()}",
+            ]
+        )
+
+    def _build_feed_ranking_cache_key(self):
+        genres = parse_feed_genre_filters(self.request)
+        return "|".join(
+            [
+                "feed_movies_ranking_v1",
+                f"user:{self.request.user.id}",
+                f"search:{(self.request.query_params.get('search') or '').strip().lower()}",
+                f"type:{(self.request.query_params.get('type') or '').strip().lower()}",
+                f"genres:{','.join(genres)}",
+                f"exclude_rated:{self.request.query_params.get('exclude_rated', 'true').lower()}",
             ]
         )
 
@@ -1255,6 +1284,89 @@ class FeedMoviesView(generics.ListAPIView):
             "-id",
         ).values("id")[:candidate_pool_size]
 
+    def _build_ranking_cache_payload(self, filtered_base_queryset, has_preferences):
+        candidates_start = perf_counter()
+        candidate_ids_queryset = self._build_candidate_ids_queryset(filtered_base_queryset, has_preferences)
+        self._record_profile_timing("candidate_universe_build_seconds", perf_counter() - candidates_start)
+        self._log_profile_sql("candidate_ids_sql", candidate_ids_queryset)
+        self._log_profile_explain("candidate_ids", candidate_ids_queryset)
+
+        score_start = perf_counter()
+        ranking_queryset = (
+            Movie.objects.filter(id__in=Subquery(candidate_ids_queryset))
+            .feed_for_user(
+                self.request.user,
+                include_recommendation_score=has_preferences,
+                include_my_rating=False,
+            )
+        )
+        release_year_desc = F("release_year").desc(nulls_last=True)
+        search_ordering = ["-search_relevance"] if self.request.query_params.get("search") else []
+        ranking_pairs = list(
+            ranking_queryset.order_by(
+                *search_ordering,
+                "-recommendation_score",
+                "-ranking_confidence_score",
+                "-display_rating",
+                release_year_desc,
+                "-id",
+            ).values_list("id", "recommendation_score")
+        )
+        self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
+        return {
+            "pool_size": self._resolve_ranking_pool_size(),
+            "pairs": [(movie_id, float(score or 0.0)) for movie_id, score in ranking_pairs],
+        }
+
+    def _get_ranking_cache_payload(self, filtered_base_queryset, has_preferences):
+        ranking_cache_key = self._build_feed_ranking_cache_key()
+        cache_backend = cache.__class__.__name__
+        self._record_profile_marker("cache_backend", cache_backend)
+
+        ranking_payload = cache.get(ranking_cache_key)
+        expected_pool_size = self._resolve_ranking_pool_size()
+        if ranking_payload and ranking_payload.get("pool_size", 0) >= expected_pool_size:
+            self._record_profile_marker("ranking_cache", "hit")
+            self._record_profile_marker("ranking_cache_key", ranking_cache_key)
+            return ranking_payload
+
+        self._record_profile_marker("ranking_cache", "miss")
+        ranking_payload = self._build_ranking_cache_payload(filtered_base_queryset, has_preferences)
+        cache.set(ranking_cache_key, ranking_payload, timeout=self.FEED_RANKING_CACHE_TTL_SECONDS)
+        self._record_profile_marker("ranking_cache_key", ranking_cache_key)
+        return ranking_payload
+
+    def _rotate_ranked_pairs(self, ranking_pairs):
+        if not ranking_pairs:
+            return []
+
+        page_size = self._resolve_page_size()
+        rotation_window_size = max(self.FEED_ROTATION_WINDOW_MIN, min(page_size * 3, self.FEED_ROTATION_WINDOW_MAX))
+        rotation_window_size = min(rotation_window_size, len(ranking_pairs))
+        rotated = list(ranking_pairs)
+        top_pairs = list(rotated[:rotation_window_size])
+        bucket = self._resolve_rotation_bucket()
+
+        idx = 0
+        while idx < len(top_pairs):
+            start_idx = idx
+            anchor_score = float(top_pairs[start_idx][1] or 0.0)
+            idx += 1
+            while idx < len(top_pairs):
+                next_score = float(top_pairs[idx][1] or 0.0)
+                if (anchor_score - next_score) > self.FEED_ROTATION_SCORE_BAND:
+                    break
+                idx += 1
+
+            group = top_pairs[start_idx:idx]
+            if len(group) > 1:
+                rng = random.Random((self.request.user.id * 1_000_003) + (bucket * 97) + start_idx)
+                rng.shuffle(group)
+                top_pairs[start_idx:idx] = group
+
+        rotated[:rotation_window_size] = top_pairs
+        return rotated
+
     def get_queryset(self):
         user = self.request.user
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
@@ -1266,46 +1378,26 @@ class FeedMoviesView(generics.ListAPIView):
         filtered_base_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=True)
         self._record_profile_timing("base_queryset_build_seconds", perf_counter() - base_start)
 
-        candidates_start = perf_counter()
-        candidate_ids_queryset = self._build_candidate_ids_queryset(filtered_base_queryset, has_preferences)
-        self._record_profile_timing("candidate_universe_build_seconds", perf_counter() - candidates_start)
-        self._log_profile_sql("candidate_ids_sql", candidate_ids_queryset)
-        self._log_profile_explain("candidate_ids", candidate_ids_queryset)
+        ranking_cache_start = perf_counter()
+        ranking_payload = self._get_ranking_cache_payload(filtered_base_queryset, has_preferences)
+        self._record_profile_timing("ranking_cache_resolve_seconds", perf_counter() - ranking_cache_start)
+        rotated_pairs = self._rotate_ranked_pairs(ranking_payload.get("pairs", []))
+        ordered_ids = [movie_id for movie_id, _score in rotated_pairs]
+        if not ordered_ids:
+            return Movie.objects.none()
 
-        score_start = perf_counter()
-        qs = (
-            Movie.objects.filter(id__in=Subquery(candidate_ids_queryset))
-            .feed_for_user(
-                user,
-                include_recommendation_score=has_preferences,
-                include_my_rating=False,
-            )
+        ordering_case = Case(
+            *[When(id=movie_id, then=position) for position, movie_id in enumerate(ordered_ids)],
+            output_field=IntegerField(),
+        )
+        order_start = perf_counter()
+        ordered_queryset = (
+            Movie.objects.filter(id__in=ordered_ids)
+            .with_display_rating()
+            .annotate(general_rating=F("display_rating"))
             .with_following_rating_stats(user)
             .select_related("author", "author__profile")
-        )
-
-        rotation_seed = (self._resolve_rotation_bucket() * 31) + user.id
-        controlled_jitter_base = Mod(
-            F("id") * Value(1103515245) + Value(rotation_seed),
-            Value(1000),
-        )
-        qs = qs.annotate(
-            controlled_jitter=Cast(controlled_jitter_base, FloatField()) * Value(0.000001),
-            recommendation_final_score=F("recommendation_score") + F("controlled_jitter"),
-        )
-        self._record_profile_timing("scoring_ranking_build_seconds", perf_counter() - score_start)
-
-        release_year_desc = F("release_year").desc(nulls_last=True)
-
-        search_ordering = ["-search_relevance"] if self.request.query_params.get("search") else []
-        order_start = perf_counter()
-        ordered_queryset = qs.order_by(
-            *search_ordering,
-            "-recommendation_final_score",
-            "-ranking_confidence_score",
-            "-display_rating",
-            release_year_desc,
-            "-id",
+            .order_by(ordering_case)
         )
         self._record_profile_timing("final_order_by_build_seconds", perf_counter() - order_start)
         return ordered_queryset
@@ -1336,9 +1428,15 @@ class FeedMoviesView(generics.ListAPIView):
             total_start = perf_counter()
 
         cache_key = self._build_feed_cache_key()
+        self._record_profile_marker("page_cache_key", cache_key)
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
+            self._record_profile_marker("page_cache", "hit")
+            if self._feed_profile_enabled:
+                self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
+                self._log_feed_profile_summary()
             return Response(cached_payload)
+        self._record_profile_marker("page_cache", "miss")
 
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
