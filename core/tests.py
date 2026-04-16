@@ -1569,6 +1569,60 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertFalse(response.data["can_send_friend_request"])
 
 
+class MeFollowingEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="following_owner", email="following-owner@example.com", password="test1234"
+        )
+        self.followed_user = get_user_model().objects.create_user(
+            username="followed_user", email="followed@example.com", password="test1234"
+        )
+        self.follower_a = get_user_model().objects.create_user(
+            username="follower_a", email="follower-a@example.com", password="test1234"
+        )
+        self.follower_b = get_user_model().objects.create_user(
+            username="follower_b", email="follower-b@example.com", password="test1234"
+        )
+    def test_me_following_returns_users_followed_by_authenticated_user_with_followers_count(self):
+        Follow.objects.create(follower=self.user, following=self.followed_user)
+        Follow.objects.create(follower=self.follower_a, following=self.followed_user)
+        Follow.objects.create(follower=self.follower_b, following=self.followed_user)
+        Follow.objects.create(follower=self.followed_user, following=self.user)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse("me-following"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        item = response.data["results"][0]
+        self.assertEqual(item["username"], "followed_user")
+        self.assertEqual(item["followers_count"], 3)
+        self.assertEqual(set(item.keys()), {"id", "username", "display_name", "avatar_url", "followers_count"})
+
+    def test_users_me_following_alias_resolves_authenticated_user_instead_of_literal_username(self):
+        Follow.objects.create(follower=self.user, following=self.followed_user)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("user-following", kwargs={"username": "me"}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["username"], "followed_user")
+        self.assertIn("followers_count", response.data["results"][0])
+
+    def test_users_username_following_keeps_existing_contract(self):
+        Follow.objects.create(follower=self.user, following=self.followed_user)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("user-following", kwargs={"username": self.user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["username"], "followed_user")
+        self.assertEqual(set(response.data["results"][0].keys()), {"id", "username", "bio", "avatar"})
+
+
 class FriendsListEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
