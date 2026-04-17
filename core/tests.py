@@ -1,5 +1,5 @@
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -3286,6 +3286,7 @@ class PersonalDataEndpointTests(TestCase):
 
     def test_register_requires_and_persists_first_name_and_last_name(self):
         url = reverse("register")
+        adult_birth_date = (timezone.now().date() - timedelta(days=365 * 20)).isoformat()
         payload = {
             "username": "newuser01",
             "email": "newuser01@example.com",
@@ -3293,6 +3294,7 @@ class PersonalDataEndpointTests(TestCase):
             "password_confirmation": "strongpass123",
             "first_name": "Ada",
             "last_name": "Lovelace",
+            "birth_date": adult_birth_date,
         }
 
         response = self.client.post(url, payload, format="json")
@@ -3301,9 +3303,48 @@ class PersonalDataEndpointTests(TestCase):
         created = self.user_model.objects.get(username="newuser01")
         self.assertEqual(created.first_name, "Ada")
         self.assertEqual(created.last_name, "Lovelace")
+        self.assertEqual(str(created.profile.birth_date), adult_birth_date)
+        self.assertTrue(created.profile.birth_date_locked)
         self.assertEqual(response.data["user"]["first_name"], "Ada")
         self.assertEqual(response.data["user"]["last_name"], "Lovelace")
         self.assertIn("token", response.data)
+
+    def test_register_rejects_underage_birth_date(self):
+        url = reverse("register")
+        underage_birth_date = (timezone.now().date() - timedelta(days=365 * 12)).isoformat()
+        payload = {
+            "username": "younguser1",
+            "email": "younguser1@example.com",
+            "password": "strongpass123",
+            "password_confirmation": "strongpass123",
+            "first_name": "Mini",
+            "last_name": "User",
+            "birth_date": underage_birth_date,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("birth_date", response.data)
+        self.assertIn("Debes tener al menos 13 años para registrarte.", response.data["birth_date"])
+
+    def test_register_rejects_future_birth_date(self):
+        url = reverse("register")
+        future_birth_date = (timezone.now().date() + timedelta(days=1)).isoformat()
+        payload = {
+            "username": "futureuser",
+            "email": "futureuser@example.com",
+            "password": "strongpass123",
+            "password_confirmation": "strongpass123",
+            "first_name": "Future",
+            "last_name": "User",
+            "birth_date": future_birth_date,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("birth_date", response.data)
 
     def test_personal_data_birth_date_initial_set_locks_field(self):
         user = self.user_model.objects.create_user(
@@ -3365,3 +3406,29 @@ class PersonalDataEndpointTests(TestCase):
             (now.month, now.day) < (birth_date.month, birth_date.day)
         )
         self.assertEqual(response.data["age"], expected_age)
+
+    def test_legacy_user_without_birth_date_still_works_in_personal_data(self):
+        user = self.user_model.objects.create_user(
+            username="legacyuser",
+            email="legacyuser@example.com",
+            password="test1234",
+            first_name="Legacy",
+            last_name="User",
+        )
+        user.profile.birth_date = None
+        user.profile.birth_date_locked = False
+        user.profile.save(update_fields=["birth_date", "birth_date_locked"])
+        self.client.force_authenticate(user=user)
+        url = reverse("me-personal-data")
+
+        get_response = self.client.get(url)
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(get_response.data["birth_date"])
+        self.assertIsNone(get_response.data["age"])
+
+        set_response = self.client.patch(url, {"birth_date": "1991-05-20"}, format="json")
+        self.assertEqual(set_response.status_code, status.HTTP_200_OK)
+
+        user.refresh_from_db()
+        self.assertEqual(str(user.profile.birth_date), "1991-05-20")
+        self.assertTrue(user.profile.birth_date_locked)

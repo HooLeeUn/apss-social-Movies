@@ -25,6 +25,17 @@ from .models import (
 from .models import Follow, Profile
 
 
+def calculate_age_from_birth_date(birth_date):
+    if not birth_date:
+        return None
+
+    today = date.today()
+    years = today.year - birth_date.year
+    if (today.month, today.day) < (birth_date.month, birth_date.day):
+        years -= 1
+    return years
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
@@ -200,14 +211,7 @@ class PersonalDataSerializer(serializers.ModelSerializer):
     def get_age(self, obj):
         profile = getattr(obj, "profile", None)
         birth_date = getattr(profile, "birth_date", None)
-        if not birth_date:
-            return None
-
-        today = date.today()
-        years = today.year - birth_date.year
-        if (today.month, today.day) < (birth_date.month, birth_date.day):
-            years -= 1
-        return years
+        return calculate_age_from_birth_date(birth_date)
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop("profile", {})
@@ -499,6 +503,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     password_confirmation = serializers.CharField(write_only=True, min_length=6)
     first_name = serializers.CharField(required=True, allow_blank=False)
     last_name = serializers.CharField(required=True, allow_blank=False)
+    birth_date = serializers.DateField(required=True)
 
     class Meta:
         model = User
@@ -510,6 +515,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             "email",
             "password",
             "password_confirmation",
+            "birth_date",
         ]
         read_only_fields = ["id"]
 
@@ -523,13 +529,31 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        birth_date = attrs.get("birth_date")
+        if birth_date > date.today():
+            raise serializers.ValidationError(
+                {"birth_date": "Birth date cannot be in the future."}
+            )
+
+        age = calculate_age_from_birth_date(birth_date)
+        if age is not None and age < 13:
+            raise serializers.ValidationError(
+                {"birth_date": "Debes tener al menos 13 años para registrarte."}
+            )
+
         if attrs.get("password") != attrs.get("password_confirmation"):
             raise serializers.ValidationError({"password": "Passwords do not match."})
         return attrs
 
     def create(self, validated_data):
+        birth_date = validated_data.pop("birth_date")
         validated_data.pop("password_confirmation", None)
-        return User.objects.create_user(**validated_data)
+        user = User.objects.create_user(**validated_data)
+        profile, _ = Profile.objects.get_or_create(user=user)
+        profile.birth_date = birth_date
+        profile.birth_date_locked = True
+        profile.save(update_fields=["birth_date", "birth_date_locked"])
+        return user
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
