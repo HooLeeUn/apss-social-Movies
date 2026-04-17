@@ -1,4 +1,3 @@
-import socket
 from datetime import date
 
 from django.contrib.auth.models import User
@@ -519,14 +518,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id"]
 
-    def validate_email(self, value):
-        domain = value.split("@")[-1]
-        try:
-            socket.getaddrinfo(domain, None)
-        except socket.gaierror:
-            raise serializers.ValidationError("This email domain does not appear to exist")
-
-        return value
 
     def validate(self, attrs):
         birth_date = attrs.get("birth_date")
