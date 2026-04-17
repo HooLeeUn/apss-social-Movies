@@ -23,7 +23,7 @@ from .serializers import (
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
-    SocialListUserSerializer,
+    SocialListUserSerializer, PersonalDataSerializer,
 )
 from .models import (
     Comment,
@@ -223,6 +223,8 @@ class RegisterView(generics.CreateAPIView):
                 "user": {
                     "id": user.id,
                     "username": user.username,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
                     "email": user.email,
                 },
                 "token": token.key,
@@ -301,6 +303,15 @@ class MeView(generics.RetrieveUpdateAPIView):
 
     def get_queryset(self):
         return User.objects.all()
+
+
+class MePersonalDataView(generics.RetrieveUpdateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = PersonalDataSerializer
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_object(self):
+        return User.objects.select_related("profile").get(pk=self.request.user.pk)
     
 class FollowToggleView(APIView):
     permission_classes = [IsAuthenticated]
