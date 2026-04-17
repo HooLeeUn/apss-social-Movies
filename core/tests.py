@@ -2936,6 +2936,46 @@ class ProfilePrivacyVisibilityTests(TestCase):
         own_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
         self.assertEqual(own_response.status_code, status.HTTP_200_OK)
 
+    def test_user_profile_exposes_public_personal_data_with_visibility_rules(self):
+        self.owner.first_name = "Dennisse"
+        self.owner.last_name = "Jamaica"
+        self.owner.save(update_fields=["first_name", "last_name"])
+        self.owner.profile.birth_date = timezone.now().date() - timedelta(days=365 * 36)
+        self.owner.profile.birth_date_visible = True
+        self.owner.profile.gender_identity = Profile.GenderIdentity.FEMALE
+        self.owner.profile.gender_identity_visible = True
+        self.owner.profile.save(update_fields=["birth_date", "birth_date_visible", "gender_identity", "gender_identity_visible"])
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["first_name"], "Dennisse")
+        self.assertEqual(response.data["last_name"], "Jamaica")
+        self.assertEqual(response.data["gender_identity"], Profile.GenderIdentity.FEMALE)
+        self.assertIsInstance(response.data["age"], int)
+        self.assertNotIn("email", response.data)
+        self.assertNotIn("birth_date", response.data)
+
+    def test_user_profile_hides_age_and_gender_identity_when_not_visible(self):
+        self.owner.first_name = "Dennisse"
+        self.owner.last_name = "Jamaica"
+        self.owner.save(update_fields=["first_name", "last_name"])
+        self.owner.profile.birth_date = timezone.now().date() - timedelta(days=365 * 36)
+        self.owner.profile.birth_date_visible = False
+        self.owner.profile.gender_identity = Profile.GenderIdentity.FEMALE
+        self.owner.profile.gender_identity_visible = False
+        self.owner.profile.save(update_fields=["birth_date", "birth_date_visible", "gender_identity", "gender_identity_visible"])
+
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["first_name"], "Dennisse")
+        self.assertEqual(response.data["last_name"], "Jamaica")
+        self.assertIsNone(response.data["age"])
+        self.assertIsNone(response.data["gender_identity"])
+
     def test_cannot_follow_private_profile(self):
         self.owner.profile.visibility = Profile.Visibility.PRIVATE
         self.owner.profile.save(update_fields=["visibility"])
