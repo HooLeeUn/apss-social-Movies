@@ -1627,6 +1627,35 @@ class MeFollowingEndpointTests(TestCase):
             {"id", "username", "bio", "avatar", "followers_count"},
         )
 
+    def test_users_username_following_counts_followers_from_global_follow_table(self):
+        julian = get_user_model().objects.create_user(
+            username="Julian", email="julian@example.com", password="test1234"
+        )
+        dennisse = get_user_model().objects.create_user(
+            username="Dennisse", email="dennisse@example.com", password="test1234"
+        )
+        peck = get_user_model().objects.create_user(
+            username="Peck", email="peck@example.com", password="test1234"
+        )
+        gato_dorado = get_user_model().objects.create_user(
+            username="GatoDorado", email="gato-dorado@example.com", password="test1234"
+        )
+        julian_hernadez = get_user_model().objects.create_user(
+            username="JulianHernadez", email="julian-hernadez@example.com", password="test1234"
+        )
+
+        Follow.objects.create(follower=peck, following=julian)
+        Follow.objects.create(follower=julian, following=dennisse)
+        Follow.objects.create(follower=julian_hernadez, following=dennisse)
+        Follow.objects.create(follower=gato_dorado, following=dennisse)
+
+        response = self.client.get(reverse("user-following", kwargs={"username": julian.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["username"], "Dennisse")
+        self.assertEqual(response.data["results"][0]["followers_count"], 3)
+
     def test_me_following_uses_global_follow_table_for_each_listed_user_followers_count(self):
         dennisse = get_user_model().objects.create_user(
             username="Dennisse", email="dennisse@example.com", password="test1234"

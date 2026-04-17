@@ -405,11 +405,24 @@ class UserFollowingListView(ListAPIView):
             if not can_view_user_profile(target, self.request.user):
                 raise PermissionDenied("You do not have permission to view this profile.")
 
+        followers_count_subquery = (
+            Follow.objects
+            .filter(following_id=OuterRef("pk"))
+            .values("following_id")
+            .annotate(total=Count("id"))
+            .values("total")
+        )
+
         return (
             User.objects
             .filter(followers__follower=target)  # users que <target> está siguiendo
             .select_related("profile")
-            .annotate(followers_count=Count("followers", distinct=True))
+            .annotate(
+                followers_count=Coalesce(
+                    Subquery(followers_count_subquery, output_field=IntegerField()),
+                    Value(0),
+                )
+            )
             .order_by("username")
             .distinct()
         )
