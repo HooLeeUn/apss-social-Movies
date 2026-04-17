@@ -36,8 +36,12 @@ def calculate_age_from_birth_date(birth_date):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    first_name = serializers.CharField(read_only=True)
+    last_name = serializers.CharField(read_only=True)
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
+    age = serializers.SerializerMethodField()
+    gender_identity = serializers.SerializerMethodField()
     is_public = serializers.BooleanField(source="profile.is_public", read_only=True)
     visibility = serializers.CharField(source="profile.visibility", read_only=True)
 
@@ -54,7 +58,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username",
+            "first_name", "last_name",
             "bio", "avatar", "is_public", "visibility",
+            "age", "gender_identity",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
             "is_following", "friendship_status",
@@ -114,6 +120,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_age(self, obj):
+        profile = getattr(obj, "profile", None)
+        if not profile or not profile.birth_date_visible:
+            return None
+        return calculate_age_from_birth_date(profile.birth_date)
+
+    def get_gender_identity(self, obj):
+        profile = getattr(obj, "profile", None)
+        if not profile or not profile.gender_identity_visible:
+            return None
+        return profile.gender_identity
 
 class MeSerializer(serializers.ModelSerializer):
     # editable (escribe en Profile)
