@@ -17,7 +17,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
-    FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer,
+    FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
@@ -386,13 +386,13 @@ class UserFollowersListView(ListAPIView):
 
 class UserFollowingListView(ListAPIView):
     permission_classes = [AllowAny]
-    serializer_class = UserMiniSerializer
+    serializer_class = UserMiniWithFollowersCountSerializer
 
     def get_serializer_class(self):
         username = self.kwargs.get("username", "")
         if username.lower() == "me":
             return SocialListUserSerializer
-        return super().get_serializer_class()
+        return UserMiniWithFollowersCountSerializer
 
     def get_queryset(self):
         username = self.kwargs["username"]

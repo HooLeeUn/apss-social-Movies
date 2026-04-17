@@ -323,6 +323,13 @@ class UserMiniSerializer(serializers.ModelSerializer):
         return None
 
 
+class UserMiniWithFollowersCountSerializer(UserMiniSerializer):
+    followers_count = serializers.IntegerField(read_only=True)
+
+    class Meta(UserMiniSerializer.Meta):
+        fields = UserMiniSerializer.Meta.fields + ["followers_count"]
+
+
 class UserSearchSerializer(serializers.ModelSerializer):
     class Meta:
         model = User

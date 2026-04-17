@@ -1612,15 +1612,20 @@ class MeFollowingEndpointTests(TestCase):
         self.assertEqual(response.data["results"][0]["username"], "followed_user")
         self.assertIn("followers_count", response.data["results"][0])
 
-    def test_users_username_following_keeps_existing_contract(self):
+    def test_users_username_following_includes_followers_count(self):
         Follow.objects.create(follower=self.user, following=self.followed_user)
+        Follow.objects.create(follower=self.follower_a, following=self.followed_user)
         self.client.force_authenticate(user=self.user)
 
         response = self.client.get(reverse("user-following", kwargs={"username": self.user.username}))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["results"][0]["username"], "followed_user")
-        self.assertEqual(set(response.data["results"][0].keys()), {"id", "username", "bio", "avatar"})
+        self.assertEqual(response.data["results"][0]["followers_count"], 2)
+        self.assertEqual(
+            set(response.data["results"][0].keys()),
+            {"id", "username", "bio", "avatar", "followers_count"},
+        )
 
     def test_me_following_uses_global_follow_table_for_each_listed_user_followers_count(self):
         dennisse = get_user_model().objects.create_user(
