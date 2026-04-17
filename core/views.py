@@ -404,6 +404,48 @@ class UserFollowingListView(ListAPIView):
         )
 
 
+class UserFriendsListView(ListAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = SocialListUserSerializer
+
+    def get_queryset(self):
+        target = get_object_or_404(
+            User.objects.select_related("profile"),
+            username=self.kwargs["username"],
+        )
+        if not can_view_user_profile(target, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
+
+        blocked_by_viewer_ids = UserVisibilityBlock.objects.filter(
+            owner=self.request.user,
+        ).values_list("blocked_user_id", flat=True) if self.request.user.is_authenticated else []
+        blocked_viewer_subquery = UserVisibilityBlock.objects.filter(
+            owner_id=OuterRef("id"),
+            blocked_user_id=self.request.user.id,
+        ) if self.request.user.is_authenticated else UserVisibilityBlock.objects.none()
+
+        queryset = (
+            User.objects
+            .filter(
+                Q(friendships_as_user1__user2=target, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
+                | Q(friendships_as_user2__user1=target, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
+            )
+            .exclude(id=target.id)
+            .select_related("profile")
+            .annotate(followers_count=Count("followers", distinct=True))
+            .order_by("username")
+            .distinct()
+        )
+        if self.request.user.is_authenticated:
+            queryset = (
+                queryset
+                .exclude(id__in=blocked_by_viewer_ids)
+                .annotate(_blocked_viewer=Exists(blocked_viewer_subquery))
+                .filter(_blocked_viewer=False)
+            )
+        return queryset
+
+
 class MeFollowingListView(ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SocialListUserSerializer
@@ -817,6 +859,30 @@ class ProfileFeedActivityView(generics.ListAPIView):
         context["request"] = self.request
         return context
 
+
+class UserProfileActivityView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = SocialActivitySerializer
+
+    def get_queryset(self):
+        target = get_object_or_404(
+            User.objects.select_related("profile"),
+            username=self.kwargs["username"],
+        )
+        if not can_view_user_profile(target, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
+
+        return SocialActivityFeedService.build_feed_for_actor(
+            viewer=self.request.user,
+            actor=target,
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["request"] = self.request
+        return context
+
+
 class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
     mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
@@ -1073,6 +1139,36 @@ class ProfileFavoritesView(APIView):
     def get(self, request):
         favorites = list(
             ProfileFavoriteMovie.objects.filter(user=request.user)
+            .select_related("movie")
+            .order_by("slot")
+        )
+        movie_ids = [favorite.movie_id for favorite in favorites]
+        movie_payload_by_id = build_profile_favorite_movie_payload_by_id(request.user, movie_ids)
+        movie_id_by_slot = {favorite.slot: favorite.movie_id for favorite in favorites}
+
+        payload = [
+            {
+                "slot": slot,
+                "movie": movie_payload_by_id.get(movie_id_by_slot.get(slot)),
+            }
+            for slot in (1, 2, 3)
+        ]
+        return Response(ProfileFavoriteSlotSerializer(payload, many=True).data, status=status.HTTP_200_OK)
+
+
+class UserProfileFavoritesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, username):
+        target = get_object_or_404(
+            User.objects.select_related("profile"),
+            username=username,
+        )
+        if not can_view_user_profile(target, request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
+
+        favorites = list(
+            ProfileFavoriteMovie.objects.filter(user=target)
             .select_related("movie")
             .order_by("slot")
         )

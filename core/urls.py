@@ -1,17 +1,17 @@
 from django.urls import path
 from .views import (
     UserSearchView, UserProfileView, MeView, FollowToggleView, UserFollowersListView, UserFollowingListView,
-    MeFollowingListView,
+    MeFollowingListView, UserFriendsListView,
     FriendshipRequestCreateView, FriendshipRequestAcceptView, FriendshipRequestRejectView,
     FriendshipRequestCancelView, FriendshipDeleteView, FriendsListView,
     FriendMentionListView,
     SocialFollowingListView, SocialFriendsListView,
     ReceivedFriendshipRequestsView, SentFriendshipRequestsView,
-    FeedFollowingView, DiscoverView, PublicCommentsFeedView, ProfileFeedActivityView, PostListCreateView, PostDetailView, PostRatingView,
+    FeedFollowingView, DiscoverView, PublicCommentsFeedView, ProfileFeedActivityView, UserProfileActivityView, PostListCreateView, PostDetailView, PostRatingView,
     UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, CommentReactionView, RegisterView,
     ReceivedDirectedCommentsView, SentDirectedCommentsView,
     MovieListView, MovieDetailView, MovieDirectedCommentsListView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
-    ProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
+    ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView,
 )
 
@@ -32,6 +32,9 @@ urlpatterns = [
     path("follow/<str:username>/", FollowToggleView.as_view(), name="follow-toggle"),
     path("users/<str:username>/followers/", UserFollowersListView.as_view(), name="user-followers"),
     path("users/<str:username>/following/", UserFollowingListView.as_view(), name="user-following"),
+    path("users/<str:username>/friends/", UserFriendsListView.as_view(), name="user-friends"),
+    path("users/<str:username>/favorites/", UserProfileFavoritesView.as_view(), name="user-favorites"),
+    path("users/<str:username>/activity/", UserProfileActivityView.as_view(), name="user-activity"),
     path("social/following/", SocialFollowingListView.as_view(), name="social-following-list"),
     path("friendships/", FriendsListView.as_view(), name="friendship-list"),
     path("friends/", FriendMentionListView.as_view(), name="friends-list"),
