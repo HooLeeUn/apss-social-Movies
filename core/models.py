@@ -682,6 +682,12 @@ class Friendship(models.Model):
 
 
 class Profile(models.Model):
+    class GenderIdentity(models.TextChoices):
+        MALE = "male", "Hombre"
+        FEMALE = "female", "Mujer"
+        NON_BINARY = "non_binary", "No binario"
+        PREFER_NOT_TO_SAY = "prefer_not_to_say", "Prefiero no decirlo"
+
     class Visibility(models.TextChoices):
         PUBLIC = "public", "Public"
         PRIVATE = "private", "Private"
@@ -693,6 +699,16 @@ class Profile(models.Model):
     )
     bio = models.TextField(blank=True)
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    birth_date = models.DateField(null=True, blank=True)
+    birth_date_locked = models.BooleanField(default=False)
+    gender_identity = models.CharField(
+        max_length=20,
+        choices=GenderIdentity.choices,
+        null=True,
+        blank=True,
+    )
+    birth_date_visible = models.BooleanField(default=True)
+    gender_identity_visible = models.BooleanField(default=True)
     is_public = models.BooleanField(default=True)
     visibility = models.CharField(
         max_length=10,

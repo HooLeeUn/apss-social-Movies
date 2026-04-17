@@ -3277,3 +3277,91 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertIn(f"rating:{self.visited_rating.id}", activity_ids)
         self.assertIn(f"public_comment:{self.visited_comment.id}", activity_ids)
         self.assertNotIn(f"rating:{self.other_rating.id}", activity_ids)
+
+
+class PersonalDataEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user_model = get_user_model()
+
+    def test_register_requires_and_persists_first_name_and_last_name(self):
+        url = reverse("register")
+        payload = {
+            "username": "newuser01",
+            "email": "newuser01@example.com",
+            "password": "strongpass123",
+            "password_confirmation": "strongpass123",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = self.user_model.objects.get(username="newuser01")
+        self.assertEqual(created.first_name, "Ada")
+        self.assertEqual(created.last_name, "Lovelace")
+        self.assertEqual(response.data["user"]["first_name"], "Ada")
+        self.assertEqual(response.data["user"]["last_name"], "Lovelace")
+        self.assertIn("token", response.data)
+
+    def test_personal_data_birth_date_initial_set_locks_field(self):
+        user = self.user_model.objects.create_user(
+            username="personaluser",
+            email="personaluser@example.com",
+            password="test1234",
+            first_name="Test",
+            last_name="User",
+        )
+        self.client.force_authenticate(user=user)
+        url = reverse("me-personal-data")
+
+        response = self.client.patch(url, {"birth_date": "1990-06-15"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertEqual(str(user.profile.birth_date), "1990-06-15")
+        self.assertTrue(user.profile.birth_date_locked)
+
+    def test_personal_data_birth_date_cannot_change_after_lock(self):
+        user = self.user_model.objects.create_user(
+            username="lockedbirth",
+            email="lockedbirth@example.com",
+            password="test1234",
+            first_name="Locked",
+            last_name="Birth",
+        )
+        user.profile.birth_date = datetime(1992, 3, 10).date()
+        user.profile.birth_date_locked = True
+        user.profile.save(update_fields=["birth_date", "birth_date_locked"])
+        self.client.force_authenticate(user=user)
+        url = reverse("me-personal-data")
+
+        response = self.client.patch(url, {"birth_date": "1994-04-10"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("birth_date", response.data)
+
+    def test_personal_data_age_is_computed_from_birth_date(self):
+        user = self.user_model.objects.create_user(
+            username="ageuser123",
+            email="ageuser@example.com",
+            password="test1234",
+            first_name="Age",
+            last_name="User",
+        )
+        birth_date = datetime(2000, 1, 2).date()
+        user.profile.birth_date = birth_date
+        user.profile.birth_date_locked = True
+        user.profile.save(update_fields=["birth_date", "birth_date_locked"])
+        self.client.force_authenticate(user=user)
+        url = reverse("me-personal-data")
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        now = timezone.now().date()
+        expected_age = now.year - birth_date.year - (
+            (now.month, now.day) < (birth_date.month, birth_date.day)
+        )
+        self.assertEqual(response.data["age"], expected_age)

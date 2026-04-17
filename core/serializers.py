@@ -1,4 +1,5 @@
 import socket
+from datetime import date
 
 from django.contrib.auth.models import User
 from django.contrib.auth.validators import UnicodeUsernameValidator
@@ -142,6 +143,92 @@ class MeSerializer(serializers.ModelSerializer):
         if "is_public" in profile_data:
             profile.is_public = profile_data["is_public"]
             profile.visibility = Profile.Visibility.PUBLIC if profile.is_public else Profile.Visibility.PRIVATE
+
+        profile.save()
+        return instance
+
+
+class PersonalDataSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=False)
+    first_name = serializers.CharField(required=False, allow_blank=False)
+    last_name = serializers.CharField(required=False, allow_blank=False)
+    birth_date = serializers.DateField(source="profile.birth_date", required=False, allow_null=True)
+    birth_date_locked = serializers.BooleanField(source="profile.birth_date_locked", read_only=True)
+    birth_date_visible = serializers.BooleanField(source="profile.birth_date_visible", required=False)
+    gender_identity = serializers.ChoiceField(
+        source="profile.gender_identity",
+        choices=Profile.GenderIdentity.choices,
+        required=False,
+        allow_null=True,
+    )
+    gender_identity_visible = serializers.BooleanField(source="profile.gender_identity_visible", required=False)
+    avatar = serializers.ImageField(source="profile.avatar", required=False, allow_null=True)
+    age = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "first_name",
+            "last_name",
+            "email",
+            "birth_date",
+            "age",
+            "birth_date_locked",
+            "birth_date_visible",
+            "gender_identity",
+            "gender_identity_visible",
+            "avatar",
+        ]
+
+    def validate_birth_date(self, value):
+        if value and value > date.today():
+            raise serializers.ValidationError("Birth date cannot be in the future.")
+        return value
+
+    def validate(self, attrs):
+        profile_data = attrs.get("profile", {})
+        birth_date = profile_data.get("birth_date")
+        profile = getattr(self.instance, "profile", None) if self.instance else None
+
+        if birth_date is not None and profile and profile.birth_date_locked:
+            if profile.birth_date != birth_date:
+                raise serializers.ValidationError(
+                    {"birth_date": "Birth date is locked and cannot be modified."}
+                )
+        return attrs
+
+    def get_age(self, obj):
+        profile = getattr(obj, "profile", None)
+        birth_date = getattr(profile, "birth_date", None)
+        if not birth_date:
+            return None
+
+        today = date.today()
+        years = today.year - birth_date.year
+        if (today.month, today.day) < (birth_date.month, birth_date.day):
+            years -= 1
+        return years
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop("profile", {})
+        profile, _ = Profile.objects.get_or_create(user=instance)
+
+        user_fields_to_update = []
+        for field in ["first_name", "last_name", "email"]:
+            if field in validated_data:
+                setattr(instance, field, validated_data[field])
+                user_fields_to_update.append(field)
+        if user_fields_to_update:
+            instance.save(update_fields=user_fields_to_update)
+
+        if "birth_date" in profile_data and not profile.birth_date_locked:
+            profile.birth_date = profile_data["birth_date"]
+            if profile.birth_date is not None:
+                profile.birth_date_locked = True
+
+        for field in ["birth_date_visible", "gender_identity", "gender_identity_visible", "avatar"]:
+            if field in profile_data:
+                setattr(profile, field, profile_data[field])
 
         profile.save()
         return instance
@@ -410,10 +497,20 @@ class RegisterSerializer(serializers.ModelSerializer):
     )
     password = serializers.CharField(write_only=True, min_length=6)
     password_confirmation = serializers.CharField(write_only=True, min_length=6)
+    first_name = serializers.CharField(required=True, allow_blank=False)
+    last_name = serializers.CharField(required=True, allow_blank=False)
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "password", "password_confirmation"]
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "password",
+            "password_confirmation",
+        ]
         read_only_fields = ["id"]
 
     def validate_email(self, value):
