@@ -3309,6 +3309,25 @@ class PersonalDataEndpointTests(TestCase):
         self.assertEqual(response.data["user"]["last_name"], "Lovelace")
         self.assertIn("token", response.data)
 
+    def test_register_accepts_syntactically_valid_nonstandard_domain(self):
+        url = reverse("register")
+        adult_birth_date = (timezone.now().date() - timedelta(days=365 * 20)).isoformat()
+        payload = {
+            "username": "localdom1",
+            "email": "usuario@dominio.local",
+            "password": "strongpass123",
+            "password_confirmation": "strongpass123",
+            "first_name": "Local",
+            "last_name": "Domain",
+            "birth_date": adult_birth_date,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = self.user_model.objects.get(username="localdom1")
+        self.assertEqual(created.email, "usuario@dominio.local")
+
     def test_register_rejects_underage_birth_date(self):
         url = reverse("register")
         underage_birth_date = (timezone.now().date() - timedelta(days=365 * 12)).isoformat()
