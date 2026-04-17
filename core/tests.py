@@ -3187,3 +3187,93 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
         self.assertIn("search", [item["username"] for item in search_response.data])
         self.assertEqual(profile_response.data["username"], "search")
+
+
+class VisitedProfileDataEndpointsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.viewer = get_user_model().objects.create_user(
+            username="viewer_user",
+            email="viewer@example.com",
+            password="test1234",
+        )
+        self.visited = get_user_model().objects.create_user(
+            username="dennisse",
+            email="dennisse@example.com",
+            password="test1234",
+        )
+        self.friend_one = get_user_model().objects.create_user(
+            username="JulianHernandez",
+            email="julianh@example.com",
+            password="test1234",
+        )
+        self.friend_two = get_user_model().objects.create_user(
+            username="Julian",
+            email="julian@example.com",
+            password="test1234",
+        )
+        self.other_actor = get_user_model().objects.create_user(
+            username="other_actor",
+            email="other-actor@example.com",
+            password="test1234",
+        )
+        self.author = get_user_model().objects.create_user(
+            username="catalog_owner",
+            email="catalog@example.com",
+            password="test1234",
+        )
+        self.movie_1 = Movie.objects.create(author=self.author, title_english="Movie A", type=Movie.MOVIE, release_year=2020)
+        self.movie_2 = Movie.objects.create(author=self.author, title_english="Movie B", type=Movie.MOVIE, release_year=2021)
+        self.movie_3 = Movie.objects.create(author=self.author, title_english="Movie C", type=Movie.SERIES, release_year=2022)
+
+        Friendship.objects.create(
+            requester=self.visited,
+            user1=min(self.visited, self.friend_one, key=lambda u: u.id),
+            user2=max(self.visited, self.friend_one, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        Friendship.objects.create(
+            requester=self.friend_two,
+            user1=min(self.visited, self.friend_two, key=lambda u: u.id),
+            user2=max(self.visited, self.friend_two, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        ProfileFavoriteMovie.objects.create(user=self.visited, slot=1, movie=self.movie_1)
+        ProfileFavoriteMovie.objects.create(user=self.visited, slot=2, movie=self.movie_2)
+        ProfileFavoriteMovie.objects.create(user=self.visited, slot=3, movie=self.movie_3)
+
+        self.visited_rating = MovieRating.objects.create(user=self.visited, movie=self.movie_1, score=9)
+        self.visited_comment = Comment.objects.create(
+            author=self.visited,
+            movie=self.movie_2,
+            body="Comentario público de Dennisse",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        self.other_rating = MovieRating.objects.create(user=self.other_actor, movie=self.movie_3, score=6)
+
+        self.client.force_authenticate(self.viewer)
+
+    def test_user_friends_returns_accepted_friendships_for_visited_user(self):
+        response = self.client.get(reverse("user-friends", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        usernames = {item["username"] for item in response.data["results"]}
+        self.assertEqual(usernames, {"JulianHernandez", "Julian"})
+
+    def test_user_favorites_returns_visited_user_favorite_slots(self):
+        response = self.client.get(reverse("user-favorites", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["slot"] for item in response.data], [1, 2, 3])
+        self.assertEqual(response.data[0]["movie"]["id"], self.movie_1.id)
+        self.assertEqual(response.data[1]["movie"]["id"], self.movie_2.id)
+        self.assertEqual(response.data[2]["movie"]["id"], self.movie_3.id)
+
+    def test_user_activity_returns_only_visited_user_public_activity(self):
+        response = self.client.get(reverse("user-activity", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        activity_ids = {item["id"] for item in response.data["results"]}
+        self.assertIn(f"rating:{self.visited_rating.id}", activity_ids)
+        self.assertIn(f"public_comment:{self.visited_comment.id}", activity_ids)
+        self.assertNotIn(f"rating:{self.other_rating.id}", activity_ids)

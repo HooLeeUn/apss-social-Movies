@@ -78,6 +78,28 @@ class SocialActivityFeedService:
         return activities
 
     @classmethod
+    def build_feed_for_actor(cls, *, viewer, actor) -> list[dict]:
+        if actor is None:
+            return []
+
+        actor_ids = [actor.id]
+        activities = [
+            *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=viewer),
+            *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=viewer),
+            *cls._serialize_public_comment_like_activities(actor_ids=actor_ids, viewer=viewer),
+            *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids, viewer=viewer),
+        ]
+        activities.sort(
+            key=lambda item: (
+                item["created_at"],
+                item["_sort_entity_id"],
+                item["_sort_activity_priority"],
+            ),
+            reverse=True,
+        )
+        return activities
+
+    @classmethod
     def _get_actor_ids_for_scope(cls, *, user, scope: SocialFeedScope) -> list[int]:
         if scope == cls.SCOPE_ME:
             return [user.id]
