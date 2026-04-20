@@ -2295,6 +2295,46 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertEqual(tie_item["top_user"]["id"], expected_lowest_id)
 
     @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_avatar_uses_media_url_prefix(self, mock_window):
+        movie = self._create_movie("Top User Avatar", genre="Drama", external_rating=7.4)
+        top_user = self.user_model.objects.create_user(
+            username="avatar_top_user", email="avatar_top_user@example.com", password="test1234"
+        )
+        top_user.profile.avatar = SimpleUploadedFile(
+            "weekly-avatar.jpg",
+            b"weekly-avatar-content",
+            content_type="image/jpeg",
+        )
+        top_user.profile.save(update_fields=["avatar"])
+        self._create_rating(
+            movie=movie, user=top_user, score=8, rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0))
+        )
+        self._refresh_snapshot()
+        mock_window.return_value = self.previous_week_window
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data[0]["top_user"]["avatar"].startswith("/media/avatars/"))
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_avatar_is_null_without_image(self, mock_window):
+        movie = self._create_movie("Top User No Avatar", genre="Drama", external_rating=7.3)
+        top_user = self.user_model.objects.create_user(
+            username="no_avatar_top_user", email="no_avatar_top_user@example.com", password="test1234"
+        )
+        self._create_rating(
+            movie=movie, user=top_user, score=8, rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0))
+        )
+        self._refresh_snapshot()
+        mock_window.return_value = self.previous_week_window
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data[0]["top_user"]["avatar"])
+
+    @patch("core.views.get_previous_closed_week_window")
     def test_weekly_endpoint_top_user_is_null_when_movie_has_no_weekly_ratings(self, mock_window):
         snapshot = WeeklyRecommendationSnapshot.objects.create(
             week_start=self.previous_week_window.start_date,

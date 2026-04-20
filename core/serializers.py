@@ -1,5 +1,6 @@
 from datetime import date
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
@@ -720,13 +721,31 @@ class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
     following_ratings_count = serializers.IntegerField(read_only=True)
     top_user = serializers.SerializerMethodField()
 
+    def _serialize_top_user_avatar(self, avatar_value):
+        if not avatar_value:
+            return None
+
+        if hasattr(avatar_value, "url"):
+            return avatar_value.url
+
+        avatar_path = str(avatar_value).strip()
+        if not avatar_path:
+            return None
+        if avatar_path.startswith(("http://", "https://", "/")):
+            return avatar_path
+
+        media_url = settings.MEDIA_URL or "/media/"
+        if not media_url.endswith("/"):
+            media_url = f"{media_url}/"
+        return f"{media_url}{avatar_path.lstrip('/')}"
+
     def get_top_user(self, obj):
         if getattr(obj, "top_user_id", None) is None:
             return None
         return {
             "id": obj.top_user_id,
             "username": obj.top_user_username,
-            "avatar": obj.top_user_avatar,
+            "avatar": self._serialize_top_user_avatar(getattr(obj, "top_user_avatar", None)),
             "followers_count": obj.top_user_followers_count or 0,
         }
 
