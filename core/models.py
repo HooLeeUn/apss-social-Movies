@@ -1,3 +1,5 @@
+import re
+
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
@@ -805,6 +807,7 @@ class Comment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = CommentQuerySet.as_manager()
+    mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
 
     class Meta:
         ordering = ["-created_at"]
@@ -821,6 +824,24 @@ class Comment(models.Model):
 
     def __str__(self):
         return f"Comment({self.author_id} -> {self.movie_id})"
+
+    def has_valid_target_mention(self):
+        """
+        Valida que el texto incluya una mención explícita al username del target_user.
+        Se usa para filtrar registros legacy inconsistentes.
+        """
+        if self.visibility != self.VISIBILITY_MENTIONED:
+            return False
+        if not self.target_user_id or not getattr(self, "target_user", None):
+            return False
+        if not self.body:
+            return False
+
+        target_username = self.target_user.username.lower()
+        for match in self.mention_pattern.finditer(self.body):
+            if match.group("username").lower() == target_username:
+                return True
+        return False
 
 class CommentReaction(models.Model):
     REACT_LIKE = "like"

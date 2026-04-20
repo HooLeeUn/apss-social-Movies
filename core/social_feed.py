@@ -14,6 +14,7 @@ SocialFeedScope = Literal["following", "friends", "me"]
 class SocialActivityFeedService:
     ACTIVITY_RATING = "rating"
     ACTIVITY_PUBLIC_COMMENT = "public_comment"
+    ACTIVITY_DIRECTED_COMMENT = "directed_comment"
     ACTIVITY_PUBLIC_COMMENT_LIKE = "public_comment_like"
     ACTIVITY_PUBLIC_COMMENT_DISLIKE = "public_comment_dislike"
 
@@ -26,6 +27,7 @@ class SocialActivityFeedService:
     VALID_SCOPES = frozenset({SCOPE_ME, SCOPE_FOLLOWING, SCOPE_FRIENDS})
     _ACTIVITY_SORT_PRIORITY = {
         ACTIVITY_RATING: 3,
+        ACTIVITY_DIRECTED_COMMENT: 2,
         ACTIVITY_PUBLIC_COMMENT: 2,
         ACTIVITY_PUBLIC_COMMENT_LIKE: 1,
         ACTIVITY_PUBLIC_COMMENT_DISLIKE: 0,
@@ -64,6 +66,10 @@ class SocialActivityFeedService:
             *cls._serialize_public_comment_like_activities(actor_ids=actor_ids, viewer=user),
             *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids, viewer=user),
         ]
+        if scope == cls.SCOPE_ME:
+            activities.extend(
+                cls._serialize_directed_comment_activities(actor_ids=actor_ids, viewer=user)
+            )
 
         # Orden global unificado entre modelos distintos con desempate estable
         # por `id` para paginación por páginas (infinite scroll).
@@ -89,6 +95,10 @@ class SocialActivityFeedService:
             *cls._serialize_public_comment_like_activities(actor_ids=actor_ids, viewer=viewer),
             *cls._serialize_public_comment_dislike_activities(actor_ids=actor_ids, viewer=viewer),
         ]
+        if viewer and actor and viewer.id == actor.id:
+            activities.extend(
+                cls._serialize_directed_comment_activities(actor_ids=actor_ids, viewer=viewer)
+            )
         activities.sort(
             key=lambda item: (
                 item["created_at"],
@@ -246,6 +256,64 @@ class SocialActivityFeedService:
                 },
             }
             for comment in queryset
+        ]
+
+    @classmethod
+    def _serialize_directed_comment_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
+        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
+        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+            viewer=viewer,
+            movie_id_ref="movie_id",
+        )
+        queryset = (
+            Comment.objects.filter(
+                author_id__in=actor_ids,
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user__isnull=False,
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .annotate(
+                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
+                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
+                movie_following_avg_rating=Subquery(
+                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                    output_field=FloatField(),
+                ),
+                movie_following_ratings_count=Coalesce(
+                    Subquery(
+                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="movie_id"),
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
+            )
+            .order_by("-created_at", "-id")
+        )
+
+        valid_comments = [comment for comment in queryset if comment.has_valid_target_mention()]
+
+        return [
+            {
+                "id": f"directed_comment:{comment.id}",
+                "activity_type": cls.ACTIVITY_DIRECTED_COMMENT,
+                "created_at": comment.created_at,
+                "_sort_entity_id": comment.id,
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_DIRECTED_COMMENT],
+                "actor": cls._serialize_actor(comment.author),
+                "movie": cls._serialize_movie(
+                    comment.movie,
+                    display_rating=comment.movie_display_rating,
+                    my_rating=comment.viewer_movie_rating,
+                    following_avg_rating=comment.movie_following_avg_rating,
+                    following_ratings_count=comment.movie_following_ratings_count,
+                ),
+                "payload": {
+                    "comment_id": comment.id,
+                    "content": comment.body,
+                    "target_user": cls._serialize_compact_user(comment.target_user),
+                },
+            }
+            for comment in valid_comments
         ]
 
     @classmethod
