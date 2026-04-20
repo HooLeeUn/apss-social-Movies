@@ -180,6 +180,21 @@ def can_access_directed_comment_reactions(user, comment):
     return user.id in {comment.author_id, comment.target_user_id}
 
 
+def is_valid_directed_comment(comment):
+    if comment.visibility != Comment.VISIBILITY_MENTIONED:
+        return False
+    if not comment.target_user_id:
+        return False
+    return comment.has_valid_target_mention()
+
+
+def filter_valid_directed_comments(queryset):
+    valid_ids = [comment.id for comment in queryset if is_valid_directed_comment(comment)]
+    if not valid_ids:
+        return queryset.none()
+    return queryset.filter(id__in=valid_ids).order_by("-created_at", "-id")
+
+
 def filter_comments_visible_to_user(queryset, user):
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
@@ -1012,13 +1027,16 @@ class ReceivedDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
-        return annotate_comments_for_user(
+        queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
                 target_user=self.request.user,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at"),
+            .order_by("-created_at", "-id")
+        )
+        return annotate_comments_for_user(
+            filter_valid_directed_comments(queryset),
             self.request.user,
         )
 
@@ -1028,15 +1046,55 @@ class SentDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
-        return annotate_comments_for_user(
+        queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
                 author=self.request.user,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at"),
+            .order_by("-created_at", "-id")
+        )
+        return annotate_comments_for_user(
+            filter_valid_directed_comments(queryset),
             self.request.user,
         )
+
+
+class MeMessagesView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=self.request.user,
+            )
+            .exclude(author=self.request.user)
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at", "-id")
+        )
+        return annotate_comments_for_user(
+            filter_valid_directed_comments(queryset),
+            self.request.user,
+        )
+
+
+class MeMessagesSummaryView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=request.user,
+            )
+            .exclude(author=request.user)
+            .select_related("target_user")
+            .order_by("-created_at", "-id")
+        )
+        total = len(filter_valid_directed_comments(queryset))
+        return Response({"total": total})
 
 
 class MovieDirectedCommentsListView(MovieCommentsListCreateView):

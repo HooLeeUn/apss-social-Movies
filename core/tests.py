@@ -1100,6 +1100,8 @@ class MovieCommentEndpointTests(TestCase):
         self.movie_directed_url = reverse("movie-directed-comments", kwargs={"pk": self.movie.pk})
         self.received_url = reverse("directed-comments-received")
         self.sent_url = reverse("directed-comments-sent")
+        self.me_messages_url = reverse("me-messages")
+        self.me_messages_summary_url = reverse("me-messages-summary")
 
     def test_get_movie_detail_returns_requested_movie(self):
         response = self.client.get(self.movie_detail_url)
@@ -1297,6 +1299,69 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(other_sent_response.status_code, status.HTTP_200_OK)
         self.assertEqual(other_received_response.data, [])
         self.assertEqual(other_sent_response.data, [])
+
+    def test_me_messages_lists_only_valid_received_directed_comments(self):
+        valid_directed = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Te la recomiendo @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body="Sin mención válida",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Para @{self.other_user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.other_user,
+        )
+        Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"Auto mensaje @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Comentario público @{self.user.username}",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.me_messages_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["results"] if isinstance(response.data, dict) else response.data
+        self.assertEqual([item["id"] for item in payload], [valid_directed.id])
+
+    def test_me_messages_summary_counts_only_valid_received_directed_comments(self):
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Valido @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body="Inconsistente",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.me_messages_summary_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total"], 1)
 
     def test_directed_comments_by_movie_requires_auth_and_filters_to_participant(self):
         other_movie = Movie.objects.create(
@@ -2883,6 +2948,28 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertIn(f"public_comment_dislike:{own_dislike.id}", ids)
         returned_types = {item["activity_type"] for item in response.data["results"]}
         self.assertTrue({"rating", "public_comment", "public_comment_like", "public_comment_dislike"}.issubset(returned_types))
+
+    def test_scope_me_includes_valid_directed_comments_and_excludes_inconsistent_ones(self):
+        valid_directed = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body=f"Privado para @{self.actor.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.actor,
+        )
+        inconsistent_directed = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body="Sin mención al target",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.actor,
+        )
+
+        ids, response = self._fetch_ids(scope="me")
+        self.assertIn(f"directed_comment:{valid_directed.id}", ids)
+        self.assertNotIn(f"directed_comment:{inconsistent_directed.id}", ids)
+        directed_item = next(item for item in response.data["results"] if item["id"] == f"directed_comment:{valid_directed.id}")
+        self.assertEqual(directed_item["target_user"]["id"], self.actor.id)
 
     def test_excludes_private_direct_comments(self):
         self._add_follow(self.actor)

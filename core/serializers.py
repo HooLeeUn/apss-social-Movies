@@ -364,6 +364,7 @@ class SocialActivitySerializer(serializers.Serializer):
     activity_type = serializers.ChoiceField(choices=[
         "rating",
         "public_comment",
+        "directed_comment",
         "public_comment_like",
         "public_comment_dislike",
     ])
@@ -381,6 +382,7 @@ class SocialActivitySerializer(serializers.Serializer):
         mapping = {
             "rating": "rating",
             "public_comment": "comment",
+            "directed_comment": "comment",
             "public_comment_like": "like",
             "public_comment_dislike": "dislike",
         }
@@ -390,7 +392,8 @@ class SocialActivitySerializer(serializers.Serializer):
         return (obj.get("payload") or {}).get("score")
 
     def get_target_user(self, obj):
-        return (obj.get("payload") or {}).get("comment_author")
+        payload = obj.get("payload") or {}
+        return payload.get("target_user") or payload.get("comment_author")
 
     def get_comment_text(self, obj):
         payload = obj.get("payload") or {}
