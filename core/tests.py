@@ -3161,6 +3161,36 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertLess(tenth_idx, second_idx)
         self.assertLess(second_idx, first_idx)
 
+    def test_scope_me_prioritizes_directed_comment_over_like_when_created_at_ties(self):
+        baseline = timezone.now()
+        directed = Comment.objects.create(
+            author=self.viewer,
+            movie=self.movie,
+            body=f"@{self.actor.username} mensaje privado",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.actor,
+        )
+        public_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Public comment to react",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        like = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=public_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        self._set_created_at(Comment, directed.id, baseline)
+        self._set_created_at(CommentReaction, like.id, baseline)
+
+        response = self.client.get(self.url, {"scope": "me", "page_size": 1})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        first_item = response.data["results"][0]
+        self.assertEqual(first_item["id"], f"directed_comment:{directed.id}")
+        self.assertEqual(first_item["activity_type"], "directed_comment")
+
     def test_returns_standard_paginated_format(self):
         self._add_follow(self.actor)
         MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
