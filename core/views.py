@@ -24,7 +24,7 @@ from .serializers import (
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
-    SocialListUserSerializer, PersonalDataSerializer,
+    SocialListUserSerializer, PersonalDataSerializer, PrivateMessageSerializer,
 )
 from .models import (
     Comment,
@@ -1036,6 +1036,38 @@ class SentDirectedCommentsView(generics.ListAPIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at"),
             self.request.user,
+        )
+
+
+class MePrivateMessagesView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = PrivateMessageSerializer
+
+    def get_queryset(self):
+        return (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=self.request.user,
+            )
+            .exclude(author=self.request.user)
+            .select_related("author", "author__profile", "movie")
+            .order_by("-created_at")
+        )
+
+
+class MePrivateMessagesSummaryView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        total_messages = Comment.objects.filter(
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=request.user,
+        ).exclude(author=request.user).count()
+        return Response(
+            {
+                "has_unread_messages": total_messages > 0,
+                "total_messages": total_messages,
+            }
         )
 
 

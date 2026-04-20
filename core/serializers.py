@@ -599,6 +599,37 @@ class CommentSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class PrivateMessageSenderSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "avatar"]
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class PrivateMessageMovieSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = ["id", "title_english", "title_spanish", "type", "genre"]
+
+
+class PrivateMessageSerializer(serializers.ModelSerializer):
+    content = serializers.CharField(source="body", read_only=True)
+    sender = PrivateMessageSenderSerializer(source="author", read_only=True)
+    movie = PrivateMessageMovieSerializer(read_only=True)
+
+    class Meta:
+        model = Comment
+        fields = ["id", "content", "sender", "movie", "created_at"]
+
+
 class PublicCommentFeedSerializer(CommentSerializer):
     author_followers_count = serializers.IntegerField(read_only=True)
     is_following_author = serializers.BooleanField(read_only=True)
