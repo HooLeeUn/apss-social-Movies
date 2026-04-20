@@ -718,6 +718,17 @@ class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
     my_rating = serializers.IntegerField(read_only=True, allow_null=True)
     following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
     following_ratings_count = serializers.IntegerField(read_only=True)
+    top_user = serializers.SerializerMethodField()
+
+    def get_top_user(self, obj):
+        if getattr(obj, "top_user_id", None) is None:
+            return None
+        return {
+            "id": obj.top_user_id,
+            "username": obj.top_user_username,
+            "avatar": obj.top_user_avatar,
+            "followers_count": obj.top_user_followers_count or 0,
+        }
 
     class Meta:
         model = WeeklyRecommendationItem
@@ -730,6 +741,7 @@ class WeeklyRecommendationItemSerializer(serializers.ModelSerializer):
             "my_rating",
             "following_avg_rating",
             "following_ratings_count",
+            "top_user",
         ]
 
 
