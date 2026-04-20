@@ -94,12 +94,16 @@ class MovieRatingAdminForm(forms.ModelForm):
 @admin.register(MovieRating)
 class MovieRatingAdmin(admin.ModelAdmin):
     form = MovieRatingAdminForm
-    list_display = ("id", "user", "movie", "score", "created_at", "updated_at")
+    list_display = ("id", "user", "movie", "movie_genre", "score", "created_at", "updated_at")
     list_filter = ("score", "created_at", "updated_at")
     search_fields = ("user__username", "movie__title_english", "movie__title_spanish")
     autocomplete_fields = ("user", "movie")
-    list_select_related = ("user", "movie")
+    list_select_related = ("movie", "user")
     ordering = ("-created_at",)
+
+    @admin.display(description="Género")
+    def movie_genre(self, obj):
+        return obj.movie.genre or "—"
 
 
 @admin.register(UserTasteProfile)
