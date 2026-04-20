@@ -26,6 +26,7 @@ from core.models import (
     ProfileFavoriteMovie,
     MovieRating,
     UserVisibilityBlock,
+    WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
     build_genre_key,
     UserDirectorPreference,
@@ -2174,6 +2175,148 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertEqual(item["my_rating"], 7)
         self.assertAlmostEqual(item["following_avg_rating"], 6.0)
         self.assertEqual(item["following_ratings_count"], 1)
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_selects_user_with_most_followers(self, mock_window):
+        movie = self._create_movie("Top User Followers", genre="Drama", external_rating=7.5)
+        top_user = self.user_model.objects.create_user(
+            username="top_followed", email="top_followed@example.com", password="test1234"
+        )
+        less_followed = self.user_model.objects.create_user(
+            username="less_followed", email="less_followed@example.com", password="test1234"
+        )
+        follower_1 = self.user_model.objects.create_user(
+            username="follower_1", email="follower_1@example.com", password="test1234"
+        )
+        follower_2 = self.user_model.objects.create_user(
+            username="follower_2", email="follower_2@example.com", password="test1234"
+        )
+        Follow.objects.create(follower=follower_1, following=top_user)
+        Follow.objects.create(follower=follower_2, following=top_user)
+        Follow.objects.create(follower=follower_1, following=less_followed)
+        self._create_rating(
+            movie=movie, user=top_user, score=4, rated_at=timezone.make_aware(datetime(2026, 3, 10, 10, 0, 0))
+        )
+        self._create_rating(
+            movie=movie, user=less_followed, score=10, rated_at=timezone.make_aware(datetime(2026, 3, 10, 11, 0, 0))
+        )
+        self._refresh_snapshot()
+        mock_window.return_value = self.previous_week_window
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["top_user"]["id"], top_user.id)
+        self.assertEqual(response.data[0]["top_user"]["followers_count"], 2)
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_ignores_ratings_outside_week(self, mock_window):
+        movie = self._create_movie("Top User Week Filter", genre="Action", external_rating=7.1)
+        inside_user = self.user_model.objects.create_user(
+            username="inside_week_user", email="inside_week_user@example.com", password="test1234"
+        )
+        outside_user = self.user_model.objects.create_user(
+            username="outside_week_user", email="outside_week_user@example.com", password="test1234"
+        )
+        follower_1 = self.user_model.objects.create_user(
+            username="outside_follower_1", email="outside_follower_1@example.com", password="test1234"
+        )
+        follower_2 = self.user_model.objects.create_user(
+            username="outside_follower_2", email="outside_follower_2@example.com", password="test1234"
+        )
+        follower_3 = self.user_model.objects.create_user(
+            username="outside_follower_3", email="outside_follower_3@example.com", password="test1234"
+        )
+        Follow.objects.create(follower=follower_1, following=outside_user)
+        Follow.objects.create(follower=follower_2, following=outside_user)
+        Follow.objects.create(follower=follower_3, following=outside_user)
+        self._create_rating(
+            movie=movie, user=inside_user, score=8, rated_at=timezone.make_aware(datetime(2026, 3, 12, 10, 0, 0))
+        )
+        self._create_rating(
+            movie=movie, user=outside_user, score=9, rated_at=timezone.make_aware(datetime(2026, 3, 17, 10, 0, 0))
+        )
+        self._refresh_snapshot()
+        mock_window.return_value = self.previous_week_window
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["top_user"]["id"], inside_user.id)
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_tie_breaks_by_recent_rating_then_lower_user_id(self, mock_window):
+        movie = self._create_movie("Top User Tie Break", genre="Comedy", external_rating=6.8)
+        user_a = self.user_model.objects.create_user(
+            username="tie_user_a", email="tie_user_a@example.com", password="test1234"
+        )
+        user_b = self.user_model.objects.create_user(
+            username="tie_user_b", email="tie_user_b@example.com", password="test1234"
+        )
+        same_time_1 = self.user_model.objects.create_user(
+            username="same_time_1", email="same_time_1@example.com", password="test1234"
+        )
+        same_time_2 = self.user_model.objects.create_user(
+            username="same_time_2", email="same_time_2@example.com", password="test1234"
+        )
+        for follower_index in range(2):
+            follower = self.user_model.objects.create_user(
+                username=f"tie_follower_{follower_index}",
+                email=f"tie_follower_{follower_index}@example.com",
+                password="test1234",
+            )
+            Follow.objects.create(follower=follower, following=user_a)
+            Follow.objects.create(follower=follower, following=user_b)
+            Follow.objects.create(follower=follower, following=same_time_1)
+            Follow.objects.create(follower=follower, following=same_time_2)
+        self._create_rating(
+            movie=movie, user=user_a, score=5, rated_at=timezone.make_aware(datetime(2026, 3, 10, 9, 0, 0))
+        )
+        self._create_rating(
+            movie=movie, user=user_b, score=5, rated_at=timezone.make_aware(datetime(2026, 3, 10, 11, 0, 0))
+        )
+        self._refresh_snapshot()
+        mock_window.return_value = self.previous_week_window
+
+        first_response = self.client.get(self.url)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data[0]["top_user"]["id"], user_b.id)
+
+        tie_time_movie = self._create_movie("Top User Tie Time", genre="Mystery", external_rating=6.6)
+        rated_at = timezone.make_aware(datetime(2026, 3, 11, 10, 0, 0))
+        self._create_rating(movie=tie_time_movie, user=same_time_1, score=6, rated_at=rated_at)
+        self._create_rating(movie=tie_time_movie, user=same_time_2, score=6, rated_at=rated_at)
+        self._refresh_snapshot()
+
+        second_response = self.client.get(self.url)
+        tie_item = next(item for item in second_response.data if item["movie"]["title_english"] == "Top User Tie Time")
+        expected_lowest_id = min(same_time_1.id, same_time_2.id)
+        self.assertEqual(tie_item["top_user"]["id"], expected_lowest_id)
+
+    @patch("core.views.get_previous_closed_week_window")
+    def test_weekly_endpoint_top_user_is_null_when_movie_has_no_weekly_ratings(self, mock_window):
+        snapshot = WeeklyRecommendationSnapshot.objects.create(
+            week_start=self.previous_week_window.start_date,
+            week_end=self.previous_week_window.end_date,
+            items_count=1,
+        )
+        movie = self._create_movie("No Weekly Ratings Item", genre="Drama", external_rating=7.0)
+        WeeklyRecommendationItem.objects.create(
+            snapshot=snapshot,
+            movie=movie,
+            position=1,
+            genre=movie.genre,
+            weekly_score=7.000,
+            week_ratings_count=0,
+            week_ratings_sum=0,
+        )
+        mock_window.return_value = self.previous_week_window
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data[0]["top_user"])
 
 
 class MovieListViewSearchAndFiltersTests(TestCase):

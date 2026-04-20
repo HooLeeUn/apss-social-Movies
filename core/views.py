@@ -1,6 +1,7 @@
 import re
 import logging
 import random
+from datetime import datetime, time
 from time import perf_counter
 from django.contrib.auth import get_user_model
 from django.conf import settings
@@ -1714,13 +1715,39 @@ class WeeklyRecommendationsView(generics.ListAPIView):
                 return WeeklyRecommendationItem.objects.none()
 
         items = snapshot.items.select_related("movie").order_by("position")
+        week_start_at = timezone.make_aware(
+            datetime.combine(snapshot.week_start, time.min),
+            timezone.get_current_timezone(),
+        )
+        week_end_at = timezone.make_aware(
+            datetime.combine(snapshot.week_end, time.min),
+            timezone.get_current_timezone(),
+        )
         display_rating_subquery = Movie.objects.with_display_rating().filter(
             pk=OuterRef("movie_id")
         ).values("display_rating")[:1]
+        top_user_ratings = MovieRating.objects.filter(
+            movie_id=OuterRef("movie_id"),
+            created_at__gte=week_start_at,
+            created_at__lt=week_end_at,
+        ).annotate(
+            followers_count=Count("user__followers", distinct=True),
+        ).order_by(
+            "-followers_count",
+            "-created_at",
+            "user_id",
+        )
 
         queryset = items.annotate(
             general_rating=Subquery(display_rating_subquery, output_field=FloatField()),
             display_rating=Subquery(display_rating_subquery, output_field=FloatField()),
+            top_user_id=Subquery(top_user_ratings.values("user_id")[:1]),
+            top_user_username=Subquery(top_user_ratings.values("user__username")[:1]),
+            top_user_avatar=Subquery(top_user_ratings.values("user__profile__avatar")[:1]),
+            top_user_followers_count=Coalesce(
+                Subquery(top_user_ratings.values("followers_count")[:1], output_field=IntegerField()),
+                Value(0),
+            ),
         )
 
         user = self.request.user
