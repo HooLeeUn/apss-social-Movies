@@ -76,8 +76,8 @@ class SocialActivityFeedService:
         activities.sort(
             key=lambda item: (
                 item["created_at"],
-                item["_sort_entity_id"],
                 item["_sort_activity_priority"],
+                item["_sort_entity_id"],
             ),
             reverse=True,
         )
@@ -102,8 +102,8 @@ class SocialActivityFeedService:
         activities.sort(
             key=lambda item: (
                 item["created_at"],
-                item["_sort_entity_id"],
                 item["_sort_activity_priority"],
+                item["_sort_entity_id"],
             ),
             reverse=True,
         )
