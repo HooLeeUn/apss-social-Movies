@@ -358,6 +358,36 @@ class FeedMoviesEndpointTests(TestCase):
         titles = [item["title_english"] for item in response.data["results"]]
         self.assertEqual(titles, [fresh_movie.title_english])
 
+    def test_feed_search_is_accent_insensitive(self):
+        matched = self._create_movie(
+            title_english="Escape Dream",
+            title_spanish="Sueño de fuga",
+            genre="Acción, Drama",
+            synopsis="Una historia de acción intensa.",
+        )
+        self._create_movie(
+            title_english="Different Movie",
+            title_spanish="Comedia ligera",
+            genre="Comedy",
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response_without_tilde = self.client.get(
+            self.url,
+            {"exclude_rated": "false", "search": "sueno accion"},
+        )
+        response_with_tilde = self.client.get(
+            self.url,
+            {"exclude_rated": "false", "search": "sueño acción"},
+        )
+
+        self.assertEqual(response_without_tilde.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_with_tilde.status_code, status.HTTP_200_OK)
+        ids_without_tilde = [item["id"] for item in response_without_tilde.data["results"]]
+        ids_with_tilde = [item["id"] for item in response_with_tilde.data["results"]]
+        self.assertIn(matched.id, ids_without_tilde)
+        self.assertIn(matched.id, ids_with_tilde)
+
     def test_feed_orders_by_recommendation_score(self):
         UserTasteProfile.objects.create(user=self.user, ratings_count=3)
 
@@ -2411,6 +2441,29 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids, [matched.id])
+
+    def test_search_is_accent_insensitive(self):
+        matched = self._create_movie(
+            "Action Dream",
+            title_spanish="Sueño de fuga",
+            genre="Acción, Drama",
+            synopsis="Una fuga de prisión con mucha acción.",
+        )
+        self._create_movie(
+            "Another Movie",
+            title_spanish="Película sin relación",
+            genre="Drama",
+        )
+
+        response_without_tilde = self.client.get(self.url, {"search": "sueno accion"})
+        response_with_tilde = self.client.get(self.url, {"search": "sueño acción"})
+
+        self.assertEqual(response_without_tilde.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_with_tilde.status_code, status.HTTP_200_OK)
+        ids_without_tilde = [movie["id"] for movie in response_without_tilde.data["results"]]
+        ids_with_tilde = [movie["id"] for movie in response_with_tilde.data["results"]]
+        self.assertIn(matched.id, ids_without_tilde)
+        self.assertIn(matched.id, ids_with_tilde)
 
     def test_list_includes_following_stats_excluding_viewer_rating(self):
         followed_user = self.user_model.objects.create_user(
