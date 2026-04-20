@@ -6,7 +6,7 @@ from time import perf_counter
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.cache import cache
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Cast, Coalesce
 from rest_framework.generics import RetrieveAPIView, ListAPIView
@@ -83,10 +83,12 @@ def apply_movie_search(queryset, search, include_relevance=True):
 
     filters = Q()
     score_expr = Value(0, output_field=IntegerField())
+    search_lookup_suffix = "__unaccent__icontains" if connection.vendor == "postgresql" else "__icontains"
+
     for term in terms:
         term_match = Q()
         for field in search_fields:
-            lookup = {f"{field}__icontains": term}
+            lookup = {f"{field}{search_lookup_suffix}": term}
             term_match |= Q(**lookup)
             score_expr += Case(
                 When(**lookup, then=Value(1)),
