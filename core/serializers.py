@@ -629,7 +629,7 @@ class MeMessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Comment
-        fields = ["id", "body", "created_at", "author", "movie"]
+        fields = ["id", "body", "created_at", "author", "movie", "is_read"]
 
 
 class PublicCommentFeedSerializer(CommentSerializer):
