@@ -136,11 +136,19 @@ class MovieQuerySet(models.QuerySet):
                 following_avg_rating=Value(None, output_field=FloatField()),
                 following_ratings_count=Value(0, output_field=IntegerField()),
             )
+        return self.with_following_rating_stats_for_user_id(user.id)
+
+    def with_following_rating_stats_for_user_id(self, user_id):
+        if not user_id:
+            return self.annotate(
+                following_avg_rating=Value(None, output_field=FloatField()),
+                following_ratings_count=Value(0, output_field=IntegerField()),
+            )
 
         followed_user_ids = Follow.objects.filter(
-            follower_id=user.id,
+            follower_id=user_id,
         ).exclude(
-            following_id=user.id,
+            following_id=user_id,
         ).values("following_id")
 
         following_ratings = MovieRating.objects.filter(

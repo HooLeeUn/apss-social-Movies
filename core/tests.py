@@ -3353,7 +3353,10 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.owner.profile.save(update_fields=["visibility"])
         self.client.force_authenticate(self.viewer)
         response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["can_view_full_profile"])
+        self.assertEqual(response.data["profile_access"], "restricted")
+        self.assertEqual(set(response.data.keys()), {"id", "username", "first_name", "last_name", "display_name", "avatar", "can_view_full_profile", "profile_access"})
 
     def test_profile_private_is_visible_to_accepted_friend(self):
         self.owner.profile.visibility = Profile.Visibility.PRIVATE
@@ -3748,6 +3751,101 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertEqual(response.data[0]["movie"]["id"], self.movie_1.id)
         self.assertEqual(response.data[1]["movie"]["id"], self.movie_2.id)
         self.assertEqual(response.data[2]["movie"]["id"], self.movie_3.id)
+
+    def test_profile_favorites_own_semantics_remain_for_authenticated_user(self):
+        followed = get_user_model().objects.create_user(
+            username="followed_for_viewer",
+            email="followed-for-viewer@example.com",
+            password="test1234",
+        )
+        Follow.objects.create(follower=self.viewer, following=followed)
+        MovieRating.objects.create(user=self.viewer, movie=self.movie_1, score=4)
+        MovieRating.objects.create(user=followed, movie=self.movie_1, score=7)
+
+        response = self.client.get(reverse("profile-favorites"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        movie_payload = response.data[0]["movie"]
+        self.assertEqual(movie_payload["my_rating"], 4)
+        self.assertEqual(movie_payload["owner_rating"], 4)
+        self.assertAlmostEqual(movie_payload["following_avg_rating"], 7.0)
+        self.assertEqual(movie_payload["following_ratings_count"], 1)
+
+    def test_user_favorites_replicates_visited_profile_feed_perspective(self):
+        Follow.objects.create(follower=self.visited, following=self.friend_one)
+        Follow.objects.create(follower=self.visited, following=self.friend_two)
+        MovieRating.objects.create(user=self.friend_one, movie=self.movie_1, score=5)
+        MovieRating.objects.create(user=self.friend_two, movie=self.movie_1, score=7)
+        MovieRating.objects.create(user=self.viewer, movie=self.movie_1, score=1)
+
+        self.client.force_authenticate(self.visited)
+        own_response = self.client.get(reverse("profile-favorites"))
+        self.client.force_authenticate(self.viewer)
+        visited_response = self.client.get(reverse("user-favorites", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(own_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(visited_response.status_code, status.HTTP_200_OK)
+        own_movie = own_response.data[0]["movie"]
+        visited_movie = visited_response.data[0]["movie"]
+        self.assertEqual(visited_movie["following_avg_rating"], own_movie["following_avg_rating"])
+        self.assertEqual(visited_movie["following_ratings_count"], own_movie["following_ratings_count"])
+        self.assertEqual(visited_movie["my_rating"], own_movie["my_rating"])
+        self.assertEqual(visited_movie["owner_rating"], own_movie["my_rating"])
+        self.assertAlmostEqual(visited_movie["owner_following_avg_rating"], own_movie["following_avg_rating"])
+        self.assertEqual(visited_movie["owner_following_ratings_count"], own_movie["following_ratings_count"])
+        self.assertNotEqual(visited_movie["my_rating"], 1)
+
+    def test_user_favorites_friend_access_without_follow_keeps_visited_perspective(self):
+        private_user = get_user_model().objects.create_user(
+            username="private_friend_owner",
+            email="private-friend-owner@example.com",
+            password="test1234",
+        )
+        private_user.profile.visibility = Profile.Visibility.PRIVATE
+        private_user.profile.is_public = False
+        private_user.profile.save(update_fields=["visibility", "is_public"])
+        friend_actor = get_user_model().objects.create_user(
+            username="friend_actor_for_private",
+            email="friend-actor-private@example.com",
+            password="test1234",
+        )
+        Friendship.objects.create(
+            requester=private_user,
+            user1=min(private_user, self.viewer, key=lambda u: u.id),
+            user2=max(private_user, self.viewer, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        Follow.objects.create(follower=private_user, following=friend_actor)
+        private_movie = Movie.objects.create(author=self.author, title_english="Private Favorite", type=Movie.MOVIE)
+        ProfileFavoriteMovie.objects.create(user=private_user, slot=1, movie=private_movie)
+        MovieRating.objects.create(user=private_user, movie=private_movie, score=9)
+        MovieRating.objects.create(user=friend_actor, movie=private_movie, score=7)
+
+        response = self.client.get(reverse("user-favorites", kwargs={"username": private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        movie_payload = response.data[0]["movie"]
+        self.assertEqual(movie_payload["my_rating"], 9)
+        self.assertEqual(movie_payload["owner_rating"], 9)
+        self.assertAlmostEqual(movie_payload["following_avg_rating"], 7.0)
+        self.assertEqual(movie_payload["following_ratings_count"], 1)
+
+    def test_private_profile_without_access_returns_restricted_flag(self):
+        private_user = get_user_model().objects.create_user(
+            username="private_no_access",
+            email="private-no-access@example.com",
+            password="test1234",
+        )
+        private_user.profile.visibility = Profile.Visibility.PRIVATE
+        private_user.profile.is_public = False
+        private_user.profile.save(update_fields=["visibility", "is_public"])
+
+        response = self.client.get(reverse("user-profile", kwargs={"username": private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["can_view_full_profile"])
+        self.assertEqual(response.data["profile_access"], "restricted")
+        self.assertEqual(response.data["username"], private_user.username)
 
     def test_user_activity_returns_only_visited_user_public_activity(self):
         response = self.client.get(reverse("user-activity", kwargs={"username": self.visited.username}))

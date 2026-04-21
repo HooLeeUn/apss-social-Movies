@@ -54,6 +54,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
     friendship_status = serializers.SerializerMethodField()
     can_follow = serializers.SerializerMethodField()
     can_send_friend_request = serializers.SerializerMethodField()
+    can_view_full_profile = serializers.SerializerMethodField()
+    profile_access = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -66,6 +69,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "posts_count", "avg_post_rating",
             "is_following", "friendship_status",
             "can_follow", "can_send_friend_request",
+            "display_name", "can_view_full_profile", "profile_access",
         ]
         
     def _get_friendship(self, obj):
@@ -133,6 +137,31 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not profile or not profile.gender_identity_visible:
             return None
         return profile.gender_identity
+
+    def get_can_view_full_profile(self, obj):
+        return bool(self.context.get("can_view_full_profile", True))
+
+    def get_profile_access(self, obj):
+        return "full" if self.get_can_view_full_profile(obj) else "restricted"
+
+    def get_display_name(self, obj):
+        full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
+        return full_name or obj.username
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data["can_view_full_profile"]:
+            return data
+        return {
+            "id": data["id"],
+            "username": data["username"],
+            "first_name": data["first_name"],
+            "last_name": data["last_name"],
+            "display_name": data["display_name"],
+            "avatar": data["avatar"],
+            "can_view_full_profile": data["can_view_full_profile"],
+            "profile_access": data["profile_access"],
+        }
 
 class MeSerializer(serializers.ModelSerializer):
     # editable (escribe en Profile)
@@ -698,6 +727,9 @@ class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
     following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
     following_ratings_count = serializers.IntegerField(read_only=True)
     my_rating = serializers.IntegerField(read_only=True, allow_null=True)
+    owner_rating = serializers.IntegerField(read_only=True, allow_null=True)
+    owner_following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    owner_following_ratings_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Movie
@@ -714,6 +746,9 @@ class ProfileFavoriteMovieSerializer(serializers.ModelSerializer):
             "following_avg_rating",
             "following_ratings_count",
             "my_rating",
+            "owner_rating",
+            "owner_following_avg_rating",
+            "owner_following_ratings_count",
         ]
 
 
