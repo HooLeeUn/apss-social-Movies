@@ -195,6 +195,17 @@ def filter_valid_directed_comments(queryset):
     return queryset.filter(id__in=valid_ids).order_by("-created_at", "-id")
 
 
+def get_valid_directed_comment_ids(queryset):
+    optimized_queryset = queryset.select_related("target_user").only(
+        "id",
+        "visibility",
+        "body",
+        "target_user_id",
+        "target_user__username",
+    )
+    return [comment.id for comment in optimized_queryset if is_valid_directed_comment(comment)]
+
+
 def filter_comments_visible_to_user(queryset, user):
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
@@ -988,11 +999,13 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
         if not has_explicit_mention:
             target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
         visibility = Comment.VISIBILITY_MENTIONED if target_user else Comment.VISIBILITY_PUBLIC
+        is_read = visibility != Comment.VISIBILITY_MENTIONED
         serializer.save(
             author=self.request.user,
             movie=movie,
             target_user=target_user,
             visibility=visibility,
+            is_read=is_read,
         )
 
 
@@ -1093,8 +1106,39 @@ class MeMessagesSummaryView(APIView):
             .select_related("target_user")
             .order_by("-created_at", "-id")
         )
-        total = len(filter_valid_directed_comments(queryset))
-        return Response({"total": total})
+        valid_ids = get_valid_directed_comment_ids(queryset)
+        total_messages = len(valid_ids)
+        unread_count = 0
+        if valid_ids:
+            unread_count = Comment.objects.filter(id__in=valid_ids, is_read=False).count()
+
+        return Response(
+            {
+                "has_unread_messages": unread_count > 0,
+                "unread_count": unread_count,
+                "total_messages": total_messages,
+            }
+        )
+
+
+class MeMessagesMarkAsReadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=request.user,
+                is_read=False,
+            )
+            .exclude(author=request.user)
+            .order_by("-created_at", "-id")
+        )
+        valid_ids = get_valid_directed_comment_ids(queryset)
+        updated = 0
+        if valid_ids:
+            updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
+        return Response({"updated": updated})
 
 
 class MovieDirectedCommentsListView(MovieCommentsListCreateView):
@@ -1128,6 +1172,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
             movie=movie,
             target_user=target_user,
             visibility=Comment.VISIBILITY_MENTIONED,
+            is_read=False,
         )
 
 

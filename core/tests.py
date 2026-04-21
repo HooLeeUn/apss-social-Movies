@@ -1102,6 +1102,7 @@ class MovieCommentEndpointTests(TestCase):
         self.sent_url = reverse("directed-comments-sent")
         self.me_messages_url = reverse("me-messages")
         self.me_messages_summary_url = reverse("me-messages-summary")
+        self.me_messages_mark_as_read_url = reverse("me-messages-mark-as-read")
 
     def test_get_movie_detail_returns_requested_movie(self):
         response = self.client.get(self.movie_detail_url)
@@ -1167,6 +1168,7 @@ class MovieCommentEndpointTests(TestCase):
         comment = Comment.objects.get()
         self.assertEqual(comment.visibility, Comment.VISIBILITY_MENTIONED)
         self.assertEqual(comment.target_user, self.friend_user)
+        self.assertFalse(comment.is_read)
         self.assertEqual(response.data["visibility"], Comment.VISIBILITY_MENTIONED)
         self.assertEqual(response.data["target_user"], self.friend_user.pk)
 
@@ -1341,14 +1343,23 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payload = response.data["results"] if isinstance(response.data, dict) else response.data
         self.assertEqual([item["id"] for item in payload], [valid_directed.id])
+        self.assertFalse(payload[0]["is_read"])
 
     def test_me_messages_summary_counts_only_valid_received_directed_comments(self):
-        Comment.objects.create(
+        unread_comment = Comment.objects.create(
             author=self.friend_user,
             movie=self.movie,
             body=f"Valido @{self.user.username}",
             visibility=Comment.VISIBILITY_MENTIONED,
             target_user=self.user,
+        )
+        read_comment = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Leído @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+            is_read=True,
         )
         Comment.objects.create(
             author=self.friend_user,
@@ -1361,7 +1372,49 @@ class MovieCommentEndpointTests(TestCase):
         self.client.force_authenticate(user=self.user)
         response = self.client.get(self.me_messages_summary_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["total"], 1)
+        self.assertEqual(response.data["total_messages"], 2)
+        self.assertEqual(response.data["unread_count"], 1)
+        self.assertTrue(response.data["has_unread_messages"])
+        unread_comment.refresh_from_db()
+        read_comment.refresh_from_db()
+        self.assertFalse(unread_comment.is_read)
+        self.assertTrue(read_comment.is_read)
+
+    def test_me_messages_mark_as_read_updates_only_valid_unread_received_messages(self):
+        unread_valid = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Sin leer @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+            is_read=False,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body="Inconsistente",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+            is_read=False,
+        )
+        already_read = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Leído @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+            is_read=True,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.me_messages_mark_as_read_url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 1)
+
+        unread_valid.refresh_from_db()
+        already_read.refresh_from_db()
+        self.assertTrue(unread_valid.is_read)
+        self.assertTrue(already_read.is_read)
 
     def test_directed_comments_by_movie_requires_auth_and_filters_to_participant(self):
         other_movie = Movie.objects.create(
