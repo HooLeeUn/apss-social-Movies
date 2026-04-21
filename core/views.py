@@ -54,6 +54,7 @@ from .weekly_recommendations import (
 from .visibility import (
     can_view_user_profile,
     filter_out_authors_who_blocked_viewer,
+    is_blocked_from_user_content,
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
@@ -218,17 +219,21 @@ def filter_comments_visible_to_user(queryset, user):
     )
 
 
-def build_profile_favorite_movie_payload_by_id(user, movie_ids):
+def build_profile_favorite_movie_payload_by_id(viewer_user, movie_ids, perspective_user=None):
     if not movie_ids:
         return {}
 
+    perspective = perspective_user or viewer_user
     movies = (
         Movie.objects.filter(id__in=movie_ids)
         .with_display_rating()
-        .with_my_rating(user)
-        .with_following_rating_stats(user)
+        .with_my_rating(perspective)
+        .with_following_rating_stats_for_user_id(getattr(perspective, "id", None))
         .annotate(
             general_rating=F("display_rating"),
+            owner_rating=F("my_rating"),
+            owner_following_avg_rating=F("following_avg_rating"),
+            owner_following_ratings_count=F("following_ratings_count"),
         )
     )
     serialized_movies = ProfileFavoriteMovieSerializer(movies, many=True)
@@ -305,11 +310,20 @@ class UserProfileView(RetrieveAPIView):
         )
     )
 
-    def get_object(self):
-        obj = super().get_object()
-        if not can_view_user_profile(obj, self.request.user):
+    def retrieve(self, request, *args, **kwargs):
+        obj = self.get_object()
+        if is_blocked_from_user_content(obj, request.user):
             raise PermissionDenied("You do not have permission to view this profile.")
-        return obj
+
+        can_view_full_profile = can_view_user_profile(obj, request.user)
+        serializer = self.get_serializer(
+            obj,
+            context={
+                **self.get_serializer_context(),
+                "can_view_full_profile": can_view_full_profile,
+            },
+        )
+        return Response(serializer.data)
 
 class MeView(generics.RetrieveUpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -1303,7 +1317,11 @@ class UserProfileFavoritesView(APIView):
             .order_by("slot")
         )
         movie_ids = [favorite.movie_id for favorite in favorites]
-        movie_payload_by_id = build_profile_favorite_movie_payload_by_id(request.user, movie_ids)
+        movie_payload_by_id = build_profile_favorite_movie_payload_by_id(
+            request.user,
+            movie_ids,
+            perspective_user=target,
+        )
         movie_id_by_slot = {favorite.slot: favorite.movie_id for favorite in favorites}
 
         payload = [
