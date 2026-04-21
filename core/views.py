@@ -24,7 +24,7 @@ from .serializers import (
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
-    SocialListUserSerializer, PersonalDataSerializer,
+    SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
 )
 from .models import (
     Comment,
@@ -45,7 +45,7 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
-from .pagination import FeedMoviesPagination
+from .pagination import FeedMoviesPagination, DefaultPagination
 from .social_feed import SocialActivityFeedService
 from .weekly_recommendations import (
     get_previous_closed_week_window,
@@ -964,7 +964,7 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at")
+            .order_by("-created_at", "-id")
         )
         queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
         return annotate_comments_for_user(queryset, self.request.user)
@@ -1157,10 +1157,11 @@ class MeMessagesMarkAsReadView(APIView):
 
 class MovieDirectedCommentsListView(MovieCommentsListCreateView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = CommentSerializer
+    serializer_class = DirectedConversationSerializer
+    pagination_class = DefaultPagination
 
     def get_queryset(self):
-        return annotate_comments_for_user(
+        queryset = (
             Comment.objects.filter(
                 movie_id=self.kwargs["pk"],
                 visibility=Comment.VISIBILITY_MENTIONED,
@@ -1169,9 +1170,50 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
                 Q(author=self.request.user) | Q(target_user=self.request.user)
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at"),
-            self.request.user,
+            .order_by("-created_at", "-id")
         )
+        valid_ids = get_valid_directed_comment_ids(queryset)
+        if not valid_ids:
+            return []
+
+        directed_comments = list(
+            annotate_comments_for_user(
+                queryset.filter(id__in=valid_ids),
+                self.request.user,
+            )
+        )
+
+        grouped = {}
+        for comment in directed_comments:
+            other_user = comment.target_user if comment.author_id == self.request.user.id else comment.author
+            conversation = grouped.setdefault(
+                other_user.id,
+                {"other_user": other_user, "last_message_at": comment.created_at, "messages_preview": []},
+            )
+            if comment.created_at > conversation["last_message_at"]:
+                conversation["last_message_at"] = comment.created_at
+            if len(conversation["messages_preview"]) < 1:
+                conversation["messages_preview"].append(comment)
+
+        conversations = sorted(
+            grouped.values(),
+            key=lambda item: (item["last_message_at"], item["other_user"].id),
+            reverse=True,
+        )
+        for item in conversations:
+            item["messages_endpoint"] = self.request.build_absolute_uri(
+                f"/api/movies/{self.kwargs['pk']}/comments/directed/conversations/{item['other_user'].username}/messages/"
+            )
+        return conversations
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
@@ -1188,6 +1230,31 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
             visibility=Comment.VISIBILITY_MENTIONED,
             is_read=False,
         )
+
+
+class DirectedConversationMessagesView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DirectedConversationMessageSerializer
+
+    def get_queryset(self):
+        movie_id = self.kwargs["pk"]
+        other_user = get_object_or_404(User, username=self.kwargs["username"])
+        queryset = (
+            Comment.objects.filter(
+                movie_id=movie_id,
+                visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .filter(
+                Q(author=self.request.user, target_user=other_user)
+                | Q(author=other_user, target_user=self.request.user)
+            )
+            .select_related("author", "author__profile", "movie", "target_user", "target_user__profile")
+            .order_by("-created_at", "-id")
+        )
+        valid_ids = get_valid_directed_comment_ids(queryset)
+        if not valid_ids:
+            return Comment.objects.none()
+        return annotate_comments_for_user(queryset.filter(id__in=valid_ids), self.request.user)
 
 
 class UserPostsListView(generics.ListAPIView):

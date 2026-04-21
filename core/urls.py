@@ -10,7 +10,7 @@ from .views import (
     FeedFollowingView, DiscoverView, PublicCommentsFeedView, ProfileFeedActivityView, UserProfileActivityView, PostListCreateView, PostDetailView, PostRatingView,
     UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, CommentReactionView, RegisterView,
     ReceivedDirectedCommentsView, SentDirectedCommentsView, MeMessagesView, MeMessagesSummaryView, MeMessagesMarkAsReadView,
-    MovieListView, MovieDetailView, MovieDirectedCommentsListView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
+    MovieListView, MovieDetailView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView,
 )
@@ -65,6 +65,7 @@ urlpatterns = [
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
     path("movies/<int:pk>/comments/", MovieCommentsListCreateView.as_view(), name="movie-comments"),
     path("movies/<int:pk>/comments/directed/", MovieDirectedCommentsListView.as_view(), name="movie-directed-comments"),
+    path("movies/<int:pk>/comments/directed/conversations/<str:username>/messages/", DirectedConversationMessagesView.as_view(), name="movie-directed-conversation-messages"),
     path("comments/directed/received/", ReceivedDirectedCommentsView.as_view(), name="directed-comments-received"),
     path("comments/directed/sent/", SentDirectedCommentsView.as_view(), name="directed-comments-sent"),
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),

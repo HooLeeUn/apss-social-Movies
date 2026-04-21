@@ -1452,8 +1452,18 @@ class MovieCommentEndpointTests(TestCase):
         response = self.client.get(self.movie_directed_url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual([item["id"] for item in response.data], [directed_for_user.id])
-        self.assertTrue(all(item["movie"] == self.movie.pk for item in response.data))
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["other_user"]["username"], self.friend_user.username)
+        preview = response.data["results"][0]["messages_preview"]
+        self.assertEqual([item["id"] for item in preview], [directed_for_user.id])
+        self.assertEqual(preview[0]["direction"], "received")
+        self.assertIn(
+            reverse(
+                "movie-directed-conversation-messages",
+                kwargs={"pk": self.movie.pk, "username": self.friend_user.username},
+            ),
+            response.data["results"][0]["messages_endpoint"],
+        )
 
     def test_post_directed_comment_by_movie_endpoint_requires_valid_friend_mention(self):
         self.client.force_authenticate(user=self.user)
@@ -1476,6 +1486,128 @@ class MovieCommentEndpointTests(TestCase):
         )
         self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Comment.objects.count(), 1)
+
+    def test_directed_conversations_group_messages_when_other_user_starts(self):
+        first = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"hola @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        second = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"respuesta @{self.friend_user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.movie_directed_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        conversation = response.data["results"][0]
+        self.assertEqual(conversation["other_user"]["username"], self.friend_user.username)
+        self.assertEqual(conversation["messages_preview"][0]["id"], second.id)
+        self.assertEqual(conversation["messages_preview"][0]["direction"], "sent")
+        self.assertNotEqual(first.id, second.id)
+
+    def test_directed_conversations_order_and_separation_by_movie_and_interlocutor(self):
+        newer_other = get_user_model().objects.create_user(
+            username="comment_friend_2",
+            email="comment-friend-2@example.com",
+            password="test1234",
+        )
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=newer_other,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        other_movie = Movie.objects.create(
+            author=self.user,
+            title_english="Dune",
+            type=Movie.MOVIE,
+            release_year=2021,
+        )
+
+        old_comment = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"viejo @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        new_comment = Comment.objects.create(
+            author=newer_other,
+            movie=self.movie,
+            body=f"nuevo @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=other_movie,
+            body=f"otra peli @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.movie_directed_url)
+        usernames = [item["other_user"]["username"] for item in response.data["results"]]
+
+        self.assertEqual(usernames, [newer_other.username, self.friend_user.username])
+        self.assertEqual(response.data["results"][0]["messages_preview"][0]["id"], new_comment.id)
+        self.assertEqual(response.data["results"][1]["messages_preview"][0]["id"], old_comment.id)
+
+    def test_directed_conversation_messages_endpoint_paginates_and_marks_directions(self):
+        for index in range(12):
+            author = self.user if index % 2 == 0 else self.friend_user
+            target = self.friend_user if author == self.user else self.user
+            mention = self.friend_user.username if author == self.user else self.user.username
+            Comment.objects.create(
+                author=author,
+                movie=self.movie,
+                body=f"mensaje {index} @{mention}",
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=target,
+            )
+
+        self.client.force_authenticate(user=self.user)
+        url = reverse(
+            "movie-directed-conversation-messages",
+            kwargs={"pk": self.movie.pk, "username": self.friend_user.username},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 12)
+        self.assertEqual(len(response.data["results"]), 10)
+        self.assertEqual(response.data["results"][0]["direction"], "received")
+        self.assertIn(response.data["results"][1]["direction"], {"sent", "received"})
+
+        page_2 = self.client.get(url, {"page": 2})
+        self.assertEqual(page_2.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(page_2.data["results"]), 2)
+
+    def test_public_comments_pagination_is_stable_and_contains_author_navigation_fields(self):
+        for index in range(12):
+            Comment.objects.create(
+                author=self.user,
+                movie=self.movie,
+                body=f"publico {index}",
+                visibility=Comment.VISIBILITY_PUBLIC,
+            )
+
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 12)
+        self.assertEqual(len(response.data["results"]), 10)
+        first = response.data["results"][0]
+        self.assertEqual(first["author_username"], self.user.username)
+        self.assertTrue(first["author_display_name"])
+        self.assertIn("author_avatar", first)
 
     def test_comment_requires_movie_relation(self):
         with self.assertRaises(IntegrityError):

@@ -339,10 +339,11 @@ class CreateUserVisibilityBlockSerializer(serializers.Serializer):
 class UserMiniSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", read_only=True)
     avatar = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
     
     class Meta:
         model = User
-        fields = ["id", "username", "bio", "avatar"]
+        fields = ["id", "username", "display_name", "bio", "avatar"]
     
     def get_avatar(self, obj):
         # si tienes Profile con related_name="profile"
@@ -351,6 +352,10 @@ class UserMiniSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_display_name(self, obj):
+        full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
+        return full_name or obj.username
 
 
 class UserMiniWithFollowersCountSerializer(UserMiniSerializer):
@@ -612,6 +617,9 @@ class CommentSerializer(serializers.ModelSerializer):
     likes_count = serializers.IntegerField(read_only=True)
     dislikes_count = serializers.IntegerField(read_only=True)
     my_reaction = serializers.CharField(read_only=True, allow_null=True)
+    author_username = serializers.CharField(source="author.username", read_only=True)
+    author_display_name = serializers.SerializerMethodField()
+    author_avatar = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
@@ -619,6 +627,7 @@ class CommentSerializer(serializers.ModelSerializer):
             "id", "author", "movie", "target_user", "body", "visibility",
             "mentioned_username", "recipient_username",
             "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
+            "author_username", "author_display_name", "author_avatar",
         ]
         read_only_fields = [
             "id", "author", "movie", "target_user", "visibility",
@@ -629,6 +638,88 @@ class CommentSerializer(serializers.ModelSerializer):
         validated_data.pop("mentioned_username", None)
         validated_data.pop("recipient_username", None)
         return super().create(validated_data)
+
+    def get_author_avatar(self, obj):
+        if hasattr(obj.author, "profile") and obj.author.profile.avatar:
+            request = self.context.get("request")
+            url = obj.author.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+    def get_author_display_name(self, obj):
+        full_name = f"{(obj.author.first_name or '').strip()} {(obj.author.last_name or '').strip()}".strip()
+        return full_name or obj.author.username
+
+
+class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "display_name", "avatar"]
+
+    def get_display_name(self, obj):
+        full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
+        return full_name or obj.username
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class DirectedConversationMessageSerializer(serializers.ModelSerializer):
+    author = DirectedConversationOtherUserSerializer(read_only=True)
+    target_user = DirectedConversationOtherUserSerializer(read_only=True)
+    direction = serializers.SerializerMethodField()
+    content = serializers.CharField(source="body", read_only=True)
+    author_username = serializers.CharField(source="author.username", read_only=True)
+    author_display_name = serializers.SerializerMethodField()
+    author_avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Comment
+        fields = [
+            "id",
+            "content",
+            "created_at",
+            "updated_at",
+            "likes_count",
+            "dislikes_count",
+            "my_reaction",
+            "author",
+            "author_username",
+            "author_display_name",
+            "author_avatar",
+            "target_user",
+            "direction",
+        ]
+
+    def get_direction(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return "sent" if user and obj.author_id == user.id else "received"
+
+    def get_author_display_name(self, obj):
+        full_name = f"{(obj.author.first_name or '').strip()} {(obj.author.last_name or '').strip()}".strip()
+        return full_name or obj.author.username
+
+    def get_author_avatar(self, obj):
+        if hasattr(obj.author, "profile") and obj.author.profile.avatar:
+            request = self.context.get("request")
+            url = obj.author.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class DirectedConversationSerializer(serializers.Serializer):
+    other_user = DirectedConversationOtherUserSerializer(read_only=True)
+    last_message_at = serializers.DateTimeField(read_only=True)
+    messages_preview = DirectedConversationMessageSerializer(read_only=True, many=True)
+    messages_endpoint = serializers.CharField(read_only=True)
 
 
 class MeMessageAuthorSerializer(serializers.ModelSerializer):
