@@ -20,7 +20,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
@@ -1062,7 +1062,7 @@ class SentDirectedCommentsView(generics.ListAPIView):
 
 class MeMessagesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = CommentSerializer
+    serializer_class = MeMessageSerializer
 
     def get_queryset(self):
         queryset = (
