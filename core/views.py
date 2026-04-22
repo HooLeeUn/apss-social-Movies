@@ -1050,7 +1050,7 @@ class PostCommentsListCreateView(MovieCommentsListCreateView):
 class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly, IsCommentAuthorOrReadOnly]
     serializer_class = CommentSerializer
-    http_method_names = ["get", "put", "delete", "head", "options"]
+    http_method_names = ["get", "put", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
         queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
