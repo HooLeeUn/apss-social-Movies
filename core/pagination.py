@@ -18,6 +18,12 @@ class FeedMoviesPagination(DefaultPagination):
 
     def get_count(self, queryset):
         view = getattr(self, "_view", None)
+        if view and hasattr(view, "get_feed_total_count"):
+            start = perf_counter()
+            count = view.get_feed_total_count()
+            if hasattr(view, "_record_profile_timing"):
+                view._record_profile_timing("paginated_count_sql_seconds", perf_counter() - start)
+            return count
         if view and hasattr(view, "get_feed_count_queryset"):
             start = perf_counter()
             count = view.get_feed_count_queryset().count()
