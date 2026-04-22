@@ -1054,6 +1054,7 @@ class ReceivedDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
+        movie_id = self.request.query_params.get("movie_id")
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
@@ -1062,6 +1063,8 @@ class ReceivedDirectedCommentsView(generics.ListAPIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
         )
+        if movie_id:
+            queryset = queryset.filter(movie_id=movie_id)
         return annotate_comments_for_user(
             filter_valid_directed_comments(queryset),
             self.request.user,
@@ -1073,6 +1076,7 @@ class SentDirectedCommentsView(generics.ListAPIView):
     serializer_class = CommentSerializer
 
     def get_queryset(self):
+        movie_id = self.request.query_params.get("movie_id")
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
@@ -1081,6 +1085,32 @@ class SentDirectedCommentsView(generics.ListAPIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
         )
+        if movie_id:
+            queryset = queryset.filter(movie_id=movie_id)
+        return annotate_comments_for_user(
+            filter_valid_directed_comments(queryset),
+            self.request.user,
+        )
+
+
+class DirectedCommentsListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        movie_id = self.request.query_params.get("movie_id")
+        queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .filter(
+                Q(author=self.request.user) | Q(target_user=self.request.user)
+            )
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at", "-id")
+        )
+        if movie_id:
+            queryset = queryset.filter(movie_id=movie_id)
         return annotate_comments_for_user(
             filter_valid_directed_comments(queryset),
             self.request.user,
