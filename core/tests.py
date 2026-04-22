@@ -1545,6 +1545,43 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Comment.objects.count(), 1)
 
+    def test_post_directed_comment_by_movie_endpoint_allows_friend_without_prior_conversation(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.movie_directed_url,
+            {"body": "Primera vez que te escribo", "mentioned_username": self.friend_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = Comment.objects.get()
+        self.assertEqual(created.author, self.user)
+        self.assertEqual(created.target_user, self.friend_user)
+        self.assertEqual(created.visibility, Comment.VISIBILITY_MENTIONED)
+
+    def test_post_directed_comment_by_movie_endpoint_allows_friend_with_prior_conversation(self):
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Mensaje previo @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.movie_directed_url,
+            {"body": "Respuesta dirigida", "mentioned_username": self.friend_user.username},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Comment.objects.count(), 2)
+        latest = Comment.objects.order_by("-id").first()
+        self.assertEqual(latest.author, self.user)
+        self.assertEqual(latest.target_user, self.friend_user)
+
     def test_directed_conversations_group_messages_when_other_user_starts(self):
         first = Comment.objects.create(
             author=self.friend_user,

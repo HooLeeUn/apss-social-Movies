@@ -978,7 +978,7 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
             return None
 
         username = match.group("username")
-        target_user = User.objects.filter(username=username).first()
+        target_user = self._resolve_mentioned_user(username)
         if target_user is None or target_user == self.request.user:
             return None
 
@@ -990,12 +990,27 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
         return target_user
 
+    def _resolve_mentioned_user(self, raw_username):
+        username = (raw_username or "").strip().lstrip("@")
+        if not username:
+            return None
+
+        exact_match = User.objects.filter(username=username).first()
+        if exact_match is not None:
+            return exact_match
+
+        case_insensitive_matches = User.objects.filter(username__iexact=username)
+        if case_insensitive_matches.count() == 1:
+            return case_insensitive_matches.first()
+
+        return None
+
     def _get_mentioned_friend_from_payload(self, data):
         username = (data.get("mentioned_username") or data.get("recipient_username") or "").strip()
         if not username:
             return None, False
 
-        target_user = User.objects.filter(username=username).first()
+        target_user = self._resolve_mentioned_user(username)
         if target_user is None or target_user == self.request.user:
             raise ValidationError({"mentioned_username": "Mentioned user is invalid."})
 
@@ -1189,6 +1204,11 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = DirectedConversationSerializer
     pagination_class = DefaultPagination
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return CommentSerializer
+        return DirectedConversationSerializer
 
     def get_queryset(self):
         queryset = (
