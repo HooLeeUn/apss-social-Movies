@@ -1540,6 +1540,7 @@ class FeedMoviesView(generics.ListAPIView):
     FEED_CANDIDATE_MAX_POOL = 12000
     FEED_PAGE_CACHE_TTL_SECONDS = 120
     FEED_RANKING_CACHE_TTL_SECONDS = 600
+    FEED_COUNT_CACHE_TTL_SECONDS = 600
     FEED_ROTATION_SCORE_BAND = 0.12
     FEED_ROTATION_WINDOW_MIN = 24
     FEED_ROTATION_WINDOW_MAX = 72
@@ -1611,6 +1612,40 @@ class FeedMoviesView(generics.ListAPIView):
         if not hasattr(self, "_feed_count_queryset"):
             self._feed_count_queryset = self._build_filtered_feed_base_queryset(include_search_relevance=False)
         return self._feed_count_queryset
+
+    def _build_feed_count_cache_key(self):
+        genres = parse_feed_genre_filters(self.request)
+        return "|".join(
+            [
+                "feed_movies_count_v1",
+                f"user:{self.request.user.id}",
+                f"search:{(self.request.query_params.get('search') or '').strip().lower()}",
+                f"type:{(self.request.query_params.get('type') or '').strip().lower()}",
+                f"genres:{','.join(genres)}",
+                f"exclude_rated:{self.request.query_params.get('exclude_rated', 'true').lower()}",
+            ]
+        )
+
+    def get_feed_total_count(self):
+        if hasattr(self, "_feed_total_count"):
+            return self._feed_total_count
+
+        count_cache_key = self._build_feed_count_cache_key()
+        cached_count = cache.get(count_cache_key)
+        if cached_count is not None:
+            self._record_profile_marker("count_cache", "hit")
+            self._record_profile_marker("count_cache_key", count_cache_key)
+            self._feed_total_count = int(cached_count)
+            return self._feed_total_count
+
+        self._record_profile_marker("count_cache", "miss")
+        start = perf_counter()
+        total_count = self.get_feed_count_queryset().count()
+        self._record_profile_timing("paginated_count_query_seconds", perf_counter() - start)
+        cache.set(count_cache_key, total_count, timeout=self.FEED_COUNT_CACHE_TTL_SECONDS)
+        self._record_profile_marker("count_cache_key", count_cache_key)
+        self._feed_total_count = int(total_count)
+        return self._feed_total_count
 
     def _resolve_page_size(self):
         paginator = self.paginator
