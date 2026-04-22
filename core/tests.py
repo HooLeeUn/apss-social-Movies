@@ -1098,6 +1098,7 @@ class MovieCommentEndpointTests(TestCase):
         self.list_url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
         self.movie_detail_url = reverse("movie-detail", kwargs={"pk": self.movie.pk})
         self.movie_directed_url = reverse("movie-directed-comments", kwargs={"pk": self.movie.pk})
+        self.directed_url = reverse("directed-comments")
         self.received_url = reverse("directed-comments-received")
         self.sent_url = reverse("directed-comments-sent")
         self.me_messages_url = reverse("me-messages")
@@ -1301,6 +1302,63 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(other_sent_response.status_code, status.HTTP_200_OK)
         self.assertEqual(other_received_response.data, [])
         self.assertEqual(other_sent_response.data, [])
+
+    def test_directed_comments_fallback_endpoint_returns_participant_messages(self):
+        directed_comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body="Recomendación privada @comment_friend",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        Comment.objects.create(
+            author=self.other_user,
+            movie=self.movie,
+            body="No visible para comment_user",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+
+        self.client.force_authenticate(user=self.friend_user)
+        response = self.client.get(self.directed_url)
+        payload = response.data["results"] if isinstance(response.data, dict) else response.data
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["id"], directed_comment.id)
+
+    def test_received_and_fallback_directed_endpoints_support_movie_id_filter(self):
+        other_movie = Movie.objects.create(
+            author=self.user,
+            title_english="Her",
+            type=Movie.MOVIE,
+            release_year=2013,
+        )
+        in_scope = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body="Para comment_friend @comment_friend",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        Comment.objects.create(
+            author=self.user,
+            movie=other_movie,
+            body="Para comment_friend en otra movie @comment_friend",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+
+        self.client.force_authenticate(user=self.friend_user)
+        received_response = self.client.get(self.received_url, {"movie_id": self.movie.id})
+        fallback_response = self.client.get(self.directed_url, {"movie_id": self.movie.id})
+        received_payload = received_response.data["results"] if isinstance(received_response.data, dict) else received_response.data
+        fallback_payload = fallback_response.data["results"] if isinstance(fallback_response.data, dict) else fallback_response.data
+
+        self.assertEqual(received_response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in received_payload], [in_scope.id])
+        self.assertEqual(fallback_response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in fallback_payload], [in_scope.id])
 
     def test_me_messages_lists_only_valid_received_directed_comments(self):
         valid_directed = Comment.objects.create(
