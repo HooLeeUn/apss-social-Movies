@@ -1730,6 +1730,64 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(allowed_delete.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Comment.objects.filter(pk=comment.pk).exists())
 
+    def test_author_can_patch_own_public_comment_text_without_changing_visibility(self):
+        comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body="Texto original",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        detail_url = reverse("comment-detail", kwargs={"pk": comment.pk})
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(detail_url, {"body": "Texto actualizado"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        comment.refresh_from_db()
+        self.assertEqual(comment.body, "Texto actualizado")
+        self.assertEqual(comment.visibility, Comment.VISIBILITY_PUBLIC)
+        self.assertIsNone(comment.target_user)
+
+    def test_author_can_edit_and_delete_own_directed_comment(self):
+        directed_comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"Mensaje inicial @{self.friend_user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        detail_url = reverse("comment-detail", kwargs={"pk": directed_comment.pk})
+
+        self.client.force_authenticate(user=self.user)
+        edit_response = self.client.patch(detail_url, {"body": f"Mensaje editado @{self.friend_user.username}"}, format="json")
+        self.assertEqual(edit_response.status_code, status.HTTP_200_OK)
+
+        directed_comment.refresh_from_db()
+        self.assertEqual(directed_comment.body, f"Mensaje editado @{self.friend_user.username}")
+        self.assertEqual(directed_comment.visibility, Comment.VISIBILITY_MENTIONED)
+        self.assertEqual(directed_comment.target_user_id, self.friend_user.id)
+
+        delete_response = self.client.delete(detail_url)
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Comment.objects.filter(pk=directed_comment.pk).exists())
+
+    def test_non_author_cannot_edit_or_delete_directed_comment(self):
+        directed_comment = Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"Privado @{self.friend_user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        detail_url = reverse("comment-detail", kwargs={"pk": directed_comment.pk})
+
+        self.client.force_authenticate(user=self.friend_user)
+        forbidden_edit = self.client.patch(detail_url, {"body": "Intento de edición"}, format="json")
+        forbidden_delete = self.client.delete(detail_url)
+
+        self.assertEqual(forbidden_edit.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(forbidden_delete.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class MoviePreferenceServiceTests(TestCase):
     def setUp(self):
