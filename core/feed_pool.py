@@ -29,19 +29,19 @@ class FeedPoolPayload:
 
 
 class DailyFeedPoolService:
-    POOL_SIZE_DEFAULT = 900
-    POOL_SIZE_MIN = 450
-    RETAIN_RATIO = 0.35
+    POOL_SIZE_DEFAULT = 10000
+    POOL_SIZE_MIN = 5000
+    RETAIN_RATIO = 0.45
 
     SOURCE_TARGETS = {
-        "strong_genre": 380,
-        "type": 220,
-        "director": 180,
-        "recent": 180,
-        "exploration": 140,
+        "strong_genre": 4000,
+        "type": 1500,
+        "director": 1200,
+        "recent": 1500,
+        "exploration": 1800,
     }
 
-    ROTATION_BAND = 0.10
+    ROTATION_BAND = 0.25
 
     def __init__(self, user, *, pool_size: int | None = None):
         self.user = user
