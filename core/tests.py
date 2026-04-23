@@ -16,6 +16,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from core.feed_pool import DailyFeedPoolService
 from core.models import (
     Comment,
     CommentReaction,
@@ -33,6 +34,7 @@ from core.models import (
     UserGenrePreference,
     UserTasteProfile,
     UserTypePreference,
+    UserDailyFeedPool,
 )
 from core.serializers import CommentSerializer
 from core.services import (
@@ -756,6 +758,73 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(first_titles[0], winner.title_english)
         self.assertEqual(second_titles[0], winner.title_english)
         self.assertNotEqual(first_titles[1:], second_titles[1:])
+
+
+class DailyFeedPoolServiceTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="pool_user",
+            email="pool_user@example.com",
+            password="test1234",
+        )
+        self.author = get_user_model().objects.create_user(
+            username="pool_author",
+            email="pool_author@example.com",
+            password="test1234",
+        )
+
+    def _create_movie(self, **overrides):
+        data = {
+            "author": self.author,
+            "title_english": overrides.pop("title_english", "Pool Movie"),
+            "genre": overrides.pop("genre", "Drama"),
+            "type": overrides.pop("type", Movie.MOVIE),
+            "external_rating": overrides.pop("external_rating", 8.0),
+            "external_votes": overrides.pop("external_votes", 5000),
+            "release_year": overrides.pop("release_year", 2023),
+        }
+        data.update(overrides)
+        return Movie.objects.create(**data)
+
+    def test_rebuilds_same_day_pool_when_version_changes(self):
+        service = DailyFeedPoolService(user=self.user, pool_size=5000)
+        today = timezone.localdate()
+        stale_pool = UserDailyFeedPool.objects.create(
+            user=self.user,
+            pool_date=today,
+            pool_version="legacy-v1",
+            expires_at=timezone.now() + timedelta(days=1),
+            rotation_seed=1,
+        )
+        self._create_movie(title_english="Candidate For New Pool", genre="Drama")
+
+        pool = service.get_daily_pool()
+
+        self.assertNotEqual(pool.id, stale_pool.id)
+        self.assertEqual(pool.pool_version, service._current_pool_version())
+        self.assertEqual(UserDailyFeedPool.objects.filter(user=self.user, pool_date=today).count(), 1)
+
+    def test_builds_strong_genre_candidates_for_sixth_preference(self):
+        UserTasteProfile.objects.create(user=self.user, ratings_count=20)
+        ranked_genres = ["Action", "Drama", "Comedy", "Horror", "Sci-Fi", "Documentary"]
+        for index, genre in enumerate(ranked_genres):
+            UserGenrePreference.objects.create(
+                user=self.user,
+                genre=genre,
+                count_10=12 - index,
+            )
+            self._create_movie(
+                title_english=f"{genre} Candidate",
+                genre=genre,
+                external_votes=7000 + index,
+                release_year=2024,
+            )
+
+        service = DailyFeedPoolService(user=self.user, pool_size=5000)
+        candidate_ids = service._build_candidate_ids(today=timezone.localdate())
+
+        documentary_movie = Movie.objects.get(title_english="Documentary Candidate")
+        self.assertIn(documentary_movie.id, candidate_ids)
 
 
 class MovieRatingEndpointTests(TestCase):

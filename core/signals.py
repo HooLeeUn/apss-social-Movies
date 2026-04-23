@@ -6,6 +6,7 @@ from .services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
+from .feed_pool import remove_movie_from_active_pool
 
 @receiver(post_save, sender=User)
 def create_profile(sender, instance, created, **kwargs):
@@ -34,6 +35,7 @@ def sync_preferences_after_movie_rating_save(sender, instance, **kwargs):
         new_score=instance.score,
         old_score=getattr(instance, "_old_score", None),
     )
+    remove_movie_from_active_pool(user_id=instance.user_id, movie_id=instance.movie_id)
 
 
 @receiver(post_delete, sender=MovieRating)
@@ -43,3 +45,4 @@ def sync_preferences_after_movie_rating_delete(sender, instance, **kwargs):
         movie=instance.movie,
         old_score=instance.score,
     )
+    remove_movie_from_active_pool(user_id=instance.user_id, movie_id=instance.movie_id)
