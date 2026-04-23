@@ -1,7 +1,9 @@
 from django.contrib import admin
 from django import forms
+from django.utils.html import format_html
 from django.db.models import Avg, Count
 from .models import (
+    AppBranding,
     Post,
     Rating,
     Follow,
@@ -164,3 +166,92 @@ class UserVisibilityBlockAdmin(admin.ModelAdmin):
     list_display = ("id", "owner", "blocked_user", "created_at")
     search_fields = ("owner__username", "blocked_user__username")
     autocomplete_fields = ("owner", "blocked_user")
+
+
+@admin.register(AppBranding)
+class AppBrandingAdmin(admin.ModelAdmin):
+    list_display = ("id", "app_name", "is_active", "updated_at")
+    list_filter = ("is_active", "updated_at")
+    search_fields = ("app_name",)
+    readonly_fields = (
+        "updated_at",
+        "default_logo_preview",
+        "login_logo_preview",
+        "signup_logo_preview",
+        "feed_logo_preview",
+        "movie_detail_logo_preview",
+        "profile_feed_logo_preview",
+        "visited_profile_logo_preview",
+        "personal_data_logo_preview",
+        "privacy_security_logo_preview",
+    )
+    fieldsets = (
+        ("General", {"fields": ("app_name", "is_active", "updated_at")}),
+        ("Default logo", {"fields": ("default_logo", "default_logo_preview")}),
+        (
+            "Screen logos",
+            {
+                "fields": (
+                    ("login_logo", "login_logo_preview"),
+                    ("signup_logo", "signup_logo_preview"),
+                    ("feed_logo", "feed_logo_preview"),
+                    ("movie_detail_logo", "movie_detail_logo_preview"),
+                    ("profile_feed_logo", "profile_feed_logo_preview"),
+                    ("visited_profile_logo", "visited_profile_logo_preview"),
+                    ("personal_data_logo", "personal_data_logo_preview"),
+                    ("privacy_security_logo", "privacy_security_logo_preview"),
+                )
+            },
+        ),
+    )
+
+
+    def has_add_permission(self, request):
+        has_permission = super().has_add_permission(request)
+        if not has_permission:
+            return False
+        return not AppBranding.objects.exists()
+
+    def _render_image_preview(self, image_field):
+        if not image_field:
+            return "—"
+        return format_html(
+            '<img src="{}" style="max-height: 64px; max-width: 220px; border-radius: 8px;" />',
+            image_field.url,
+        )
+
+    @admin.display(description="Preview")
+    def default_logo_preview(self, obj):
+        return self._render_image_preview(obj.default_logo)
+
+    @admin.display(description="Preview")
+    def login_logo_preview(self, obj):
+        return self._render_image_preview(obj.login_logo)
+
+    @admin.display(description="Preview")
+    def signup_logo_preview(self, obj):
+        return self._render_image_preview(obj.signup_logo)
+
+    @admin.display(description="Preview")
+    def feed_logo_preview(self, obj):
+        return self._render_image_preview(obj.feed_logo)
+
+    @admin.display(description="Preview")
+    def movie_detail_logo_preview(self, obj):
+        return self._render_image_preview(obj.movie_detail_logo)
+
+    @admin.display(description="Preview")
+    def profile_feed_logo_preview(self, obj):
+        return self._render_image_preview(obj.profile_feed_logo)
+
+    @admin.display(description="Preview")
+    def visited_profile_logo_preview(self, obj):
+        return self._render_image_preview(obj.visited_profile_logo)
+
+    @admin.display(description="Preview")
+    def personal_data_logo_preview(self, obj):
+        return self._render_image_preview(obj.personal_data_logo)
+
+    @admin.display(description="Preview")
+    def privacy_security_logo_preview(self, obj):
+        return self._render_image_preview(obj.privacy_security_logo)

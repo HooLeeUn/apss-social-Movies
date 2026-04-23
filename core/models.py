@@ -3,6 +3,7 @@ import re
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value, CharField
@@ -924,3 +925,45 @@ class CommentReaction(models.Model):
 
     def __str__(self):
         return f"CommentReaction(comment={self.comment_id}, user={self.user_id}, reaction={self.reaction_type})"
+
+
+class AppBranding(models.Model):
+    app_name = models.CharField(max_length=120, default="MiAppSocialMovies")
+    default_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    login_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    signup_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    feed_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    movie_detail_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    profile_feed_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    visited_profile_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    personal_data_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    privacy_security_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "App Branding"
+        verbose_name_plural = "App Branding"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_active"],
+                condition=models.Q(is_active=True),
+                name="unique_active_app_branding",
+            ),
+        ]
+        ordering = ["-is_active", "-updated_at", "-id"]
+
+    def __str__(self):
+        status = "active" if self.is_active else "inactive"
+        return f"AppBranding({self.app_name} - {status})"
+
+    def clean(self):
+        super().clean()
+        if self.pk is None and AppBranding.objects.exists():
+            raise ValidationError("Only one App Branding configuration is allowed.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        result = super().save(*args, **kwargs)
+        cache.delete("app_branding_active_v1")
+        return result

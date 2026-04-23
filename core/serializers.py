@@ -6,6 +6,7 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from .models import (
+    AppBranding,
     Comment,
     CommentReaction,
     Friendship,
@@ -34,6 +35,72 @@ def calculate_age_from_birth_date(birth_date):
     if (today.month, today.day) < (birth_date.month, birth_date.day):
         years -= 1
     return years
+
+
+class AppBrandingSerializer(serializers.ModelSerializer):
+    default_logo_url = serializers.SerializerMethodField()
+    login_logo_url = serializers.SerializerMethodField()
+    signup_logo_url = serializers.SerializerMethodField()
+    feed_logo_url = serializers.SerializerMethodField()
+    movie_detail_logo_url = serializers.SerializerMethodField()
+    profile_feed_logo_url = serializers.SerializerMethodField()
+    visited_profile_logo_url = serializers.SerializerMethodField()
+    personal_data_logo_url = serializers.SerializerMethodField()
+    privacy_security_logo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AppBranding
+        fields = [
+            "app_name",
+            "default_logo_url",
+            "login_logo_url",
+            "signup_logo_url",
+            "feed_logo_url",
+            "movie_detail_logo_url",
+            "profile_feed_logo_url",
+            "visited_profile_logo_url",
+            "personal_data_logo_url",
+            "privacy_security_logo_url",
+            "updated_at",
+        ]
+
+    def _absolute_media_url(self, image):
+        if not image:
+            return None
+        request = self.context.get("request")
+        image_url = image.url
+        return request.build_absolute_uri(image_url) if request else image_url
+
+    def _slot_or_default(self, obj, slot_name):
+        slot_logo = getattr(obj, slot_name, None)
+        return self._absolute_media_url(slot_logo or obj.default_logo)
+
+    def get_default_logo_url(self, obj):
+        return self._absolute_media_url(obj.default_logo)
+
+    def get_login_logo_url(self, obj):
+        return self._slot_or_default(obj, "login_logo")
+
+    def get_signup_logo_url(self, obj):
+        return self._slot_or_default(obj, "signup_logo")
+
+    def get_feed_logo_url(self, obj):
+        return self._slot_or_default(obj, "feed_logo")
+
+    def get_movie_detail_logo_url(self, obj):
+        return self._slot_or_default(obj, "movie_detail_logo")
+
+    def get_profile_feed_logo_url(self, obj):
+        return self._slot_or_default(obj, "profile_feed_logo")
+
+    def get_visited_profile_logo_url(self, obj):
+        return self._slot_or_default(obj, "visited_profile_logo")
+
+    def get_personal_data_logo_url(self, obj):
+        return self._slot_or_default(obj, "personal_data_logo")
+
+    def get_privacy_security_logo_url(self, obj):
+        return self._slot_or_default(obj, "privacy_security_logo")
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

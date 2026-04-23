@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
+    AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
@@ -27,6 +28,7 @@ from .serializers import (
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
 )
 from .models import (
+    AppBranding,
     Comment,
     CommentReaction,
     Follow,
@@ -63,6 +65,7 @@ from django.utils import timezone
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+BRANDING_CACHE_KEY = "app_branding_active_v1"
 
 
 def split_search_terms(search):
@@ -295,6 +298,28 @@ class UserSearchView(APIView):
         query = (raw_query or "").strip()
         query = query.lstrip("@").strip()
         return query
+
+
+class AppBrandingView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        payload = cache.get(BRANDING_CACHE_KEY)
+        if payload is not None:
+            return Response(payload, status=status.HTTP_200_OK)
+
+        branding = (
+            AppBranding.objects.filter(is_active=True).order_by("-updated_at", "-id").first()
+            or AppBranding.objects.order_by("-updated_at", "-id").first()
+        )
+        if not branding:
+            payload = {"app_name": "MiAppSocialMovies", "default_logo_url": None}
+            cache.set(BRANDING_CACHE_KEY, payload, timeout=300)
+            return Response(payload, status=status.HTTP_200_OK)
+
+        payload = AppBrandingSerializer(branding, context={"request": request}).data
+        cache.set(BRANDING_CACHE_KEY, payload, timeout=300)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class UserProfileView(RetrieveAPIView):

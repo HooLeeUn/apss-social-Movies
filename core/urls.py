@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    UserSearchView, UserProfileView, MeView, MePersonalDataView, FollowToggleView, UserFollowersListView, UserFollowingListView,
+    AppBrandingView, UserSearchView, UserProfileView, MeView, MePersonalDataView, FollowToggleView, UserFollowersListView, UserFollowingListView,
     MeFollowingListView, UserFriendsListView,
     FriendshipRequestCreateView, FriendshipRequestAcceptView, FriendshipRequestRejectView,
     FriendshipRequestCancelView, FriendshipDeleteView, FriendsListView,
@@ -16,6 +16,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path("branding/", AppBrandingView.as_view(), name="app-branding"),
     path("register/", RegisterView.as_view(), name="register"),
     path("users/search/", UserSearchView.as_view(), name="user-search"),
     path("users/search", UserSearchView.as_view(), name="user-search-no-slash"),
