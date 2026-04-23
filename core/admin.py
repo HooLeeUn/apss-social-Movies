@@ -205,6 +205,13 @@ class AppBrandingAdmin(admin.ModelAdmin):
         ),
     )
 
+
+    def has_add_permission(self, request):
+        has_permission = super().has_add_permission(request)
+        if not has_permission:
+            return False
+        return not AppBranding.objects.exists()
+
     def _render_image_preview(self, image_field):
         if not image_field:
             return "—"

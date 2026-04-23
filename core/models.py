@@ -957,7 +957,13 @@ class AppBranding(models.Model):
         status = "active" if self.is_active else "inactive"
         return f"AppBranding({self.app_name} - {status})"
 
+    def clean(self):
+        super().clean()
+        if self.pk is None and AppBranding.objects.exists():
+            raise ValidationError("Only one App Branding configuration is allowed.")
+
     def save(self, *args, **kwargs):
+        self.full_clean()
         result = super().save(*args, **kwargs)
         cache.delete("app_branding_active_v1")
         return result
