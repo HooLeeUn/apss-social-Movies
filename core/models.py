@@ -558,6 +558,7 @@ class UserDailyFeedPool(models.Model):
         related_name="daily_feed_pools",
     )
     pool_date = models.DateField(db_index=True)
+    pool_version = models.CharField(max_length=64, default="v1", db_index=True)
     expires_at = models.DateTimeField()
     rotation_seed = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
