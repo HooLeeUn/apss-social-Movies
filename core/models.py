@@ -550,6 +550,56 @@ class UserDirectorPreference(PreferenceDistributionMixin):
     def __str__(self):
         return f"UserDirectorPreference(user={self.user_id}, director={self.director}, score={self.score})"
 
+
+class UserDailyFeedPool(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="daily_feed_pools",
+    )
+    pool_date = models.DateField(db_index=True)
+    expires_at = models.DateTimeField()
+    rotation_seed = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "pool_date"], name="unique_user_daily_feed_pool"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "pool_date"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"UserDailyFeedPool(user={self.user_id}, pool_date={self.pool_date})"
+
+
+class UserDailyFeedCandidate(models.Model):
+    pool = models.ForeignKey(
+        "UserDailyFeedPool",
+        on_delete=models.CASCADE,
+        related_name="candidates",
+    )
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="daily_feed_candidates")
+    base_rank = models.PositiveIntegerField(default=0)
+    base_score = models.FloatField(default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["pool", "movie"], name="unique_movie_per_daily_pool"),
+        ]
+        indexes = [
+            models.Index(fields=["pool", "base_rank"]),
+            models.Index(fields=["pool", "-base_score"]),
+            models.Index(fields=["movie"]),
+        ]
+
+    def __str__(self):
+        return f"UserDailyFeedCandidate(pool={self.pool_id}, movie={self.movie_id}, rank={self.base_rank})"
+
+
 class Rating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ratings")
     post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="ratings")
