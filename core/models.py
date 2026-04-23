@@ -559,7 +559,7 @@ class UserDailyFeedPool(models.Model):
     )
     pool_date = models.DateField(db_index=True)
     expires_at = models.DateTimeField()
-    rotation_seed = models.PositiveIntegerField(default=0)
+    rotation_seed = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
