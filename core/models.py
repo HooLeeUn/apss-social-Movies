@@ -927,6 +927,75 @@ class CommentReaction(models.Model):
         return f"CommentReaction(comment={self.comment_id}, user={self.user_id}, reaction={self.reaction_type})"
 
 
+class UserNotification(models.Model):
+    TYPE_PRIVATE_MESSAGE = "private_message"
+    TYPE_PUBLIC_COMMENT_REACTION = "public_comment_reaction"
+    TYPE_PRIVATE_COMMENT_REACTION = "private_comment_reaction"
+    TYPE_CHOICES = [
+        (TYPE_PRIVATE_MESSAGE, "Private message"),
+        (TYPE_PUBLIC_COMMENT_REACTION, "Public comment reaction"),
+        (TYPE_PRIVATE_COMMENT_REACTION, "Private comment reaction"),
+    ]
+
+    TARGET_ACTIVITY = "activity"
+    TARGET_PRIVATE_INBOX = "private_inbox"
+    TARGET_TAB_CHOICES = [
+        (TARGET_ACTIVITY, "Activity"),
+        (TARGET_PRIVATE_INBOX, "Private inbox"),
+    ]
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications_received",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications_triggered",
+        null=True,
+        blank=True,
+    )
+    comment = models.ForeignKey(
+        "Comment",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    movie = models.ForeignKey(
+        "Movie",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    type = models.CharField(max_length=40, choices=TYPE_CHOICES)
+    target_tab = models.CharField(max_length=20, choices=TARGET_TAB_CHOICES)
+    reaction_type = models.CharField(
+        max_length=10,
+        choices=CommentReaction.REACTION_CHOICES,
+        null=True,
+        blank=True,
+    )
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recipient", "actor", "comment", "type"],
+                name="unique_user_notification_per_actor_comment_type",
+            ),
+        ]
+
+    def __str__(self):
+        return f"UserNotification({self.type} -> {self.recipient_id})"
+
+
 class AppBranding(models.Model):
     app_name = models.CharField(max_length=120, default="MiAppSocialMovies")
     default_logo = models.ImageField(upload_to="branding/", blank=True, null=True)

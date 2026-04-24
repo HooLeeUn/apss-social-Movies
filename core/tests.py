@@ -35,6 +35,7 @@ from core.models import (
     UserTasteProfile,
     UserTypePreference,
     UserDailyFeedPool,
+    UserNotification,
 )
 from core.serializers import CommentSerializer
 from core.services import (
@@ -2409,6 +2410,110 @@ class CommentReactionAPITests(TestCase):
         self.assertEqual(response.data[0]["likes_count"], 1)
         self.assertEqual(response.data[0]["dislikes_count"], 1)
         self.assertEqual(response.data[0]["my_reaction"], CommentReaction.REACT_LIKE)
+
+
+class NotificationsAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user_model = get_user_model()
+        self.owner = self.user_model.objects.create_user(
+            username="owner_user", email="owner@example.com", password="test1234"
+        )
+        self.actor = self.user_model.objects.create_user(
+            username="actor_user", email="actor@example.com", password="test1234"
+        )
+        self.movie = Movie.objects.create(
+            author=self.owner,
+            title_english="Notification movie",
+            type=Movie.MOVIE,
+        )
+        self.public_comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body="Comentario público",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        self.private_comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            body=f"Comentario privado para @{self.actor.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.actor,
+        )
+        self.inbox_message = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body=f"Hola @{self.owner.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.owner,
+            is_read=False,
+        )
+        self.notifications_url = reverse("me-notifications")
+        self.notifications_mark_read_url = reverse("me-notifications-mark-read")
+
+    def _reaction_url(self, comment):
+        return reverse("comment-reaction", kwargs={"pk": comment.pk})
+
+    def test_creates_notification_for_public_comment_reaction(self):
+        self.client.force_authenticate(self.actor)
+        response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        notification = UserNotification.objects.get(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+        )
+        self.assertEqual(notification.type, UserNotification.TYPE_PUBLIC_COMMENT_REACTION)
+        self.assertEqual(notification.target_tab, UserNotification.TARGET_ACTIVITY)
+        self.assertFalse(notification.is_read)
+
+    def test_creates_notification_for_private_comment_reaction(self):
+        self.client.force_authenticate(self.actor)
+        response = self.client.put(
+            self._reaction_url(self.private_comment),
+            {"reaction": CommentReaction.REACT_DISLIKE},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        notification = UserNotification.objects.get(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.private_comment,
+        )
+        self.assertEqual(notification.type, UserNotification.TYPE_PRIVATE_COMMENT_REACTION)
+        self.assertEqual(notification.target_tab, UserNotification.TARGET_PRIVATE_INBOX)
+        self.assertEqual(notification.reaction_type, CommentReaction.REACT_DISLIKE)
+
+    def test_does_not_create_notification_for_self_reaction(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(UserNotification.objects.filter(recipient=self.owner).exists())
+
+    def test_total_unread_includes_private_messages_and_reactions(self):
+        UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.notifications_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_unread"], 2)
+        self.assertIn(response.data["items"][0]["target_tab"], {"activity", "private_inbox"})
 
 
 class WeeklyRecommendationsTests(TestCase):

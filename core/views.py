@@ -42,6 +42,7 @@ from .models import (
     UserDirectorPreference,
     UserGenrePreference,
     UserTypePreference,
+    UserNotification,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
@@ -209,6 +210,52 @@ def get_valid_directed_comment_ids(queryset):
         "target_user__username",
     )
     return [comment.id for comment in optimized_queryset if is_valid_directed_comment(comment)]
+
+
+def get_unread_private_message_count(user):
+    queryset = (
+        Comment.objects.filter(
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=user,
+            is_read=False,
+        )
+        .exclude(author=user)
+        .select_related("target_user")
+        .order_by("-created_at", "-id")
+    )
+    valid_ids = get_valid_directed_comment_ids(queryset)
+    if not valid_ids:
+        return 0
+    return Comment.objects.filter(id__in=valid_ids, is_read=False).count()
+
+
+def build_actor_payload(actor, request):
+    if not actor:
+        return None
+    avatar = None
+    if hasattr(actor, "profile") and actor.profile.avatar:
+        avatar_url = actor.profile.avatar.url
+        avatar = request.build_absolute_uri(avatar_url) if request else avatar_url
+    full_name = f"{(actor.first_name or '').strip()} {(actor.last_name or '').strip()}".strip()
+    return {
+        "id": actor.id,
+        "username": actor.username,
+        "display_name": full_name or actor.username,
+        "avatar": avatar,
+    }
+
+
+def build_notification_message(notification):
+    actor_username = notification.actor.username if notification.actor else "Alguien"
+    if notification.type == UserNotification.TYPE_PUBLIC_COMMENT_REACTION:
+        if notification.reaction_type == CommentReaction.REACT_DISLIKE:
+            return f"A {actor_username} no le gustó tu comentario público"
+        return f"A {actor_username} le gustó tu comentario público"
+    if notification.type == UserNotification.TYPE_PRIVATE_COMMENT_REACTION:
+        if notification.reaction_type == CommentReaction.REACT_DISLIKE:
+            return f"A {actor_username} no le gustó tu comentario privado"
+        return f"A {actor_username} le gustó tu comentario privado"
+    return "Tienes una notificación"
 
 
 def filter_comments_visible_to_user(queryset, user):
@@ -1193,9 +1240,7 @@ class MeMessagesSummaryView(APIView):
         )
         valid_ids = get_valid_directed_comment_ids(queryset)
         total_messages = len(valid_ids)
-        unread_count = 0
-        if valid_ids:
-            unread_count = Comment.objects.filter(id__in=valid_ids, is_read=False).count()
+        unread_count = get_unread_private_message_count(request.user)
 
         return Response(
             {
@@ -1224,6 +1269,136 @@ class MeMessagesMarkAsReadView(APIView):
         if valid_ids:
             updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
         return Response({"updated": updated})
+
+
+class MeNotificationsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        unread_private_messages = get_unread_private_message_count(request.user)
+        unread_reactions = UserNotification.objects.filter(
+            recipient=request.user,
+            is_read=False,
+        ).count()
+
+        reaction_notifications = (
+            UserNotification.objects.filter(recipient=request.user)
+            .select_related("actor", "actor__profile", "movie", "comment")
+            .order_by("-created_at", "-id")
+        )
+        reaction_items = [
+            {
+                "id": item.id,
+                "type": item.type,
+                "actor": build_actor_payload(item.actor, request),
+                "target_tab": item.target_tab,
+                "message": build_notification_message(item),
+                "created_at": item.created_at,
+                "is_read": item.is_read,
+                "object": {
+                    "comment_id": item.comment_id,
+                    "movie": (
+                        {
+                            "id": item.movie.id,
+                            "title_english": item.movie.title_english,
+                            "title_spanish": item.movie.title_spanish,
+                        }
+                        if item.movie
+                        else None
+                    ),
+                },
+            }
+            for item in reaction_notifications
+        ]
+
+        private_queryset = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=request.user,
+            )
+            .exclude(author=request.user)
+            .select_related("author", "author__profile", "movie", "target_user")
+            .order_by("-created_at", "-id")
+        )
+        valid_private_messages = filter_valid_directed_comments(private_queryset)
+        private_items = [
+            {
+                "id": f"pm-{comment.id}",
+                "type": UserNotification.TYPE_PRIVATE_MESSAGE,
+                "actor": build_actor_payload(comment.author, request),
+                "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
+                "message": f"Tienes un mensaje privado de {comment.author.username}",
+                "created_at": comment.created_at,
+                "is_read": comment.is_read,
+                "object": {
+                    "comment_id": comment.id,
+                    "movie": {
+                        "id": comment.movie.id,
+                        "title_english": comment.movie.title_english,
+                        "title_spanish": comment.movie.title_spanish,
+                    },
+                },
+            }
+            for comment in valid_private_messages
+        ]
+
+        items = sorted(
+            [*reaction_items, *private_items],
+            key=lambda payload: payload["created_at"],
+            reverse=True,
+        )
+        return Response(
+            {
+                "total_unread": unread_private_messages + unread_reactions,
+                "items": items,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MeNotificationsMarkReadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        notification_type = request.data.get("type")
+        target_tab = request.data.get("target_tab")
+
+        notifications_qs = UserNotification.objects.filter(
+            recipient=request.user,
+            is_read=False,
+        )
+        if notification_type:
+            notifications_qs = notifications_qs.filter(type=notification_type)
+        if target_tab:
+            notifications_qs = notifications_qs.filter(target_tab=target_tab)
+        notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
+
+        messages_updated = 0
+        should_mark_private_messages = (
+            not notification_type
+            and (not target_tab or target_tab == UserNotification.TARGET_PRIVATE_INBOX)
+        )
+        if should_mark_private_messages:
+            queryset = (
+                Comment.objects.filter(
+                    visibility=Comment.VISIBILITY_MENTIONED,
+                    target_user=request.user,
+                    is_read=False,
+                )
+                .exclude(author=request.user)
+                .order_by("-created_at", "-id")
+            )
+            valid_ids = get_valid_directed_comment_ids(queryset)
+            if valid_ids:
+                messages_updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
+
+        return Response(
+            {
+                "updated_notifications": notifications_updated,
+                "updated_private_messages": messages_updated,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class MovieDirectedCommentsListView(MovieCommentsListCreateView):
@@ -1979,12 +2154,37 @@ class CommentReactionView(APIView):
         comment = self.get_comment(pk)
         serializer = CommentReactionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        reaction_type = serializer.validated_data["reaction"]
 
         CommentReaction.objects.update_or_create(
             comment=comment,
             user=request.user,
-            defaults={"reaction_type": serializer.validated_data["reaction"]},
+            defaults={"reaction_type": reaction_type},
         )
+        if request.user.id != comment.author_id:
+            notification_type = (
+                UserNotification.TYPE_PRIVATE_COMMENT_REACTION
+                if comment.visibility == Comment.VISIBILITY_MENTIONED
+                else UserNotification.TYPE_PUBLIC_COMMENT_REACTION
+            )
+            target_tab = (
+                UserNotification.TARGET_PRIVATE_INBOX
+                if comment.visibility == Comment.VISIBILITY_MENTIONED
+                else UserNotification.TARGET_ACTIVITY
+            )
+            UserNotification.objects.update_or_create(
+                recipient=comment.author,
+                actor=request.user,
+                comment=comment,
+                type=notification_type,
+                defaults={
+                    "movie": comment.movie,
+                    "target_tab": target_tab,
+                    "reaction_type": reaction_type,
+                    "is_read": False,
+                    "read_at": None,
+                },
+            )
 
         annotated_comment = annotate_comments_for_user(Comment.objects.filter(pk=comment.pk), request.user).get()
         return Response(
