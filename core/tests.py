@@ -2450,6 +2450,7 @@ class NotificationsAPITests(TestCase):
         )
         self.notifications_url = reverse("me-notifications")
         self.notifications_mark_read_url = reverse("me-notifications-mark-read")
+        self.me_messages_url = reverse("me-messages")
 
     def _reaction_url(self, comment):
         return reverse("comment-reaction", kwargs={"pk": comment.pk})
@@ -2514,6 +2515,104 @@ class NotificationsAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["total_unread"], 2)
         self.assertIn(response.data["items"][0]["target_tab"], {"activity", "private_inbox"})
+
+    def test_notifications_expose_current_reaction_value_after_switch_to_dislike(self):
+        self.client.force_authenticate(self.actor)
+        self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        self.client.put(
+            self._reaction_url(self.public_comment),
+            {"reaction": CommentReaction.REACT_DISLIKE},
+            format="json",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.notifications_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        public_reaction_items = [
+            item
+            for item in response.data["items"]
+            if item["type"] == UserNotification.TYPE_PUBLIC_COMMENT_REACTION
+        ]
+        self.assertEqual(len(public_reaction_items), 1)
+        self.assertEqual(public_reaction_items[0]["reaction_value"], CommentReaction.REACT_DISLIKE)
+        self.assertEqual(public_reaction_items[0]["reaction_type"], CommentReaction.REACT_DISLIKE)
+
+    def test_me_messages_returns_private_reactions_received_and_given(self):
+        outsider = self.user_model.objects.create_user(
+            username="outsider_user", email="outsider@example.com", password="test1234"
+        )
+        outgoing_private_comment = Comment.objects.create(
+            author=outsider,
+            movie=self.movie,
+            body=f"Privado para @{self.actor.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.actor,
+        )
+
+        self.client.force_authenticate(self.actor)
+        self.client.put(
+            self._reaction_url(self.private_comment),
+            {"reaction": CommentReaction.REACT_LIKE},
+            format="json",
+        )
+        self.client.put(
+            self._reaction_url(outgoing_private_comment),
+            {"reaction": CommentReaction.REACT_DISLIKE},
+            format="json",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.me_messages_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        private_reactions = [
+            item
+            for item in response.data
+            if item["type"] == UserNotification.TYPE_PRIVATE_COMMENT_REACTION
+        ]
+        self.assertEqual(len(private_reactions), 1)
+        received = private_reactions[0]
+        self.assertTrue(received["is_received_reaction"])
+        self.assertFalse(received["is_given_reaction"])
+        self.assertEqual(received["reaction_value"], CommentReaction.REACT_LIKE)
+        self.assertEqual(received["actor"]["username"], self.actor.username)
+        self.assertEqual(received["comment_author"]["username"], self.owner.username)
+
+        self.client.force_authenticate(self.actor)
+        actor_response = self.client.get(self.me_messages_url)
+        self.assertEqual(actor_response.status_code, status.HTTP_200_OK)
+        actor_private_reactions = [
+            item
+            for item in actor_response.data
+            if item["type"] == UserNotification.TYPE_PRIVATE_COMMENT_REACTION
+        ]
+        self.assertEqual(len(actor_private_reactions), 2)
+        given_reaction = next(item for item in actor_private_reactions if item["reaction_value"] == CommentReaction.REACT_DISLIKE)
+        self.assertFalse(given_reaction["is_received_reaction"])
+        self.assertTrue(given_reaction["is_given_reaction"])
+
+    def test_me_messages_hides_private_reaction_after_delete(self):
+        self.client.force_authenticate(self.actor)
+        self.client.put(
+            self._reaction_url(self.private_comment),
+            {"reaction": CommentReaction.REACT_DISLIKE},
+            format="json",
+        )
+        self.client.delete(self._reaction_url(self.private_comment))
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.me_messages_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        private_reactions = [
+            item
+            for item in response.data
+            if item["type"] == UserNotification.TYPE_PRIVATE_COMMENT_REACTION
+        ]
+        self.assertEqual(private_reactions, [])
 
 
 class WeeklyRecommendationsTests(TestCase):
