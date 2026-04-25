@@ -253,8 +253,8 @@ def build_notification_message(notification):
         return f"A {actor_username} le gustó tu comentario público"
     if notification.type == UserNotification.TYPE_PRIVATE_COMMENT_REACTION:
         if notification.reaction_type == CommentReaction.REACT_DISLIKE:
-            return f"A {actor_username} no le gustó tu comentario privado"
-        return f"A {actor_username} le gustó tu comentario privado"
+            return f"A {actor_username} no le gustó tu mensaje"
+        return f"A {actor_username} le gustó tu mensaje"
     return "Tienes una notificación"
 
 
@@ -1259,11 +1259,18 @@ class MeMessagesView(generics.ListAPIView):
         )
 
         private_reactions_qs = (
-            get_current_reaction_notifications_queryset(request.user)
-            .filter(type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION)
-            .select_related("actor", "actor__profile", "comment", "movie")
+            CommentReaction.objects.filter(
+                comment__visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .filter(
+                Q(comment__author=request.user, user__isnull=False)
+                | Q(user=request.user, comment__author__isnull=False)
+            )
+            .exclude(user_id=F("comment__author_id"))
+            .select_related("user", "user__profile", "comment", "comment__author", "comment__movie")
             .order_by("-created_at", "-id")
         )
+        private_reactions = [item for item in private_reactions_qs if item.comment.has_valid_target_mention()]
 
         message_items = MeMessageSerializer(
             private_messages,
@@ -1272,28 +1279,45 @@ class MeMessagesView(generics.ListAPIView):
         ).data
         reaction_items = [
             {
-                "id": item.id,
+                "id": f"private-reaction-{item.id}",
                 "type": UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
                 "reaction_type": item.reaction_type,
-                "created_at": item.created_at,
-                "actor": build_actor_payload(item.actor, request),
+                "reaction_value": item.reaction_type,
+                "created_at": item.created_at.isoformat(),
+                "actor": build_actor_payload(item.user, request),
                 "movie": (
                     {
-                        "id": item.movie.id,
-                        "title_english": item.movie.title_english,
-                        "title_spanish": item.movie.title_spanish,
-                        "type": item.movie.type,
-                        "genre": item.movie.genre,
+                        "id": item.comment.movie.id,
+                        "title_english": item.comment.movie.title_english,
+                        "title_spanish": item.comment.movie.title_spanish,
+                        "type": item.comment.movie.type,
+                        "genre": item.comment.movie.genre,
                     }
-                    if item.movie
+                    if item.comment and item.comment.movie
                     else None
                 ),
                 "comment_id": item.comment_id,
-                "direction": "received",
-                "message": build_notification_message(item),
-                "is_read": item.is_read,
+                "comment_author": build_actor_payload(item.comment.author, request) if item.comment else None,
+                "direction": "received" if item.comment and item.comment.author_id == request.user.id else "sent",
+                "is_received_reaction": bool(item.comment and item.comment.author_id == request.user.id),
+                "is_given_reaction": bool(item.user_id == request.user.id),
+                "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
+                "message": (
+                    (
+                        f"A {item.user.username} no le gustó tu mensaje"
+                        if item.reaction_type == CommentReaction.REACT_DISLIKE
+                        else f"A {item.user.username} le gustó tu mensaje"
+                    )
+                    if item.comment and item.comment.author_id == request.user.id
+                    else (
+                        f"No te gustó el mensaje de {item.comment.author.username}"
+                        if item.reaction_type == CommentReaction.REACT_DISLIKE
+                        else f"Te gustó el mensaje de {item.comment.author.username}"
+                    )
+                ),
+                "is_read": True,
             }
-            for item in private_reactions_qs
+            for item in private_reactions
         ]
 
         items = sorted(
@@ -1369,10 +1393,20 @@ class MeNotificationsView(APIView):
                 "actor": build_actor_payload(item.actor, request),
                 "target_tab": item.target_tab,
                 "message": build_notification_message(item),
+                "reaction_type": item.reaction_type,
+                "reaction_value": item.reaction_type,
+                "is_received_reaction": bool(
+                    item.type in {
+                        UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+                        UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                    }
+                ),
+                "is_given_reaction": False,
                 "created_at": item.created_at,
                 "is_read": item.is_read,
                 "object": {
                     "comment_id": item.comment_id,
+                    "comment_author": build_actor_payload(item.comment.author, request) if item.comment else None,
                     "movie": (
                         {
                             "id": item.movie.id,
