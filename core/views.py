@@ -202,12 +202,24 @@ def filter_valid_directed_comments(queryset):
 
 
 def get_valid_directed_comment_ids(queryset):
-    optimized_queryset = queryset.select_related("target_user").only(
+    optimized_queryset = queryset.select_related(
+        "author",
+        "author__profile",
+        "movie",
+        "target_user",
+        "target_user__profile",
+    ).only(
         "id",
+        "author",
+        "author__username",
+        "author__profile",
         "visibility",
         "body",
+        "movie",
         "target_user_id",
+        "target_user",
         "target_user__username",
+        "target_user__profile",
     )
     return [comment.id for comment in optimized_queryset if is_valid_directed_comment(comment)]
 
