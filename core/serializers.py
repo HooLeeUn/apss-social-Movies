@@ -465,9 +465,9 @@ class SocialActivitySerializer(serializers.Serializer):
     activity_type = serializers.ChoiceField(choices=[
         "rating",
         "public_comment",
-        "directed_comment",
-        "public_comment_like",
-        "public_comment_dislike",
+        "public_comment_reaction",
+        "private_message",
+        "private_comment_reaction",
     ])
     type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
@@ -478,14 +478,16 @@ class SocialActivitySerializer(serializers.Serializer):
     target_user = serializers.SerializerMethodField()
     comment_text = serializers.SerializerMethodField()
     comment_id = serializers.SerializerMethodField()
+    direction = serializers.SerializerMethodField()
+    reaction_type = serializers.SerializerMethodField()
 
     def get_type(self, obj):
         mapping = {
             "rating": "rating",
-            "public_comment": "comment",
-            "directed_comment": "comment",
-            "public_comment_like": "like",
-            "public_comment_dislike": "dislike",
+            "public_comment": "public_comment",
+            "public_comment_reaction": "public_comment_reaction",
+            "private_message": "private_message",
+            "private_comment_reaction": "private_comment_reaction",
         }
         return mapping.get(obj.get("activity_type"), obj.get("activity_type"))
 
@@ -502,6 +504,12 @@ class SocialActivitySerializer(serializers.Serializer):
 
     def get_comment_id(self, obj):
         return (obj.get("payload") or {}).get("comment_id")
+
+    def get_direction(self, obj):
+        return (obj.get("payload") or {}).get("direction")
+
+    def get_reaction_type(self, obj):
+        return (obj.get("payload") or {}).get("reaction_type")
 
     def get_actor(self, obj):
         actor = obj.get("actor") or {}
@@ -813,10 +821,20 @@ class MeMessageMovieSerializer(serializers.ModelSerializer):
 class MeMessageSerializer(serializers.ModelSerializer):
     author = MeMessageAuthorSerializer(read_only=True)
     movie = MeMessageMovieSerializer(read_only=True)
+    direction = serializers.SerializerMethodField()
+    type = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
-        fields = ["id", "body", "created_at", "author", "movie", "is_read"]
+        fields = ["id", "type", "body", "created_at", "author", "movie", "is_read", "direction"]
+
+    def get_direction(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return "sent" if user and obj.author_id == user.id else "received"
+
+    def get_type(self, obj):
+        return "private_message"
 
 
 class PublicCommentFeedSerializer(CommentSerializer):

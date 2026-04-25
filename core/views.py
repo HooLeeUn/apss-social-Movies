@@ -1209,20 +1209,66 @@ class MeMessagesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MeMessageSerializer
 
-    def get_queryset(self):
-        queryset = (
+    def list(self, request, *args, **kwargs):
+        private_messages_qs = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=self.request.user,
             )
-            .exclude(author=self.request.user)
+            .filter(Q(target_user=request.user) | Q(author=request.user))
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
         )
-        return annotate_comments_for_user(
-            filter_valid_directed_comments(queryset),
-            self.request.user,
+        private_messages = annotate_comments_for_user(
+            filter_valid_directed_comments(private_messages_qs),
+            request.user,
         )
+
+        private_reactions_qs = (
+            UserNotification.objects.filter(
+                recipient=request.user,
+                type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            )
+            .select_related("actor", "actor__profile", "comment", "movie")
+            .order_by("-created_at", "-id")
+        )
+
+        message_items = MeMessageSerializer(
+            private_messages,
+            many=True,
+            context={"request": request},
+        ).data
+        reaction_items = [
+            {
+                "id": item.id,
+                "type": UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                "reaction_type": item.reaction_type,
+                "created_at": item.created_at,
+                "actor": build_actor_payload(item.actor, request),
+                "movie": (
+                    {
+                        "id": item.movie.id,
+                        "title_english": item.movie.title_english,
+                        "title_spanish": item.movie.title_spanish,
+                        "type": item.movie.type,
+                        "genre": item.movie.genre,
+                    }
+                    if item.movie
+                    else None
+                ),
+                "comment_id": item.comment_id,
+                "direction": "received",
+                "message": build_notification_message(item),
+                "is_read": item.is_read,
+            }
+            for item in private_reactions_qs
+        ]
+
+        items = sorted(
+            [*message_items, *reaction_items],
+            key=lambda payload: payload["created_at"],
+            reverse=True,
+        )
+        return Response(items, status=status.HTTP_200_OK)
 
 
 class MeMessagesSummaryView(APIView):
@@ -1360,6 +1406,18 @@ class MeNotificationsMarkReadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        notification_id = request.data.get("id")
+        notification_ids = request.data.get("ids") or []
+        if notification_id is not None:
+            notification_ids = [*notification_ids, notification_id]
+
+        normalized_notification_ids = []
+        for raw_id in notification_ids:
+            try:
+                normalized_notification_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+
         notification_type = request.data.get("type")
         target_tab = request.data.get("target_tab")
 
@@ -1367,6 +1425,8 @@ class MeNotificationsMarkReadView(APIView):
             recipient=request.user,
             is_read=False,
         )
+        if normalized_notification_ids:
+            notifications_qs = notifications_qs.filter(id__in=normalized_notification_ids)
         if notification_type:
             notifications_qs = notifications_qs.filter(type=notification_type)
         if target_tab:
@@ -1374,21 +1434,36 @@ class MeNotificationsMarkReadView(APIView):
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
 
         messages_updated = 0
+        private_message_ids = request.data.get("private_message_ids") or []
+        raw_private_message_id = request.data.get("private_message_id")
+        if raw_private_message_id is not None:
+            private_message_ids = [*private_message_ids, raw_private_message_id]
+
+        normalized_private_message_ids = []
+        for raw_id in private_message_ids:
+            try:
+                normalized_private_message_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+
         should_mark_private_messages = (
-            not notification_type
+            not normalized_notification_ids
+            and not notification_type
             and (not target_tab or target_tab == UserNotification.TARGET_PRIVATE_INBOX)
         )
-        if should_mark_private_messages:
-            queryset = (
-                Comment.objects.filter(
-                    visibility=Comment.VISIBILITY_MENTIONED,
-                    target_user=request.user,
-                    is_read=False,
-                )
-                .exclude(author=request.user)
-                .order_by("-created_at", "-id")
+        private_messages_qs = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=request.user,
+                is_read=False,
             )
-            valid_ids = get_valid_directed_comment_ids(queryset)
+            .exclude(author=request.user)
+            .order_by("-created_at", "-id")
+        )
+        valid_ids = get_valid_directed_comment_ids(private_messages_qs)
+        if normalized_private_message_ids:
+            valid_ids = [item for item in valid_ids if item in normalized_private_message_ids]
+        if should_mark_private_messages or normalized_private_message_ids:
             if valid_ids:
                 messages_updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
 
