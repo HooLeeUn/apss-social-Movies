@@ -1727,6 +1727,52 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.data["results"][0]["messages_preview"][0]["id"], new_comment.id)
         self.assertEqual(response.data["results"][1]["messages_preview"][0]["id"], old_comment.id)
 
+    def test_directed_conversations_preview_exposes_recipient_and_counterpart_for_sent_messages(self):
+        second_friend = get_user_model().objects.create_user(
+            username="comment_friend_3",
+            email="comment-friend-3@example.com",
+            password="test1234",
+        )
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=second_friend,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+        Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"Para @{self.friend_user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.friend_user,
+        )
+        Comment.objects.create(
+            author=self.user,
+            movie=self.movie,
+            body=f"Para @{second_friend.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=second_friend,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.movie_directed_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        conversations = sorted(response.data["results"], key=lambda item: item["other_user"]["username"])
+        self.assertEqual(len(conversations), 2)
+
+        first_preview = conversations[0]["messages_preview"][0]
+        second_preview = conversations[1]["messages_preview"][0]
+
+        self.assertEqual(first_preview["direction"], "sent")
+        self.assertEqual(second_preview["direction"], "sent")
+        self.assertEqual(first_preview["counterpart"]["username"], conversations[0]["other_user"]["username"])
+        self.assertEqual(second_preview["counterpart"]["username"], conversations[1]["other_user"]["username"])
+        self.assertNotEqual(first_preview["counterpart"]["username"], second_preview["counterpart"]["username"])
+        self.assertEqual(first_preview["recipient"]["username"], conversations[0]["other_user"]["username"])
+        self.assertEqual(second_preview["recipient"]["username"], conversations[1]["other_user"]["username"])
+
     def test_directed_conversation_messages_endpoint_paginates_and_marks_directions(self):
         for index in range(12):
             author = self.user if index % 2 == 0 else self.friend_user

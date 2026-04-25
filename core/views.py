@@ -1567,7 +1567,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
             .filter(
                 Q(author=self.request.user) | Q(target_user=self.request.user)
             )
-            .select_related("author", "author__profile", "movie", "target_user")
+            .select_related("author", "author__profile", "movie", "target_user", "target_user__profile")
             .order_by("-created_at", "-id")
         )
         valid_ids = get_valid_directed_comment_ids(queryset)

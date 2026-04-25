@@ -784,8 +784,13 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
 class DirectedConversationMessageSerializer(serializers.ModelSerializer):
     author = DirectedConversationOtherUserSerializer(read_only=True)
     target_user = DirectedConversationOtherUserSerializer(read_only=True)
+    sender = serializers.SerializerMethodField()
+    recipient = serializers.SerializerMethodField()
+    counterpart = serializers.SerializerMethodField()
     direction = serializers.SerializerMethodField()
+    body = serializers.CharField(read_only=True)
     content = serializers.CharField(source="body", read_only=True)
+    text = serializers.CharField(source="body", read_only=True)
     author_username = serializers.CharField(source="author.username", read_only=True)
     author_display_name = serializers.SerializerMethodField()
     author_avatar = serializers.SerializerMethodField()
@@ -794,19 +799,38 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
         model = Comment
         fields = [
             "id",
+            "body",
             "content",
+            "text",
             "created_at",
             "updated_at",
             "likes_count",
             "dislikes_count",
             "my_reaction",
             "author",
+            "sender",
             "author_username",
             "author_display_name",
             "author_avatar",
             "target_user",
+            "recipient",
+            "counterpart",
             "direction",
         ]
+
+    def get_sender(self, obj):
+        return DirectedConversationOtherUserSerializer(obj.author, context=self.context).data
+
+    def get_recipient(self, obj):
+        if not obj.target_user_id:
+            return None
+        return DirectedConversationOtherUserSerializer(obj.target_user, context=self.context).data
+
+    def get_counterpart(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        target = obj.target_user if user and obj.author_id == user.id else obj.author
+        return DirectedConversationOtherUserSerializer(target, context=self.context).data
 
     def get_direction(self, obj):
         request = self.context.get("request")
