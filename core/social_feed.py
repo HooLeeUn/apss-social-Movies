@@ -314,8 +314,13 @@ class SocialActivityFeedService:
                 "payload": {
                     "comment_id": comment.id,
                     "content": comment.body,
+                    "sender": cls._serialize_compact_user(comment.author),
+                    "recipient": cls._serialize_compact_user(comment.target_user),
                     "target_user": cls._serialize_compact_user(comment.target_user),
                     "direction": "sent" if viewer and comment.author_id == viewer.id else "received",
+                    "counterpart": cls._serialize_compact_user(
+                        comment.target_user if viewer and comment.author_id == viewer.id else comment.author
+                    ),
                 },
             }
             for comment in valid_comments
@@ -335,13 +340,14 @@ class SocialActivityFeedService:
         )
         queryset = (
             CommentReaction.objects.filter(
-                comment__author_id__in=actor_ids,
                 comment__visibility=Comment.VISIBILITY_PUBLIC,
             )
+            .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
             .exclude(user_id=F("comment__author_id"))
             .exclude(
                 comment__author__visibility_blocks__blocked_user_id=viewer.id,
             )
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
             .select_related(
                 "user",
                 "user__profile",
@@ -385,9 +391,13 @@ class SocialActivityFeedService:
                 ),
                 "payload": {
                     "comment_id": reaction.comment_id,
+                    "reaction_id": reaction.id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
                     "comment_author": cls._serialize_compact_user(reaction.comment.author),
+                    "reaction_value": reaction.reaction_type,
                     "reaction_type": reaction.reaction_type,
+                    "is_given_reaction": viewer and reaction.user_id == viewer.id,
+                    "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
                 },
             }
             for reaction in queryset

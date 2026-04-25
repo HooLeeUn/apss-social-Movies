@@ -258,6 +258,41 @@ def build_notification_message(notification):
     return "Tienes una notificación"
 
 
+def get_current_reaction_notifications_queryset(user):
+    base_queryset = UserNotification.objects.filter(recipient=user)
+    reaction_types = {
+        UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+        UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+    }
+    result_ids = []
+    seen_keys = set()
+    for notification in base_queryset.order_by("-updated_at", "-id"):
+        if notification.type in reaction_types:
+            if not notification.comment_id or not notification.actor_id:
+                continue
+            current_reaction_exists = CommentReaction.objects.filter(
+                comment_id=notification.comment_id,
+                user_id=notification.actor_id,
+                reaction_type=notification.reaction_type,
+            ).exists()
+            if not current_reaction_exists:
+                continue
+            key = (
+                notification.recipient_id,
+                notification.actor_id,
+                notification.comment_id,
+                notification.type,
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+        result_ids.append(notification.id)
+
+    if not result_ids:
+        return UserNotification.objects.none()
+    return UserNotification.objects.filter(id__in=result_ids)
+
+
 def filter_comments_visible_to_user(queryset, user):
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
@@ -1224,10 +1259,8 @@ class MeMessagesView(generics.ListAPIView):
         )
 
         private_reactions_qs = (
-            UserNotification.objects.filter(
-                recipient=request.user,
-                type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
-            )
+            get_current_reaction_notifications_queryset(request.user)
+            .filter(type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION)
             .select_related("actor", "actor__profile", "comment", "movie")
             .order_by("-created_at", "-id")
         )
@@ -1322,13 +1355,10 @@ class MeNotificationsView(APIView):
 
     def get(self, request):
         unread_private_messages = get_unread_private_message_count(request.user)
-        unread_reactions = UserNotification.objects.filter(
-            recipient=request.user,
-            is_read=False,
-        ).count()
+        unread_reactions = get_current_reaction_notifications_queryset(request.user).filter(is_read=False).count()
 
         reaction_notifications = (
-            UserNotification.objects.filter(recipient=request.user)
+            get_current_reaction_notifications_queryset(request.user)
             .select_related("actor", "actor__profile", "movie", "comment")
             .order_by("-created_at", "-id")
         )
@@ -1412,7 +1442,14 @@ class MeNotificationsMarkReadView(APIView):
             notification_ids = [*notification_ids, notification_id]
 
         normalized_notification_ids = []
+        normalized_private_message_ids = []
         for raw_id in notification_ids:
+            if isinstance(raw_id, str) and raw_id.startswith("pm-"):
+                try:
+                    normalized_private_message_ids.append(int(raw_id.split("pm-", 1)[1]))
+                except (TypeError, ValueError):
+                    pass
+                continue
             try:
                 normalized_notification_ids.append(int(raw_id))
             except (TypeError, ValueError):
@@ -1421,7 +1458,7 @@ class MeNotificationsMarkReadView(APIView):
         notification_type = request.data.get("type")
         target_tab = request.data.get("target_tab")
 
-        notifications_qs = UserNotification.objects.filter(
+        notifications_qs = get_current_reaction_notifications_queryset(request.user).filter(
             recipient=request.user,
             is_read=False,
         )
@@ -1439,12 +1476,13 @@ class MeNotificationsMarkReadView(APIView):
         if raw_private_message_id is not None:
             private_message_ids = [*private_message_ids, raw_private_message_id]
 
-        normalized_private_message_ids = []
+        extra_private_message_ids = []
         for raw_id in private_message_ids:
             try:
-                normalized_private_message_ids.append(int(raw_id))
+                extra_private_message_ids.append(int(raw_id))
             except (TypeError, ValueError):
                 continue
+        normalized_private_message_ids.extend(extra_private_message_ids)
 
         should_mark_private_messages = (
             not normalized_notification_ids
