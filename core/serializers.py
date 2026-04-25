@@ -480,6 +480,13 @@ class SocialActivitySerializer(serializers.Serializer):
     comment_id = serializers.SerializerMethodField()
     direction = serializers.SerializerMethodField()
     reaction_type = serializers.SerializerMethodField()
+    reaction_value = serializers.SerializerMethodField()
+    reaction_id = serializers.SerializerMethodField()
+    sender = serializers.SerializerMethodField()
+    recipient = serializers.SerializerMethodField()
+    counterpart = serializers.SerializerMethodField()
+    is_received_reaction = serializers.SerializerMethodField()
+    is_given_reaction = serializers.SerializerMethodField()
 
     def get_type(self, obj):
         mapping = {
@@ -510,6 +517,34 @@ class SocialActivitySerializer(serializers.Serializer):
 
     def get_reaction_type(self, obj):
         return (obj.get("payload") or {}).get("reaction_type")
+
+    def get_reaction_value(self, obj):
+        payload = obj.get("payload") or {}
+        return payload.get("reaction_value") or payload.get("reaction_type")
+
+    def get_reaction_id(self, obj):
+        return (obj.get("payload") or {}).get("reaction_id")
+
+    def get_sender(self, obj):
+        return (obj.get("payload") or {}).get("sender")
+
+    def get_recipient(self, obj):
+        payload = obj.get("payload") or {}
+        return payload.get("recipient") or payload.get("target_user")
+
+    def get_counterpart(self, obj):
+        payload = obj.get("payload") or {}
+        return (
+            payload.get("counterpart")
+            or payload.get("target_user")
+            or payload.get("comment_author")
+        )
+
+    def get_is_received_reaction(self, obj):
+        return bool((obj.get("payload") or {}).get("is_received_reaction"))
+
+    def get_is_given_reaction(self, obj):
+        return bool((obj.get("payload") or {}).get("is_given_reaction"))
 
     def get_actor(self, obj):
         actor = obj.get("actor") or {}
@@ -820,13 +855,30 @@ class MeMessageMovieSerializer(serializers.ModelSerializer):
 
 class MeMessageSerializer(serializers.ModelSerializer):
     author = MeMessageAuthorSerializer(read_only=True)
+    target_user = MeMessageAuthorSerializer(read_only=True)
     movie = MeMessageMovieSerializer(read_only=True)
     direction = serializers.SerializerMethodField()
+    sender = serializers.SerializerMethodField()
+    recipient = serializers.SerializerMethodField()
+    counterpart = serializers.SerializerMethodField()
     type = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
-        fields = ["id", "type", "body", "created_at", "author", "movie", "is_read", "direction"]
+        fields = [
+            "id",
+            "type",
+            "body",
+            "created_at",
+            "author",
+            "target_user",
+            "sender",
+            "recipient",
+            "counterpart",
+            "movie",
+            "is_read",
+            "direction",
+        ]
 
     def get_direction(self, obj):
         request = self.context.get("request")
@@ -835,6 +887,20 @@ class MeMessageSerializer(serializers.ModelSerializer):
 
     def get_type(self, obj):
         return "private_message"
+
+    def get_sender(self, obj):
+        return MeMessageAuthorSerializer(obj.author, context=self.context).data
+
+    def get_recipient(self, obj):
+        if not obj.target_user_id:
+            return None
+        return MeMessageAuthorSerializer(obj.target_user, context=self.context).data
+
+    def get_counterpart(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        target = obj.target_user if user and obj.author_id == user.id else obj.author
+        return MeMessageAuthorSerializer(target, context=self.context).data
 
 
 class PublicCommentFeedSerializer(CommentSerializer):
