@@ -433,9 +433,13 @@ class SocialActivityFeedService:
                 "movie": cls._serialize_movie(reaction.comment.movie),
                 "payload": {
                     "comment_id": reaction.comment_id,
+                    "reaction_id": reaction.id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
                     "comment_author": cls._serialize_compact_user(reaction.comment.author),
                     "reaction_type": reaction.reaction_type,
+                    "reaction_value": reaction.reaction_type,
+                    "is_given_reaction": viewer and reaction.user_id == viewer.id,
+                    "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
                 },
             }
             for reaction in valid_reactions
