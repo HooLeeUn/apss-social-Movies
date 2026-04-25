@@ -1762,6 +1762,13 @@ class MovieCommentEndpointTests(TestCase):
         conversations = sorted(response.data["results"], key=lambda item: item["other_user"]["username"])
         self.assertEqual(len(conversations), 2)
 
+        self.assertEqual(conversations[0]["direction"], "sent")
+        self.assertEqual(conversations[1]["direction"], "sent")
+        self.assertEqual(conversations[0]["counterpart"]["username"], conversations[0]["other_user"]["username"])
+        self.assertEqual(conversations[1]["counterpart"]["username"], conversations[1]["other_user"]["username"])
+        self.assertEqual(conversations[0]["recipient"]["username"], conversations[0]["other_user"]["username"])
+        self.assertEqual(conversations[1]["recipient"]["username"], conversations[1]["other_user"]["username"])
+
         first_preview = conversations[0]["messages_preview"][0]
         second_preview = conversations[1]["messages_preview"][0]
 

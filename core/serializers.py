@@ -784,6 +784,9 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
 class DirectedConversationMessageSerializer(serializers.ModelSerializer):
     author = DirectedConversationOtherUserSerializer(read_only=True)
     target_user = DirectedConversationOtherUserSerializer(read_only=True)
+    likes_count = serializers.SerializerMethodField()
+    dislikes_count = serializers.SerializerMethodField()
+    my_reaction = serializers.SerializerMethodField()
     sender = serializers.SerializerMethodField()
     recipient = serializers.SerializerMethodField()
     counterpart = serializers.SerializerMethodField()
@@ -821,6 +824,35 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
     def get_sender(self, obj):
         return DirectedConversationOtherUserSerializer(obj.author, context=self.context).data
 
+    def get_likes_count(self, obj):
+        if hasattr(obj, "likes_count"):
+            return obj.likes_count or 0
+        return obj.reactions.filter(
+            reaction_type=CommentReaction.REACT_LIKE
+        ).count()
+
+    def get_dislikes_count(self, obj):
+        if hasattr(obj, "dislikes_count"):
+            return obj.dislikes_count or 0
+        return obj.reactions.filter(
+            reaction_type=CommentReaction.REACT_DISLIKE
+        ).count()
+
+    def get_my_reaction(self, obj):
+        if hasattr(obj, "my_reaction"):
+            return obj.my_reaction
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+
+        return (
+            CommentReaction.objects.filter(comment_id=obj.id, user_id=user.id)
+            .values_list("reaction_type", flat=True)
+            .first()
+        )
+
     def get_recipient(self, obj):
         if not obj.target_user_id:
             return None
@@ -851,6 +883,9 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
 
 class DirectedConversationSerializer(serializers.Serializer):
     other_user = DirectedConversationOtherUserSerializer(read_only=True)
+    counterpart = DirectedConversationOtherUserSerializer(read_only=True)
+    recipient = DirectedConversationOtherUserSerializer(read_only=True, allow_null=True)
+    direction = serializers.CharField(read_only=True)
     last_message_at = serializers.DateTimeField(read_only=True)
     messages_preview = DirectedConversationMessageSerializer(read_only=True, many=True)
     messages_endpoint = serializers.CharField(read_only=True)
