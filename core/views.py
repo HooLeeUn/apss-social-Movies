@@ -1584,12 +1584,26 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
         grouped = {}
         for comment in directed_comments:
             other_user = comment.target_user if comment.author_id == self.request.user.id else comment.author
+            if not other_user:
+                continue
+
+            direction = "sent" if comment.author_id == self.request.user.id else "received"
+            recipient = comment.target_user if comment.target_user_id else None
             conversation = grouped.setdefault(
                 other_user.id,
-                {"other_user": other_user, "last_message_at": comment.created_at, "messages_preview": []},
+                {
+                    "other_user": other_user,
+                    "counterpart": other_user,
+                    "recipient": recipient,
+                    "direction": direction,
+                    "last_message_at": comment.created_at,
+                    "messages_preview": [],
+                },
             )
             if comment.created_at > conversation["last_message_at"]:
                 conversation["last_message_at"] = comment.created_at
+                conversation["direction"] = direction
+                conversation["recipient"] = recipient
             if len(conversation["messages_preview"]) < 1:
                 conversation["messages_preview"].append(comment)
 

@@ -851,6 +851,9 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
 
 class DirectedConversationSerializer(serializers.Serializer):
     other_user = DirectedConversationOtherUserSerializer(read_only=True)
+    counterpart = DirectedConversationOtherUserSerializer(read_only=True)
+    recipient = DirectedConversationOtherUserSerializer(read_only=True, allow_null=True)
+    direction = serializers.CharField(read_only=True)
     last_message_at = serializers.DateTimeField(read_only=True)
     messages_preview = DirectedConversationMessageSerializer(read_only=True, many=True)
     messages_endpoint = serializers.CharField(read_only=True)
