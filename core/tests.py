@@ -2621,7 +2621,9 @@ class NotificationsAPITests(TestCase):
             format="json",
         )
         self.assertEqual(mark_read_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mark_read_response.data["updated"], 1)
         self.assertEqual(mark_read_response.data["updated_notifications"], 1)
+        self.assertEqual(mark_read_response.data["updated_private_messages"], 0)
 
         notification.refresh_from_db()
         self.assertTrue(notification.is_read)
@@ -2649,10 +2651,39 @@ class NotificationsAPITests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 1)
         self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 0)
 
         notification.refresh_from_db()
         self.assertTrue(notification.is_read)
+
+    def test_mark_read_supports_pm_identifier_and_reduces_total_unread(self):
+        self.client.force_authenticate(self.owner)
+
+        summary_response = self.client.get(self.notifications_url)
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary_response.data["total_unread"], 1)
+        private_item = next(item for item in summary_response.data["items"] if item["type"] == UserNotification.TYPE_PRIVATE_MESSAGE)
+        self.assertEqual(private_item["id"], f"pm-{self.inbox_message.id}")
+        self.assertEqual(private_item["notification_id"], f"pm-{self.inbox_message.id}")
+
+        mark_read_response = self.client.post(
+            self.notifications_mark_read_url,
+            {"ids": [private_item["notification_id"]]},
+            format="json",
+        )
+        self.assertEqual(mark_read_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mark_read_response.data["updated"], 1)
+        self.assertEqual(mark_read_response.data["updated_notifications"], 0)
+        self.assertEqual(mark_read_response.data["updated_private_messages"], 1)
+
+        self.inbox_message.refresh_from_db()
+        self.assertTrue(self.inbox_message.is_read)
+
+        refresh_summary_response = self.client.get(self.notifications_url)
+        self.assertEqual(refresh_summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(refresh_summary_response.data["total_unread"], 0)
 
     def test_me_messages_returns_private_reactions_received_and_given(self):
         outsider = self.user_model.objects.create_user(
