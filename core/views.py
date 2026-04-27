@@ -1401,10 +1401,12 @@ class MeNotificationsView(APIView):
         reaction_items = [
             {
                 "id": item.id,
+                "notification_id": item.id,
                 "type": item.type,
                 "actor": build_actor_payload(item.actor, request),
                 "target_tab": item.target_tab,
                 "message": build_notification_message(item),
+                "text": build_notification_message(item),
                 "reaction_type": item.reaction_type,
                 "reaction_value": item.reaction_type,
                 "is_received_reaction": bool(
@@ -1446,6 +1448,7 @@ class MeNotificationsView(APIView):
         private_items = [
             {
                 "id": f"pm-{comment.id}",
+                "notification_id": f"pm-{comment.id}",
                 "type": UserNotification.TYPE_PRIVATE_MESSAGE,
                 "actor": build_actor_payload(comment.author, request),
                 "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
@@ -1481,34 +1484,83 @@ class MeNotificationsView(APIView):
 class MeNotificationsMarkReadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @staticmethod
+    def _parse_notification_identifier(raw_id):
+        if raw_id is None:
+            return (None, None)
+
+        if isinstance(raw_id, int):
+            return ("notification", raw_id)
+
+        raw_value = str(raw_id).strip()
+        if not raw_value:
+            return (None, None)
+
+        if raw_value.startswith("pm-"):
+            try:
+                return ("private_message", int(raw_value.split("pm-", 1)[1]))
+            except (TypeError, ValueError):
+                return (None, None)
+
+        if ":" in raw_value:
+            raw_prefix, raw_pk = raw_value.split(":", 1)
+            normalized_prefix = raw_prefix.strip().lower()
+            try:
+                parsed_pk = int(raw_pk.strip())
+            except (TypeError, ValueError):
+                return (None, None)
+            if normalized_prefix in {"pm", "private_message", "private-message"}:
+                return ("private_message", parsed_pk)
+            if normalized_prefix in {"notification", "notif", "n"}:
+                return ("notification", parsed_pk)
+            return (None, None)
+
+        if "-" in raw_value:
+            raw_prefix, raw_pk = raw_value.rsplit("-", 1)
+            normalized_prefix = raw_prefix.strip().lower()
+            try:
+                parsed_pk = int(raw_pk.strip())
+            except (TypeError, ValueError):
+                return (None, None)
+            if normalized_prefix in {"pm", "private_message", "private-message"}:
+                return ("private_message", parsed_pk)
+            if normalized_prefix in {"notification", "notif", "n"}:
+                return ("notification", parsed_pk)
+            return (None, None)
+
+        try:
+            return ("notification", int(raw_value))
+        except (TypeError, ValueError):
+            return (None, None)
+
     def post(self, request):
         notification_id = request.data.get("id")
         notification_ids = request.data.get("ids") or []
+        raw_notification_ids_provided = bool(notification_ids) or notification_id is not None
         if notification_id is not None:
             notification_ids = [*notification_ids, notification_id]
 
         normalized_notification_ids = []
         normalized_private_message_ids = []
         for raw_id in notification_ids:
-            if isinstance(raw_id, str) and raw_id.startswith("pm-"):
-                try:
-                    normalized_private_message_ids.append(int(raw_id.split("pm-", 1)[1]))
-                except (TypeError, ValueError):
-                    pass
+            item_type, parsed_id = self._parse_notification_identifier(raw_id)
+            if item_type == "private_message":
+                normalized_private_message_ids.append(parsed_id)
                 continue
-            try:
-                normalized_notification_ids.append(int(raw_id))
-            except (TypeError, ValueError):
+            if item_type == "notification":
+                normalized_notification_ids.append(parsed_id)
                 continue
 
         notification_type = request.data.get("type")
         target_tab = request.data.get("target_tab")
 
-        notifications_qs = get_current_reaction_notifications_queryset(request.user).filter(
+        notifications_qs = UserNotification.objects.filter(
             recipient=request.user,
             is_read=False,
         )
-        if normalized_notification_ids:
+        if raw_notification_ids_provided and not normalized_notification_ids:
+            notifications_qs = notifications_qs.none()
+        elif normalized_notification_ids:
             notifications_qs = notifications_qs.filter(id__in=normalized_notification_ids)
         if notification_type:
             notifications_qs = notifications_qs.filter(type=notification_type)
@@ -1544,15 +1596,16 @@ class MeNotificationsMarkReadView(APIView):
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
         )
-        valid_ids = get_valid_directed_comment_ids(private_messages_qs)
         if normalized_private_message_ids:
-            valid_ids = [item for item in valid_ids if item in normalized_private_message_ids]
+            private_messages_qs = private_messages_qs.filter(id__in=normalized_private_message_ids)
         if should_mark_private_messages or normalized_private_message_ids:
-            if valid_ids:
-                messages_updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
+            messages_updated = private_messages_qs.update(is_read=True)
+
+        updated_total = notifications_updated + messages_updated
 
         return Response(
             {
+                "updated": updated_total,
                 "updated_notifications": notifications_updated,
                 "updated_private_messages": messages_updated,
             },
