@@ -1406,6 +1406,7 @@ class MeNotificationsView(APIView):
                 "actor": build_actor_payload(item.actor, request),
                 "target_tab": item.target_tab,
                 "message": build_notification_message(item),
+                "text": build_notification_message(item),
                 "reaction_type": item.reaction_type,
                 "reaction_value": item.reaction_type,
                 "is_received_reaction": bool(
@@ -1553,13 +1554,13 @@ class MeNotificationsMarkReadView(APIView):
         notification_type = request.data.get("type")
         target_tab = request.data.get("target_tab")
 
-        notifications_qs = get_current_reaction_notifications_queryset(request.user).filter(
+        notifications_qs = UserNotification.objects.filter(
             recipient=request.user,
             is_read=False,
         )
         if raw_notification_ids_provided and not normalized_notification_ids:
             notifications_qs = notifications_qs.none()
-        if normalized_notification_ids:
+        elif normalized_notification_ids:
             notifications_qs = notifications_qs.filter(id__in=normalized_notification_ids)
         if notification_type:
             notifications_qs = notifications_qs.filter(type=notification_type)
@@ -1595,15 +1596,16 @@ class MeNotificationsMarkReadView(APIView):
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
         )
-        valid_ids = get_valid_directed_comment_ids(private_messages_qs)
         if normalized_private_message_ids:
-            valid_ids = [item for item in valid_ids if item in normalized_private_message_ids]
+            private_messages_qs = private_messages_qs.filter(id__in=normalized_private_message_ids)
         if should_mark_private_messages or normalized_private_message_ids:
-            if valid_ids:
-                messages_updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
+            messages_updated = private_messages_qs.update(is_read=True)
+
+        updated_total = notifications_updated + messages_updated
 
         return Response(
             {
+                "updated": updated_total,
                 "updated_notifications": notifications_updated,
                 "updated_private_messages": messages_updated,
             },
