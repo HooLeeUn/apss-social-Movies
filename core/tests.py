@@ -2594,6 +2594,66 @@ class NotificationsAPITests(TestCase):
         self.assertEqual(public_reaction_items[0]["reaction_value"], CommentReaction.REACT_DISLIKE)
         self.assertEqual(public_reaction_items[0]["reaction_type"], CommentReaction.REACT_DISLIKE)
 
+    def test_notifications_summary_exposes_notification_id_and_mark_read_persists(self):
+        notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        summary_response = self.client.get(self.notifications_url)
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        notification_item = next(
+            item for item in summary_response.data["items"] if item["type"] == UserNotification.TYPE_PUBLIC_COMMENT_REACTION
+        )
+        self.assertEqual(notification_item["notification_id"], notification.id)
+        self.assertEqual(summary_response.data["total_unread"], 2)
+
+        mark_read_response = self.client.post(
+            self.notifications_mark_read_url,
+            {"ids": [notification_item["notification_id"]]},
+            format="json",
+        )
+        self.assertEqual(mark_read_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mark_read_response.data["updated_notifications"], 1)
+
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
+        refresh_summary_response = self.client.get(self.notifications_url)
+        self.assertEqual(refresh_summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(refresh_summary_response.data["total_unread"], 1)
+
+    def test_mark_read_supports_composite_notification_identifier(self):
+        notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_read_url,
+            {"ids": [f"notification:{notification.id}"]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated_notifications"], 1)
+
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
     def test_me_messages_returns_private_reactions_received_and_given(self):
         outsider = self.user_model.objects.create_user(
             username="outsider_user", email="outsider@example.com", password="test1234"
