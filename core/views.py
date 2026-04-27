@@ -305,6 +305,76 @@ def get_current_reaction_notifications_queryset(user):
     return UserNotification.objects.filter(id__in=result_ids)
 
 
+
+
+NOTIFICATION_ID_SEPARATOR = ":"
+
+REACTION_NOTIFICATION_ID_PREFIXES = {
+    "public_comment_like": (UserNotification.TYPE_PUBLIC_COMMENT_REACTION, CommentReaction.REACT_LIKE),
+    "public_comment_dislike": (UserNotification.TYPE_PUBLIC_COMMENT_REACTION, CommentReaction.REACT_DISLIKE),
+    "private_comment_like": (UserNotification.TYPE_PRIVATE_COMMENT_REACTION, CommentReaction.REACT_LIKE),
+    "private_comment_dislike": (UserNotification.TYPE_PRIVATE_COMMENT_REACTION, CommentReaction.REACT_DISLIKE),
+}
+
+PRIVATE_MESSAGE_NOTIFICATION_ID_PREFIXES = {"private_message", "directed_message"}
+
+
+def build_notification_identifier(notification):
+    prefix = None
+    if notification.type == UserNotification.TYPE_PUBLIC_COMMENT_REACTION:
+        prefix = f"public_comment_{notification.reaction_type or CommentReaction.REACT_LIKE}"
+    elif notification.type == UserNotification.TYPE_PRIVATE_COMMENT_REACTION:
+        prefix = f"private_comment_{notification.reaction_type or CommentReaction.REACT_LIKE}"
+    if not prefix:
+        return str(notification.id)
+    return f"{prefix}{NOTIFICATION_ID_SEPARATOR}{notification.id}"
+
+
+def build_private_message_identifier(comment):
+    return f"private_message{NOTIFICATION_ID_SEPARATOR}{comment.id}"
+
+
+def parse_mark_read_identifier(raw_id):
+    if raw_id is None:
+        return (None, None, None)
+
+    if isinstance(raw_id, int):
+        return ("reaction", raw_id, {})
+
+    text_id = str(raw_id).strip()
+    if not text_id:
+        return (None, None, None)
+
+    if text_id.startswith("pm-"):
+        try:
+            return ("private_message", int(text_id.split("pm-", 1)[1]), {})
+        except (TypeError, ValueError):
+            return (None, None, None)
+
+    if NOTIFICATION_ID_SEPARATOR in text_id:
+        prefix, raw_value = text_id.split(NOTIFICATION_ID_SEPARATOR, 1)
+        try:
+            parsed_id = int(raw_value)
+        except (TypeError, ValueError):
+            return (None, None, None)
+
+        if prefix in REACTION_NOTIFICATION_ID_PREFIXES:
+            notification_type, reaction_type = REACTION_NOTIFICATION_ID_PREFIXES[prefix]
+            return (
+                "reaction",
+                parsed_id,
+                {"type": notification_type, "reaction_type": reaction_type},
+            )
+
+        if prefix in PRIVATE_MESSAGE_NOTIFICATION_ID_PREFIXES:
+            return ("private_message", parsed_id, {})
+
+        return ("reaction", parsed_id, {})
+
+    try:
+        return ("reaction", int(text_id), {})
+    except (TypeError, ValueError):
+        return (None, None, None)
 def filter_comments_visible_to_user(queryset, user):
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
@@ -1401,6 +1471,7 @@ class MeNotificationsView(APIView):
         reaction_items = [
             {
                 "id": item.id,
+                "notification_id": build_notification_identifier(item),
                 "type": item.type,
                 "actor": build_actor_payload(item.actor, request),
                 "target_tab": item.target_tab,
@@ -1446,6 +1517,7 @@ class MeNotificationsView(APIView):
         private_items = [
             {
                 "id": f"pm-{comment.id}",
+                "notification_id": build_private_message_identifier(comment),
                 "type": UserNotification.TYPE_PRIVATE_MESSAGE,
                 "actor": build_actor_payload(comment.author, request),
                 "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
@@ -1489,19 +1561,24 @@ class MeNotificationsMarkReadView(APIView):
 
         normalized_notification_ids = []
         normalized_private_message_ids = []
+        inferred_notification_types = set()
+        inferred_reaction_types = set()
         for raw_id in notification_ids:
-            if isinstance(raw_id, str) and raw_id.startswith("pm-"):
-                try:
-                    normalized_private_message_ids.append(int(raw_id.split("pm-", 1)[1]))
-                except (TypeError, ValueError):
-                    pass
-                continue
-            try:
-                normalized_notification_ids.append(int(raw_id))
-            except (TypeError, ValueError):
-                continue
+            kind, parsed_id, metadata = parse_mark_read_identifier(raw_id)
+            if kind == "reaction" and parsed_id is not None:
+                normalized_notification_ids.append(parsed_id)
+                inferred_type = metadata.get("type")
+                inferred_reaction = metadata.get("reaction_type")
+                if inferred_type:
+                    inferred_notification_types.add(inferred_type)
+                if inferred_reaction:
+                    inferred_reaction_types.add(inferred_reaction)
+            elif kind == "private_message" and parsed_id is not None:
+                normalized_private_message_ids.append(parsed_id)
 
         notification_type = request.data.get("type")
+        if not notification_type and len(inferred_notification_types) == 1:
+            notification_type = next(iter(inferred_notification_types))
         target_tab = request.data.get("target_tab")
 
         notifications_qs = get_current_reaction_notifications_queryset(request.user).filter(
@@ -1514,6 +1591,11 @@ class MeNotificationsMarkReadView(APIView):
             notifications_qs = notifications_qs.filter(type=notification_type)
         if target_tab:
             notifications_qs = notifications_qs.filter(target_tab=target_tab)
+        reaction_type = request.data.get("reaction_type")
+        if reaction_type:
+            notifications_qs = notifications_qs.filter(reaction_type=reaction_type)
+        elif len(inferred_reaction_types) == 1:
+            notifications_qs = notifications_qs.filter(reaction_type=next(iter(inferred_reaction_types)))
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
 
         messages_updated = 0
