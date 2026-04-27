@@ -2612,7 +2612,9 @@ class NotificationsAPITests(TestCase):
         notification_item = next(
             item for item in summary_response.data["items"] if item["type"] == UserNotification.TYPE_PUBLIC_COMMENT_REACTION
         )
+        self.assertEqual(notification_item["id"], notification.id)
         self.assertEqual(notification_item["notification_id"], notification.id)
+        self.assertEqual(notification_item["text"], notification_item["message"])
         self.assertEqual(summary_response.data["total_unread"], 2)
 
         mark_read_response = self.client.post(
@@ -2648,6 +2650,32 @@ class NotificationsAPITests(TestCase):
         response = self.client.post(
             self.notifications_mark_read_url,
             {"ids": [f"notification:{notification.id}"]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 1)
+        self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 0)
+
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
+    def test_mark_read_supports_hyphen_notification_identifier(self):
+        notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_read_url,
+            {"ids": [f"notification-{notification.id}"]},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
