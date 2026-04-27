@@ -344,12 +344,17 @@ class SocialActivityFeedService:
             viewer=viewer,
             movie_id_ref="comment__movie_id",
         )
+        is_self_scope = bool(viewer and set(actor_ids) == {viewer.id})
+        queryset = CommentReaction.objects.filter(
+            comment__visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        if is_self_scope:
+            queryset = queryset.filter(user_id=viewer.id)
+        else:
+            queryset = queryset.filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
+
         queryset = (
-            CommentReaction.objects.filter(
-                comment__visibility=Comment.VISIBILITY_PUBLIC,
-            )
-            .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
-            .exclude(user_id=F("comment__author_id"))
+            queryset.exclude(user_id=F("comment__author_id"))
             .exclude(
                 comment__author__visibility_blocks__blocked_user_id=viewer.id,
             )
