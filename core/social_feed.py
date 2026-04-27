@@ -63,7 +63,7 @@ class SocialActivityFeedService:
         activities = [
             *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=user),
             *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=user),
-            *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=user),
+            *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=user, activity_user=user),
         ]
         if scope == cls.SCOPE_ME:
             activities.extend(
@@ -94,7 +94,7 @@ class SocialActivityFeedService:
         activities = [
             *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=viewer),
             *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=viewer),
-            *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer),
+            *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer, activity_user=actor),
         ]
         if viewer and actor and viewer.id == actor.id:
             activities.extend(
@@ -338,13 +338,15 @@ class SocialActivityFeedService:
         *,
         actor_ids: list[int],
         viewer,
+        activity_user=None,
     ) -> Iterable[dict]:
         movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="comment__movie_id")
         viewer_rating_subquery = cls._viewer_movie_rating_subquery(
             viewer=viewer,
             movie_id_ref="comment__movie_id",
         )
-        is_self_scope = bool(viewer and set(actor_ids) == {viewer.id})
+        activity_user = activity_user or viewer
+        is_self_scope = bool(activity_user and set(actor_ids) == {activity_user.id})
         queryset = CommentReaction.objects.filter(
             comment__visibility=Comment.VISIBILITY_PUBLIC,
         )
@@ -409,8 +411,12 @@ class SocialActivityFeedService:
                     "comment_author": cls._serialize_compact_user(reaction.comment.author),
                     "reaction_value": reaction.reaction_type,
                     "reaction_type": reaction.reaction_type,
-                    "is_given_reaction": viewer and reaction.user_id == viewer.id,
-                    "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
+                    "is_given_reaction": bool(activity_user and reaction.user_id == activity_user.id),
+                    "is_received_reaction": bool(
+                        activity_user
+                        and reaction.comment.author_id == activity_user.id
+                        and reaction.user_id != activity_user.id
+                    ),
                 },
             }
             for reaction in queryset

@@ -1032,6 +1032,20 @@ class ProfileFeedActivityView(generics.ListAPIView):
     serializer_class = SocialActivitySerializer
 
     def get_queryset(self):
+        username = (self.request.query_params.get("username") or "").strip()
+        if username:
+            target = get_object_or_404(
+                User.objects.select_related("profile"),
+                username=username,
+            )
+            if not can_view_user_profile(target, self.request.user):
+                raise PermissionDenied("You do not have permission to view this profile.")
+
+            return SocialActivityFeedService.build_feed_for_actor(
+                viewer=self.request.user,
+                actor=target,
+            )
+
         scope = SocialActivityFeedService.normalize_scope(
             self.request.query_params.get("scope")
         )

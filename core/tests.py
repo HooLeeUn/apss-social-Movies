@@ -3620,6 +3620,92 @@ class ProfileFeedActivityViewTests(TestCase):
         ids = [item["id"] for item in response.data["results"]]
         self.assertIn(f"rating:{own_rating.id}", ids)
 
+    def test_username_param_uses_requested_user_context_for_reaction_flags(self):
+        peck = get_user_model().objects.create_user(
+            username="Peck",
+            email="peck@example.com",
+            password="test1234",
+        )
+        julian = get_user_model().objects.create_user(
+            username="Julian",
+            email="julian@example.com",
+            password="test1234",
+        )
+        public_comment = Comment.objects.create(
+            author=peck,
+            movie=self.movie,
+            body="Comentario público de Peck",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=julian,
+            comment=public_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(self.url, {"username": "Peck"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reaction_item = next(
+            item
+            for item in response.data["results"]
+            if item["id"] == f"public_comment_reaction:{reaction.id}"
+        )
+        self.assertEqual(reaction_item["actor"]["username"], "Julian")
+        self.assertEqual(reaction_item["target_user"]["username"], "Peck")
+        self.assertFalse(reaction_item["is_given_reaction"])
+        self.assertTrue(reaction_item["is_received_reaction"])
+
+    def test_username_param_includes_given_and_received_public_comment_reactions_without_duplicates(self):
+        peck = get_user_model().objects.create_user(
+            username="Peck2",
+            email="peck2@example.com",
+            password="test1234",
+        )
+        julian = get_user_model().objects.create_user(
+            username="Julian2",
+            email="julian2@example.com",
+            password="test1234",
+        )
+        author = get_user_model().objects.create_user(
+            username="Author2",
+            email="author2@example.com",
+            password="test1234",
+        )
+        peck_comment = Comment.objects.create(
+            author=peck,
+            movie=self.movie,
+            body="Comentario público de Peck2",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        other_comment = Comment.objects.create(
+            author=author,
+            movie=self.movie,
+            body="Comentario público de otro usuario",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        received_reaction = CommentReaction.objects.create(
+            user=julian,
+            comment=peck_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        given_reaction = CommentReaction.objects.create(
+            user=peck,
+            comment=other_comment,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+        )
+
+        response = self.client.get(self.url, {"username": "Peck2"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reaction_items = [
+            item for item in response.data["results"] if item["activity_type"] == "public_comment_reaction"
+        ]
+        reaction_ids = [item["id"] for item in reaction_items]
+        self.assertIn(f"public_comment_reaction:{received_reaction.id}", reaction_ids)
+        self.assertIn(f"public_comment_reaction:{given_reaction.id}", reaction_ids)
+        self.assertEqual(len(reaction_ids), len(set(reaction_ids)))
+
     def test_following_returns_ratings_from_followed_users(self):
         self._add_follow(self.actor)
         rating = MovieRating.objects.create(user=self.actor, movie=self.movie, score=8)
