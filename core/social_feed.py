@@ -47,7 +47,7 @@ class SocialActivityFeedService:
     def build_feed(cls, *, user, scope: SocialFeedScope) -> list[dict]:
         """
         Devuelve una lista uniforme de actividades sociales ordenadas por
-        created_at DESC.
+        activity_at DESC.
 
         Nota: devolvemos dicts listos para DRF Serializer, así la vista futura
         no duplica lógica de composición.
@@ -77,7 +77,7 @@ class SocialActivityFeedService:
         # por `id` para paginación por páginas (infinite scroll).
         activities.sort(
             key=lambda item: (
-                item["created_at"],
+                item["activity_at"],
                 item["_sort_activity_priority"],
                 item["_sort_entity_id"],
             ),
@@ -105,7 +105,7 @@ class SocialActivityFeedService:
             )
         activities.sort(
             key=lambda item: (
-                item["created_at"],
+                item["activity_at"],
                 item["_sort_activity_priority"],
                 item["_sort_entity_id"],
             ),
@@ -191,6 +191,8 @@ class SocialActivityFeedService:
                 "id": f"rating:{rating.id}",
                 "activity_type": cls.ACTIVITY_RATING,
                 "created_at": rating.created_at,
+                "updated_at": rating.updated_at,
+                "activity_at": rating.updated_at or rating.created_at,
                 "_sort_entity_id": rating.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_RATING],
                 "actor": cls._serialize_actor(rating.user),
@@ -244,6 +246,8 @@ class SocialActivityFeedService:
                 "id": f"public_comment:{comment.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
                 "created_at": comment.created_at,
+                "updated_at": comment.updated_at,
+                "activity_at": comment.updated_at or comment.created_at,
                 "_sort_entity_id": comment.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
                 "actor": cls._serialize_actor(comment.author),
@@ -301,6 +305,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}",
                 "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
                 "created_at": comment.created_at,
+                "updated_at": comment.updated_at,
+                "activity_at": comment.updated_at or comment.created_at,
                 "_sort_entity_id": comment.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
                 "actor": cls._serialize_actor(comment.author),
@@ -371,7 +377,7 @@ class SocialActivityFeedService:
                     Value(0),
                 ),
             )
-            .order_by("-created_at", "-id")
+            .order_by("-updated_at", "-created_at", "-id")
         )
 
         return [
@@ -379,6 +385,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PUBLIC_COMMENT_REACTION}:{reaction.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT_REACTION,
                 "created_at": reaction.created_at,
+                "updated_at": reaction.updated_at,
+                "activity_at": reaction.updated_at or reaction.created_at,
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),
@@ -427,6 +435,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PRIVATE_COMMENT_REACTION}:{reaction.id}",
                 "activity_type": cls.ACTIVITY_PRIVATE_COMMENT_REACTION,
                 "created_at": reaction.created_at,
+                "updated_at": reaction.updated_at,
+                "activity_at": reaction.updated_at or reaction.created_at,
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),

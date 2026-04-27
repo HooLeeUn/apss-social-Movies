@@ -471,6 +471,8 @@ class SocialActivitySerializer(serializers.Serializer):
     ])
     type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField(allow_null=True, required=False)
+    activity_at = serializers.DateTimeField(allow_null=True, required=False)
     actor = serializers.SerializerMethodField()
     movie = serializers.SerializerMethodField()
     payload = serializers.DictField()

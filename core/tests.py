@@ -3594,6 +3594,9 @@ class ProfileFeedActivityViewTests(TestCase):
     def _set_created_at(self, model_cls, object_id, created_at):
         model_cls.objects.filter(pk=object_id).update(created_at=created_at)
 
+    def _set_updated_at(self, model_cls, object_id, updated_at):
+        model_cls.objects.filter(pk=object_id).update(updated_at=updated_at)
+
     def test_requires_authentication(self):
         self.client.force_authenticate(None)
         response = self.client.get(self.url, {"scope": "following"})
@@ -3731,6 +3734,68 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertIn(f"public_comment_dislike:{own_dislike.id}", ids)
         returned_types = {item["activity_type"] for item in response.data["results"]}
         self.assertTrue({"rating", "public_comment", "public_comment_like", "public_comment_dislike"}.issubset(returned_types))
+
+    def test_activity_payload_includes_created_updated_and_activity_at(self):
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Comment to react",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        own_reaction = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(self.url, {"scope": "me"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items_by_id = {item["id"]: item for item in response.data["results"]}
+
+        rating_item = items_by_id[f"rating:{own_rating.id}"]
+        reaction_item = items_by_id[f"public_comment_reaction:{own_reaction.id}"]
+
+        self.assertIn("created_at", rating_item)
+        self.assertIn("updated_at", rating_item)
+        self.assertIn("activity_at", rating_item)
+
+        self.assertIn("created_at", reaction_item)
+        self.assertIn("updated_at", reaction_item)
+        self.assertIn("activity_at", reaction_item)
+        self.assertEqual(reaction_item["activity_at"], reaction_item["updated_at"])
+
+    def test_scope_me_orders_modified_public_comment_reaction_by_activity_at(self):
+        baseline = timezone.now()
+
+        rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=8)
+        target_comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie_without_image,
+            body="Target for reaction switch",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=target_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        self._set_created_at(MovieRating, rating.id, baseline + timezone.timedelta(minutes=2))
+        self._set_updated_at(MovieRating, rating.id, baseline + timezone.timedelta(minutes=2))
+        self._set_created_at(CommentReaction, reaction.id, baseline - timezone.timedelta(days=2))
+        self._set_updated_at(CommentReaction, reaction.id, baseline - timezone.timedelta(days=2))
+
+        CommentReaction.objects.filter(pk=reaction.id).update(
+            reaction_type=CommentReaction.REACT_DISLIKE,
+            updated_at=baseline + timezone.timedelta(minutes=3),
+        )
+
+        ids, response = self._fetch_ids(scope="me")
+        self.assertEqual(ids[0], f"public_comment_reaction:{reaction.id}")
+        first_item = response.data["results"][0]
+        self.assertEqual(first_item["activity_type"], "public_comment_reaction")
+        self.assertEqual(first_item["activity_at"], first_item["updated_at"])
 
     def test_scope_me_includes_valid_directed_comments_and_excludes_inconsistent_ones(self):
         valid_directed = Comment.objects.create(
