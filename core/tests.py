@@ -2504,6 +2504,9 @@ class NotificationsAPITests(TestCase):
         )
         self.notifications_url = reverse("me-notifications")
         self.notifications_mark_read_url = reverse("me-notifications-mark-read")
+        self.notifications_mark_read_batch_url = reverse("notifications-mark-read-batch")
+        self.notifications_mark_context_read_url = reverse("notifications-mark-context-read")
+        self.notifications_mark_all_read_url = reverse("notifications-mark-all-read")
         self.me_messages_url = reverse("me-messages")
 
     def _reaction_url(self, comment):
@@ -2713,6 +2716,136 @@ class NotificationsAPITests(TestCase):
         refresh_summary_response = self.client.get(self.notifications_url)
         self.assertEqual(refresh_summary_response.status_code, status.HTTP_200_OK)
         self.assertEqual(refresh_summary_response.data["total_unread"], 0)
+
+    def test_mark_read_batch_supports_mixed_notification_and_pm_ids(self):
+        notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_read_batch_url,
+            {"ids": [notification.id, f"pm-{self.inbox_message.id}"]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 2)
+        self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 1)
+
+        notification.refresh_from_db()
+        self.inbox_message.refresh_from_db()
+        self.assertTrue(notification.is_read)
+        self.assertTrue(self.inbox_message.is_read)
+
+    def test_mark_context_read_private_inbox_marks_private_reactions_and_messages(self):
+        private_reaction_notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.private_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_PRIVATE_INBOX,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_context_read_url,
+            {"context": "private_inbox"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 2)
+        self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 1)
+
+        private_reaction_notification.refresh_from_db()
+        self.inbox_message.refresh_from_db()
+        self.assertTrue(private_reaction_notification.is_read)
+        self.assertTrue(self.inbox_message.is_read)
+
+    def test_mark_context_read_activity_marks_public_comment_reactions_only(self):
+        public_reaction_notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        private_reaction_notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.private_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_PRIVATE_INBOX,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_context_read_url,
+            {"context": "activity"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 1)
+        self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 0)
+
+        public_reaction_notification.refresh_from_db()
+        private_reaction_notification.refresh_from_db()
+        self.assertTrue(public_reaction_notification.is_read)
+        self.assertFalse(private_reaction_notification.is_read)
+
+    def test_mark_all_read_marks_public_private_reactions_and_private_messages(self):
+        public_reaction_notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.public_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_ACTIVITY,
+            reaction_type=CommentReaction.REACT_LIKE,
+            is_read=False,
+        )
+        private_reaction_notification = UserNotification.objects.create(
+            recipient=self.owner,
+            actor=self.actor,
+            comment=self.private_comment,
+            movie=self.movie,
+            type=UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            target_tab=UserNotification.TARGET_PRIVATE_INBOX,
+            reaction_type=CommentReaction.REACT_DISLIKE,
+            is_read=False,
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(self.notifications_mark_all_read_url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 3)
+        self.assertEqual(response.data["updated_notifications"], 2)
+        self.assertEqual(response.data["updated_private_messages"], 1)
+
+        public_reaction_notification.refresh_from_db()
+        private_reaction_notification.refresh_from_db()
+        self.inbox_message.refresh_from_db()
+        self.assertTrue(public_reaction_notification.is_read)
+        self.assertTrue(private_reaction_notification.is_read)
+        self.assertTrue(self.inbox_message.is_read)
 
     def test_me_messages_returns_private_reactions_received_and_given(self):
         outsider = self.user_model.objects.create_user(
