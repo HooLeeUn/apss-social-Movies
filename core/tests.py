@@ -12,6 +12,7 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -3731,6 +3732,52 @@ class ProfileFeedActivityViewTests(TestCase):
         self.assertIn(f"public_comment_dislike:{own_dislike.id}", ids)
         returned_types = {item["activity_type"] for item in response.data["results"]}
         self.assertTrue({"rating", "public_comment", "public_comment_like", "public_comment_dislike"}.issubset(returned_types))
+
+    def test_activity_feed_items_include_updated_at_and_activity_at(self):
+        own_rating = MovieRating.objects.create(user=self.viewer, movie=self.movie, score=9)
+
+        response = self.client.get(self.url, {"scope": "me"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rating_item = next(item for item in response.data["results"] if item["id"] == f"rating:{own_rating.id}")
+
+        self.assertIn("created_at", rating_item)
+        self.assertIn("updated_at", rating_item)
+        self.assertIn("activity_at", rating_item)
+        self.assertEqual(rating_item["activity_at"], rating_item["updated_at"])
+
+    def test_activity_at_uses_updated_at_when_reaction_changes(self):
+        comment = Comment.objects.create(
+            author=self.actor,
+            movie=self.movie,
+            body="Public comment for reaction updates",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        reaction = CommentReaction.objects.create(
+            user=self.viewer,
+            comment=comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        before_update = reaction.updated_at
+        reaction.reaction_type = CommentReaction.REACT_DISLIKE
+        reaction.save()
+        reaction.refresh_from_db()
+
+        self.assertGreater(reaction.updated_at, before_update)
+
+        response = self.client.get(self.url, {"scope": "me"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reaction_item = next(
+            item
+            for item in response.data["results"]
+            if item["id"] == f"public_comment_reaction:{reaction.id}"
+        )
+
+        self.assertEqual(reaction_item["activity_at"], reaction_item["updated_at"])
+        self.assertEqual(
+            parse_datetime(reaction_item["updated_at"]),
+            reaction.updated_at,
+        )
 
     def test_scope_me_includes_valid_directed_comments_and_excludes_inconsistent_ones(self):
         valid_directed = Comment.objects.create(
