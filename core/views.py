@@ -1389,15 +1389,22 @@ class MeMessagesMarkAsReadView(APIView):
 class MeNotificationsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @staticmethod
+    def _should_include_read(request):
+        raw_include_read = request.query_params.get("include_read")
+        if raw_include_read is None:
+            return False
+        return str(raw_include_read).strip().lower() in {"1", "true", "yes", "y", "on"}
+
     def get(self, request):
+        include_read = self._should_include_read(request)
         unread_private_messages = get_unread_private_message_count(request.user)
         unread_reactions = get_current_reaction_notifications_queryset(request.user).filter(is_read=False).count()
 
-        reaction_notifications = (
-            get_current_reaction_notifications_queryset(request.user)
-            .select_related("actor", "actor__profile", "movie", "comment")
-            .order_by("-created_at", "-id")
-        )
+        reaction_notifications = get_current_reaction_notifications_queryset(request.user)
+        if not include_read:
+            reaction_notifications = reaction_notifications.filter(is_read=False)
+        reaction_notifications = reaction_notifications.select_related("actor", "actor__profile", "movie", "comment").order_by("-created_at", "-id")
         reaction_items = [
             {
                 "id": item.id,
@@ -1444,6 +1451,8 @@ class MeNotificationsView(APIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
         )
+        if not include_read:
+            private_queryset = private_queryset.filter(is_read=False)
         valid_private_messages = filter_valid_directed_comments(private_queryset)
         private_items = [
             {
@@ -1608,6 +1617,83 @@ class MeNotificationsMarkReadView(APIView):
                 "updated": updated_total,
                 "updated_notifications": notifications_updated,
                 "updated_private_messages": messages_updated,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MeNotificationsMarkAllReadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        notifications_updated = UserNotification.objects.filter(
+            recipient=request.user,
+            is_read=False,
+        ).update(is_read=True, read_at=timezone.now())
+
+        private_messages_qs = (
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=request.user,
+                is_read=False,
+            )
+            .exclude(author=request.user)
+            .order_by("-created_at", "-id")
+        )
+        valid_private_message_ids = get_valid_directed_comment_ids(private_messages_qs)
+        messages_updated = 0
+        if valid_private_message_ids:
+            messages_updated = Comment.objects.filter(id__in=valid_private_message_ids, is_read=False).update(is_read=True)
+
+        return Response(
+            {
+                "updated": notifications_updated + messages_updated,
+                "updated_notifications": notifications_updated,
+                "updated_private_messages": messages_updated,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MeNotificationsMarkReadBatchView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        raw_ids = request.data.get("ids")
+        if not isinstance(raw_ids, list):
+            return Response(
+                {"detail": "ids must be a list of notification ids."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        normalized_ids = []
+        for raw_id in raw_ids:
+            try:
+                normalized_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+
+        if not normalized_ids:
+            return Response(
+                {
+                    "updated": 0,
+                    "updated_notifications": 0,
+                    "updated_private_messages": 0,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        notifications_updated = UserNotification.objects.filter(
+            recipient=request.user,
+            is_read=False,
+            id__in=normalized_ids,
+        ).update(is_read=True, read_at=timezone.now())
+
+        return Response(
+            {
+                "updated": notifications_updated,
+                "updated_notifications": notifications_updated,
+                "updated_private_messages": 0,
             },
             status=status.HTTP_200_OK,
         )
