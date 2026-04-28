@@ -191,6 +191,8 @@ class SocialActivityFeedService:
                 "id": f"rating:{rating.id}",
                 "activity_type": cls.ACTIVITY_RATING,
                 "created_at": rating.created_at,
+                "updated_at": rating.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=rating.created_at, updated_at=rating.updated_at),
                 "_sort_entity_id": rating.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_RATING],
                 "actor": cls._serialize_actor(rating.user),
@@ -244,6 +246,8 @@ class SocialActivityFeedService:
                 "id": f"public_comment:{comment.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
                 "created_at": comment.created_at,
+                "updated_at": comment.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
                 "_sort_entity_id": comment.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
                 "actor": cls._serialize_actor(comment.author),
@@ -301,6 +305,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}",
                 "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
                 "created_at": comment.created_at,
+                "updated_at": comment.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
                 "_sort_entity_id": comment.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
                 "actor": cls._serialize_actor(comment.author),
@@ -379,6 +385,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PUBLIC_COMMENT_REACTION}:{reaction.id}",
                 "activity_type": cls.ACTIVITY_PUBLIC_COMMENT_REACTION,
                 "created_at": reaction.created_at,
+                "updated_at": reaction.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),
@@ -427,6 +435,8 @@ class SocialActivityFeedService:
                 "id": f"{cls.ACTIVITY_PRIVATE_COMMENT_REACTION}:{reaction.id}",
                 "activity_type": cls.ACTIVITY_PRIVATE_COMMENT_REACTION,
                 "created_at": reaction.created_at,
+                "updated_at": reaction.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),
@@ -544,3 +554,7 @@ class SocialActivityFeedService:
         if len(text) <= cls.COMMENT_EXCERPT_LENGTH:
             return text
         return f"{text[: cls.COMMENT_EXCERPT_LENGTH - 1]}…"
+
+    @staticmethod
+    def _resolve_activity_at(*, created_at, updated_at):
+        return updated_at or created_at
