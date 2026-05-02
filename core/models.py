@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
-from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value, CharField
+from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value, CharField, Exists
 from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
@@ -128,6 +128,19 @@ class MovieQuerySet(models.QuerySet):
                     movie_id=OuterRef("pk"),
                     user_id=user.id,
                 ).values("score")[:1]
+            )
+        )
+
+    def with_in_my_list(self, user):
+        if not user or not user.is_authenticated:
+            return self.annotate(is_in_my_list=Value(False))
+
+        return self.annotate(
+            is_in_my_list=Exists(
+                MovieListItem.objects.filter(
+                    user_id=user.id,
+                    movie_id=OuterRef("pk"),
+                )
             )
         )
 
@@ -362,6 +375,21 @@ class MovieRating(models.Model):
 
     def __str__(self):
         return f"MovieRating(user={self.user_id}, movie={self.movie_id}, score={self.score})"
+
+
+class MovieListItem(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movie_list_items")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="saved_by_users")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "movie"], name="unique_movie_list_item_per_user")
+        ]
+
+    def __str__(self):
+        return f"MovieListItem(user={self.user_id}, movie={self.movie_id})"
 
 
 class ProfileFavoriteMovie(models.Model):

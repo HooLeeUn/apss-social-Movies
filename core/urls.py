@@ -13,6 +13,7 @@ from .views import (
     MeNotificationsView, MeNotificationsMarkReadView, MeNotificationsMarkAllReadView, MeNotificationsMarkReadBatchView,
     MeNotificationsMarkContextReadView,
     MovieListView, MovieDetailView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
+    MyMovieListView, MovieListToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView,
 )
@@ -28,6 +29,7 @@ urlpatterns = [
     path("me/personal-data/", MePersonalDataView.as_view(), name="me-personal-data"),
     path("me/following/", MeFollowingListView.as_view(), name="me-following"),
     path("me/taste-profile/", MeTasteProfileView.as_view(), name="me-taste-profile"),
+    path("me/movie-list/", MyMovieListView.as_view(), name="me-movie-list"),
     path("me/messages/", MeMessagesView.as_view(), name="me-messages"),
     path("me/messages/summary/", MeMessagesSummaryView.as_view(), name="me-messages-summary"),
     path("me/messages/mark-as-read/", MeMessagesMarkAsReadView.as_view(), name="me-messages-mark-as-read"),
@@ -71,6 +73,7 @@ urlpatterns = [
     path("feed/weekly-recommendations/", WeeklyRecommendationsView.as_view(), name="weekly-recommendations"),
     path("movies/weekly/", WeeklyRecommendationsView.as_view(), name="movies-weekly"),
     path("movies/<int:pk>/rating/", MovieRatingView.as_view(), name="movie-rating"),
+    path("movies/<int:pk>/list/", MovieListToggleView.as_view(), name="movie-list-toggle"),
     path("movies/<int:pk>/comments/", MovieCommentsListCreateView.as_view(), name="movie-comments"),
     path("movies/<int:pk>/comments/directed/", MovieDirectedCommentsListView.as_view(), name="movie-directed-comments"),
     path("movies/<int:pk>/comments/directed/conversations/<str:username>/messages/", DirectedConversationMessagesView.as_view(), name="movie-directed-conversation-messages"),
