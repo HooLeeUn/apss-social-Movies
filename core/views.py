@@ -24,6 +24,7 @@ from .serializers import (
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
+    UserMovieRecommendationItemSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
@@ -2021,7 +2022,7 @@ class MyMovieRecommendationsView(generics.ListAPIView):
 
 class UserMovieRecommendationsView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
-    serializer_class = MyMovieRecommendationItemSerializer
+    serializer_class = UserMovieRecommendationItemSerializer
 
     def get_queryset(self):
         target = get_object_or_404(
