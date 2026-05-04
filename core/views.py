@@ -23,6 +23,7 @@ from .serializers import (
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MyMovieListItemSerializer,
+    MyMovieRecommendationItemSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
@@ -36,6 +37,7 @@ from .models import (
     Friendship,
     Movie,
     MovieListItem,
+    MovieRecommendationItem,
     MovieRating,
     ProfileFavoriteMovie,
     Post,
@@ -1935,7 +1937,7 @@ class MovieListView(generics.ListAPIView):
         else:
             qs = Movie.objects.with_display_rating().with_my_rating(user)
 
-        qs = qs.with_in_my_list(user).with_comment_stats().select_related("author", "author__profile").annotate(
+        qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
             general_rating=F("display_rating"),
         )
         qs = qs.with_following_rating_stats(user)
@@ -1982,7 +1984,7 @@ class MovieDetailView(generics.RetrieveAPIView):
         else:
             qs = Movie.objects.with_display_rating().with_my_rating(user)
 
-        qs = qs.with_in_my_list(user).with_comment_stats().select_related("author", "author__profile").annotate(
+        qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
             general_rating=F("display_rating"),
         )
         return qs.with_following_rating_stats(user)
@@ -2007,6 +2009,27 @@ class MovieListToggleView(APIView):
     def delete(self, request, pk):
         deleted_count, _ = MovieListItem.objects.filter(user=request.user, movie_id=pk).delete()
         return Response({"movie_id": pk, "is_in_my_list": False, "deleted": deleted_count > 0}, status=status.HTTP_200_OK)
+
+
+class MyMovieRecommendationsView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = MyMovieRecommendationItemSerializer
+
+    def get_queryset(self):
+        return MovieRecommendationItem.objects.filter(user=self.request.user).select_related("movie").order_by("-created_at", "-id")
+
+
+class MovieRecommendationToggleView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        movie = get_object_or_404(Movie, pk=pk)
+        _, created = MovieRecommendationItem.objects.get_or_create(user=request.user, movie=movie)
+        return Response({"movie_id": movie.id, "is_in_my_recommendations": True, "created": created}, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk):
+        deleted_count, _ = MovieRecommendationItem.objects.filter(user=request.user, movie_id=pk).delete()
+        return Response({"movie_id": pk, "is_in_my_recommendations": False, "deleted": deleted_count > 0}, status=status.HTTP_200_OK)
 
 
 class ProfileFavoritesView(APIView):
@@ -2336,6 +2359,7 @@ class FeedMoviesView(generics.ListAPIView):
             .with_display_rating()
             .annotate(general_rating=F("display_rating"))
             .with_in_my_list(self.request.user)
+            .with_in_my_recommendations(self.request.user)
             .with_following_rating_stats(self.request.user)
             .select_related("author", "author__profile")
             .order_by(ordering_case)

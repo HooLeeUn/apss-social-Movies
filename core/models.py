@@ -144,6 +144,19 @@ class MovieQuerySet(models.QuerySet):
             )
         )
 
+    def with_in_my_recommendations(self, user):
+        if not user or not user.is_authenticated:
+            return self.annotate(is_in_my_recommendations=Value(False))
+
+        return self.annotate(
+            is_in_my_recommendations=Exists(
+                MovieRecommendationItem.objects.filter(
+                    user_id=user.id,
+                    movie_id=OuterRef("pk"),
+                )
+            )
+        )
+
     def with_following_rating_stats(self, user):
         if not user or not user.is_authenticated:
             return self.annotate(
@@ -390,6 +403,21 @@ class MovieListItem(models.Model):
 
     def __str__(self):
         return f"MovieListItem(user={self.user_id}, movie={self.movie_id})"
+
+
+class MovieRecommendationItem(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movie_recommendation_items")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="recommended_by_users")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "movie"], name="unique_movie_recommendation_item_per_user")
+        ]
+
+    def __str__(self):
+        return f"MovieRecommendationItem(user={self.user_id}, movie={self.movie_id})"
 
 
 class ProfileFavoriteMovie(models.Model):
