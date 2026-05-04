@@ -42,10 +42,17 @@ class Command(BaseCommand):
             action="store_true",
             help="Simula los cambios sin persistir en base de datos.",
         )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Imprime el detalle fila por fila (comportamiento anterior).",
+        )
 
     def handle(self, *args, **options):
         csv_path = Path(options["csv"])
         dry_run = options["dry_run"]
+        verbose = options["verbose"]
+        max_examples = 20
 
         if not csv_path.exists() or not csv_path.is_file():
             raise CommandError(f"El archivo CSV no existe o no es válido: {csv_path}")
@@ -57,6 +64,13 @@ class Command(BaseCommand):
             "no_match": 0,
             "multiple_matches": 0,
             "ignored_incomplete": 0,
+        }
+
+        examples = {
+            "updated": [],
+            "no_match": [],
+            "multiple_matches": [],
+            "ignored_incomplete": [],
         }
 
         self.stdout.write(self.style.NOTICE(f"Procesando CSV: {csv_path}"))
@@ -100,16 +114,18 @@ class Command(BaseCommand):
 
                     if missing_fields:
                         counters["ignored_incomplete"] += 1
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"Fila {row_number}: ignorada por datos incompletos. "
-                                f"Campos faltantes: {missing_fields}. "
-                                f"Valores match: title_english='{title_english}', "
-                                f"title_spanish='{title_spanish}', type='{movie_type}', "
-                                f"genre='{genre}', release_year='{release_year}'. "
-                                f"director_csv='{csv_director}'"
-                            )
+                        message = (
+                            f"Fila {row_number}: ignorada por datos incompletos. "
+                            f"Campos faltantes: {missing_fields}. "
+                            f"Valores match: title_english='{title_english}', "
+                            f"title_spanish='{title_spanish}', type='{movie_type}', "
+                            f"genre='{genre}', release_year='{release_year}'. "
+                            f"director_csv='{csv_director}'"
                         )
+                        if verbose:
+                            self.stdout.write(self.style.WARNING(message))
+                        elif len(examples["ignored_incomplete"]) < max_examples:
+                            examples["ignored_incomplete"].append(message)
                         continue
 
                     matches = Movie.objects.filter(
@@ -128,21 +144,23 @@ class Command(BaseCommand):
 
                     if match_count == 0:
                         counters["no_match"] += 1
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"Fila {row_number}: sin coincidencia. Búsqueda: {lookup_values}."
-                            )
-                        )
+                        message = f"Fila {row_number}: sin coincidencia. Búsqueda: {lookup_values}."
+                        if verbose:
+                            self.stdout.write(self.style.WARNING(message))
+                        elif len(examples["no_match"]) < max_examples:
+                            examples["no_match"].append(message)
                         continue
 
                     if match_count > 1:
                         counters["multiple_matches"] += 1
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"Fila {row_number}: {match_count} coincidencias múltiples. "
-                                f"Búsqueda: {lookup_values}."
-                            )
+                        message = (
+                            f"Fila {row_number}: {match_count} coincidencias múltiples. "
+                            f"Búsqueda: {lookup_values}."
                         )
+                        if verbose:
+                            self.stdout.write(self.style.WARNING(message))
+                        elif len(examples["multiple_matches"]) < max_examples:
+                            examples["multiple_matches"].append(message)
                         continue
 
                     movie = matches.first()
@@ -150,39 +168,50 @@ class Command(BaseCommand):
 
                     if old_director == csv_director:
                         counters["already_correct"] += 1
-                        self.stdout.write(
-                            self.style.NOTICE(
-                                f"Fila {row_number}: director ya correcto para Movie(id={movie.id}). "
-                                f"Búsqueda: {lookup_values}. director='{old_director}'."
+                        if verbose:
+                            self.stdout.write(
+                                self.style.NOTICE(
+                                    f"Fila {row_number}: director ya correcto para Movie(id={movie.id}). "
+                                    f"Búsqueda: {lookup_values}. director='{old_director}'."
+                                )
                             )
-                        )
                         continue
 
                     movie.director = csv_director
 
                     if dry_run:
                         counters["updated"] += 1
-                        self.stdout.write(
-                            self.style.SUCCESS(
-                                f"Fila {row_number}: DRY-RUN actualizaría Movie(id={movie.id}). "
-                                f"Búsqueda: {lookup_values}. "
-                                f"director anterior='{old_director}' -> nuevo='{csv_director}'."
-                            )
+                        message = (
+                            f"Fila {row_number}: DRY-RUN actualizaría Movie(id={movie.id}). "
+                            f"Búsqueda: {lookup_values}. "
+                            f"director anterior='{old_director}' -> nuevo='{csv_director}'."
                         )
+                        if verbose:
+                            self.stdout.write(self.style.SUCCESS(message))
+                        elif len(examples["updated"]) < max_examples:
+                            examples["updated"].append(message)
                         continue
 
                     movie.save(update_fields=["director", "updated_at"])
                     counters["updated"] += 1
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Fila {row_number}: actualizado Movie(id={movie.id}). "
-                            f"Búsqueda: {lookup_values}. "
-                            f"director anterior='{old_director}' -> nuevo='{csv_director}'."
-                        )
+                    message = (
+                        f"Fila {row_number}: actualizado Movie(id={movie.id}). "
+                        f"Búsqueda: {lookup_values}. "
+                        f"director anterior='{old_director}' -> nuevo='{csv_director}'."
                     )
+                    if verbose:
+                        self.stdout.write(self.style.SUCCESS(message))
+                    elif len(examples["updated"]) < max_examples:
+                        examples["updated"].append(message)
 
                 if dry_run:
                     transaction.set_rollback(True)
+
+        if not verbose:
+            self._print_examples("Ejemplos de actualizaciones propuestas", examples["updated"], max_examples)
+            self._print_examples("Ejemplos de filas sin coincidencia", examples["no_match"], max_examples)
+            self._print_examples("Ejemplos de filas con múltiples coincidencias", examples["multiple_matches"], max_examples)
+            self._print_examples("Ejemplos de filas ignoradas por datos incompletos", examples["ignored_incomplete"], max_examples)
 
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Filas leídas: {counters['rows_read']}")
@@ -208,3 +237,10 @@ class Command(BaseCommand):
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _print_examples(self, title, messages, max_examples):
+        if not messages:
+            return
+        self.stdout.write(self.style.NOTICE(f"{title} (máximo {max_examples}):"))
+        for message in messages:
+            self.stdout.write(f"- {message}")
