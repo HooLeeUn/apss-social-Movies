@@ -87,12 +87,25 @@ class Command(BaseCommand):
                         or release_year is None
                         or director is None
                     ):
+                        missing_fields = []
+                        if not csv_imdb_id:
+                            missing_fields.append("imdb_id")
+                        if not title_english:
+                            missing_fields.append("title_english")
+                        if not movie_type:
+                            missing_fields.append("type")
+                        if release_year is None:
+                            missing_fields.append("release_year")
+                        if director is None:
+                            missing_fields.append("director")
+
                         counters["ignored_incomplete"] += 1
                         self.stdout.write(
                             self.style.WARNING(
-                                "Fila "
-                                f"{row_number}: ignorada por datos incompletos "
-                                "(imdb_id/title_english/type/release_year/director)."
+                                f"Fila {row_number}: ignorada por datos incompletos. "
+                                f"Campos faltantes: {missing_fields}. "
+                                f"Valores: title_english='{title_english}', type='{movie_type}', "
+                                f"release_year='{release_year}', director='{director}', imdb_id='{csv_imdb_id}'"
                             )
                         )
                         continue
