@@ -24,6 +24,7 @@ from .serializers import (
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
+    UserMovieRecommendationItemSerializer,
     MovieRatingSerializer, ProfileFavoriteSlotSerializer, ProfileFavoriteSlotWriteSerializer,
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
@@ -2017,6 +2018,21 @@ class MyMovieRecommendationsView(generics.ListAPIView):
 
     def get_queryset(self):
         return MovieRecommendationItem.objects.filter(user=self.request.user).select_related("movie").order_by("-created_at", "-id")
+
+
+class UserMovieRecommendationsView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserMovieRecommendationItemSerializer
+
+    def get_queryset(self):
+        target = get_object_or_404(
+            User.objects.select_related("profile"),
+            username=self.kwargs["username"],
+        )
+        if not can_view_user_profile(target, self.request.user):
+            raise PermissionDenied("You do not have permission to view this profile.")
+
+        return MovieRecommendationItem.objects.filter(user=target).select_related("movie").order_by("-created_at", "-id")
 
 
 class MovieRecommendationToggleView(APIView):

@@ -1049,6 +1049,32 @@ class MyMovieRecommendationItemSerializer(serializers.ModelSerializer):
         fields = ["id", "title_english", "title_spanish", "image"]
 
 
+class UserMovieRecommendationItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="movie.id", read_only=True)
+    title_english = serializers.CharField(source="movie.title_english", read_only=True)
+    title_spanish = serializers.CharField(source="movie.title_spanish", read_only=True)
+    image = serializers.CharField(source="movie.image", read_only=True)
+    genre = serializers.CharField(source="movie.genre", read_only=True)
+    type = serializers.CharField(source="movie.type", read_only=True)
+    release_year = serializers.IntegerField(source="movie.release_year", read_only=True)
+    director = serializers.CharField(source="movie.director", read_only=True)
+    cast_members = serializers.CharField(source="movie.cast_members", read_only=True)
+
+    class Meta:
+        model = MovieRecommendationItem
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "image",
+            "genre",
+            "type",
+            "release_year",
+            "director",
+            "cast_members",
+        ]
+
+
 class MovieRatingSerializer(serializers.Serializer):
     score = serializers.IntegerField(min_value=1, max_value=10)
 

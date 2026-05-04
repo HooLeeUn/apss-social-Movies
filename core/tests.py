@@ -4662,6 +4662,41 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertEqual(response.data[1]["movie"]["id"], self.movie_2.id)
         self.assertEqual(response.data[2]["movie"]["id"], self.movie_3.id)
 
+    def test_user_movie_recommendations_returns_visited_user_items(self):
+        MovieRecommendationItem.objects.create(user=self.visited, movie=self.movie_1)
+        MovieRecommendationItem.objects.create(user=self.visited, movie=self.movie_2)
+        MovieListItem.objects.create(user=self.visited, movie=self.movie_3)
+
+        response = self.client.get(reverse("user-movie-recommendations", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [self.movie_2.id, self.movie_1.id])
+        self.assertEqual(set(response.data[0].keys()), {"id", "title_spanish", "title_english", "image"})
+
+    def test_user_movie_recommendations_private_profile_requires_access(self):
+        private_user = get_user_model().objects.create_user(
+            username="private_reco_owner",
+            email="private-reco-owner@example.com",
+            password="test1234",
+        )
+        private_user.profile.visibility = Profile.Visibility.PRIVATE
+        private_user.profile.is_public = False
+        private_user.profile.save(update_fields=["visibility", "is_public"])
+        MovieRecommendationItem.objects.create(user=private_user, movie=self.movie_1)
+
+        response = self.client.get(reverse("user-movie-recommendations", kwargs={"username": private_user.username}))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        Friendship.objects.create(
+            requester=private_user,
+            user1=min(private_user, self.viewer, key=lambda u: u.id),
+            user2=max(private_user, self.viewer, key=lambda u: u.id),
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        allowed_response = self.client.get(reverse("user-movie-recommendations", kwargs={"username": private_user.username}))
+        self.assertEqual(allowed_response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in allowed_response.data], [self.movie_1.id])
+
     def test_profile_favorites_own_semantics_remain_for_authenticated_user(self):
         followed = get_user_model().objects.create_user(
             username="followed_for_viewer",

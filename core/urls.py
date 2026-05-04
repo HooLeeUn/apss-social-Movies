@@ -13,7 +13,7 @@ from .views import (
     MeNotificationsView, MeNotificationsMarkReadView, MeNotificationsMarkAllReadView, MeNotificationsMarkReadBatchView,
     MeNotificationsMarkContextReadView,
     MovieListView, MovieDetailView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
-    MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, MovieRecommendationToggleView,
+    MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, UserMovieRecommendationsView, MovieRecommendationToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView,
 )
@@ -49,6 +49,7 @@ urlpatterns = [
     path("users/<str:username>/following/", UserFollowingListView.as_view(), name="user-following"),
     path("users/<str:username>/friends/", UserFriendsListView.as_view(), name="user-friends"),
     path("users/<str:username>/favorites/", UserProfileFavoritesView.as_view(), name="user-favorites"),
+    path("users/<str:username>/movie-recommendations/", UserMovieRecommendationsView.as_view(), name="user-movie-recommendations"),
     path("users/<str:username>/activity/", UserProfileActivityView.as_view(), name="user-activity"),
     path("social/following/", SocialFollowingListView.as_view(), name="social-following-list"),
     path("friendships/", FriendsListView.as_view(), name="friendship-list"),
