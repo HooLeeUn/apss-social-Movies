@@ -12,6 +12,7 @@ from .models import (
     Friendship,
     Movie,
     MovieListItem,
+    MovieRecommendationItem,
     Post,
     UserVisibilityBlock,
     UserDirectorPreference,
@@ -1008,6 +1009,7 @@ class MovieListSerializer(serializers.ModelSerializer):
     following_ratings_count = serializers.IntegerField(read_only=True)
     comments_count = serializers.IntegerField(read_only=True)
     is_in_my_list = serializers.BooleanField(read_only=True)
+    is_in_my_recommendations = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Movie
@@ -1020,6 +1022,7 @@ class MovieListSerializer(serializers.ModelSerializer):
             "real_ratings_count", "real_ratings_avg",
             "display_rating", "general_rating", "my_rating", "following_avg_rating", "following_ratings_count", "comments_count",
             "is_in_my_list",
+            "is_in_my_recommendations",
         ]
 
 
@@ -1033,6 +1036,17 @@ class MyMovieListItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = MovieListItem
         fields = ["id", "title_english", "title_spanish", "image", "type"]
+
+
+class MyMovieRecommendationItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="movie.id", read_only=True)
+    title_english = serializers.CharField(source="movie.title_english", read_only=True)
+    title_spanish = serializers.CharField(source="movie.title_spanish", read_only=True)
+    image = serializers.CharField(source="movie.image", read_only=True)
+
+    class Meta:
+        model = MovieRecommendationItem
+        fields = ["id", "title_english", "title_spanish", "image"]
 
 
 class MovieRatingSerializer(serializers.Serializer):
