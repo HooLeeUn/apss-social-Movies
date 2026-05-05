@@ -3543,6 +3543,93 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             "image": matched.image,
         })
 
+    def test_autocomplete_requires_all_terms_across_metadata(self):
+        title_year_cast_match = self._create_movie(
+            "Cabana Pearl",
+            title_spanish="Cabaña perla",
+            release_year=2017,
+            cast_members="Laura García",
+        )
+        director_match = self._create_movie(
+            "Evil Story",
+            title_spanish="La maldad",
+            release_year=2017,
+            director="María Cabaña",
+        )
+        self._create_movie(
+            "La martina",
+            title_spanish="La martina",
+            release_year=2017,
+            director="Sin coincidencia",
+        )
+        self._create_movie(
+            "Cabin Different Year",
+            title_spanish="La cabaña",
+            release_year=2015,
+            cast_members="Laura García",
+        )
+        self._create_movie(
+            "Cabin Without Article",
+            title_spanish="Cabaña",
+            release_year=2017,
+            director="Sin articulo",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "la cabaña 2017", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(set(result_ids), {title_year_cast_match.id, director_match.id})
+
+    def test_autocomplete_prioritizes_titles_when_all_terms_match(self):
+        title_match = self._create_movie(
+            "The Curious Case of Benjamin Button",
+            title_spanish="El curioso caso de Benjamin Button",
+            release_year=2008,
+        )
+        metadata_match = self._create_movie(
+            "Unrelated Drama",
+            director="Benjamin Button",
+            cast_members="Actor",
+            release_year=2008,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "benjamin button", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:2], [title_match.id, metadata_match.id])
+
+    def test_autocomplete_paginates_without_capping_total_results_to_limit(self):
+        for index in range(5):
+            self._create_movie(f"Matrix Infinite {index}", release_year=1999 + index)
+
+        first_page = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "matrix", "limit": 2},
+        )
+        second_page = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "matrix", "limit": 2, "page": 2},
+        )
+
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data["count"], 5)
+        self.assertIsNotNone(first_page.data["next"])
+        self.assertIn("previous", first_page.data)
+        self.assertEqual(len(first_page.data["results"]), 2)
+        self.assertEqual(len(second_page.data["results"]), 2)
+        first_page_ids = {movie["id"] for movie in first_page.data["results"]}
+        second_page_ids = {movie["id"] for movie in second_page.data["results"]}
+        self.assertTrue(first_page_ids.isdisjoint(second_page_ids))
+
     def test_autocomplete_search_matches_terms_inside_titles(self):
         matched = self._create_movie(
             "The Curious Case of Benjamin Button",

@@ -88,6 +88,36 @@ MOVIE_SEARCH_FIELD_WEIGHTS = (
 )
 MOVIE_SEARCH_SYNOPSIS_WEIGHT = ("synopsis", 2)
 MOVIE_SEARCH_YEAR_WEIGHT = 6
+MOVIE_SEARCH_SHORT_TERM_LENGTH = 2
+MOVIE_SEARCH_RELEVANCE_GROUPS = (
+    (("title_spanish", "title_english"), 500),
+    (("director",), 250),
+    (("cast_members",), 120),
+    (("genre", "type"), 60),
+)
+
+
+def _build_movie_term_match(term, weighted_fields, search_lookup_suffix):
+    """Return an OR predicate for one search term across searchable metadata."""
+    term_match = Q()
+    for field, _weight in weighted_fields:
+        term_match |= Q(**{f"{field}{search_lookup_suffix}": term})
+
+    if term.isdigit():
+        term_match |= Q(release_year=int(term))
+
+    return term_match
+
+
+def _build_movie_terms_group_match(terms, fields, search_lookup_suffix):
+    """Return an AND predicate requiring every term to match one field in a group."""
+    group_match = Q()
+    for term in terms:
+        term_match = Q()
+        for field in fields:
+            term_match |= Q(**{f"{field}{search_lookup_suffix}": term})
+        group_match &= term_match
+    return group_match
 
 
 def apply_movie_search(
@@ -105,40 +135,63 @@ def apply_movie_search(
     if include_synopsis:
         weighted_fields.append(MOVIE_SEARCH_SYNOPSIS_WEIGHT)
 
-    filters = Q()
-    score_expr = Value(0, output_field=IntegerField())
     if use_unaccent is None:
         use_unaccent = connection.vendor == "postgresql"
     search_lookup_suffix = "__unaccent__icontains" if use_unaccent else "__icontains"
 
+    # Main functional rule: every typed term must match at least one metadata
+    # field. Inside a single term we use OR across metadata fields; across terms
+    # we combine with AND so common words or years cannot make unrelated movies
+    # pass the filter by themselves.
+    filters = Q()
     for term in terms:
-        term_match = Q()
-        for field, weight in weighted_fields:
-            lookup = {f"{field}{search_lookup_suffix}": term}
-            term_match |= Q(**lookup)
-            if include_relevance:
-                score_expr += Case(
-                    When(**lookup, then=Value(weight)),
-                    default=Value(0),
-                    output_field=IntegerField(),
-                )
-
-        if term.isdigit():
-            year = int(term)
-            year_lookup = {"release_year": year}
-            term_match |= Q(**year_lookup)
-            if include_relevance:
-                score_expr += Case(
-                    When(**year_lookup, then=Value(MOVIE_SEARCH_YEAR_WEIGHT)),
-                    default=Value(0),
-                    output_field=IntegerField(),
-                )
-
-        filters &= term_match
+        filters &= _build_movie_term_match(term, weighted_fields, search_lookup_suffix)
 
     filtered_queryset = queryset.filter(filters)
     if not include_relevance:
         return filtered_queryset
+
+    score_expr = Value(0, output_field=IntegerField())
+    relevance_terms = [
+        term
+        for term in terms
+        if term.isdigit() or len(term) > MOVIE_SEARCH_SHORT_TERM_LENGTH
+    ]
+    if not relevance_terms:
+        relevance_terms = terms
+
+    text_relevance_terms = [term for term in relevance_terms if not term.isdigit()]
+    for fields, weight in MOVIE_SEARCH_RELEVANCE_GROUPS:
+        if not text_relevance_terms:
+            break
+        group_match = _build_movie_terms_group_match(
+            text_relevance_terms,
+            fields,
+            search_lookup_suffix,
+        )
+        score_expr += Case(
+            When(group_match, then=Value(weight)),
+            default=Value(0),
+            output_field=IntegerField(),
+        )
+
+    for term in relevance_terms:
+        for field, weight in weighted_fields:
+            lookup = {f"{field}{search_lookup_suffix}": term}
+            score_expr += Case(
+                When(**lookup, then=Value(weight)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+
+        if term.isdigit():
+            year_lookup = {"release_year": int(term)}
+            score_expr += Case(
+                When(**year_lookup, then=Value(MOVIE_SEARCH_YEAR_WEIGHT)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+
     return filtered_queryset.annotate(search_relevance=score_expr)
 
 
