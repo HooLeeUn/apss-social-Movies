@@ -364,6 +364,11 @@ class Movie(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["title_english", "release_year", "id"], name="movie_title_en_auto_idx"),
+            models.Index(fields=["title_spanish", "release_year", "id"], name="movie_title_es_auto_idx"),
+            models.Index(fields=["release_year", "id"], name="movie_year_auto_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         self.genre_key = build_genre_key(self.genre)

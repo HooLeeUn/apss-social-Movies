@@ -998,6 +998,19 @@ class CommentReactionSerializer(serializers.Serializer):
         return super().to_internal_value(payload)
 
 
+class MovieAutocompleteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "release_year",
+            "image",
+        ]
+
+
 class MovieListSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     real_ratings_count = serializers.IntegerField(read_only=True)

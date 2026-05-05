@@ -9,6 +9,21 @@ class DefaultPagination(PageNumberPagination):
     max_page_size = 50
 
 
+class AutocompletePagination(DefaultPagination):
+    page_size = 8
+    max_page_size = 20
+    limit_query_param = "limit"
+
+    def get_page_size(self, request):
+        limit = request.query_params.get(self.limit_query_param)
+        if limit is not None:
+            try:
+                return max(1, min(int(limit), self.max_page_size))
+            except (TypeError, ValueError):
+                pass
+        return super().get_page_size(request)
+
+
 class FeedMoviesPagination(DefaultPagination):
     """Optimiza el count del feed con un queryset liviano."""
 
