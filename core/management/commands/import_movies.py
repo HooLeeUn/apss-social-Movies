@@ -86,17 +86,20 @@ class Command(BaseCommand):
         self.stdout.write(self.style.NOTICE(f"Autor asignado: {author.username}"))
         self.stdout.write(
             self.style.NOTICE(
-                "Precargando películas existentes (clave: title_english, title_spanish, type, release_year)..."
+                "Precargando películas existentes "
+                "(clave: title_english, title_spanish, type, release_year, primer director)..."
             )
         )
 
         existing_movies = {}
+        existing_key_collision_count = 0
         existing_rows = Movie.objects.values_list(
             "id",
             "title_english",
             "title_spanish",
             "type",
             "release_year",
+            "director",
             "imdb_id",
             "external_votes",
         ).iterator(chunk_size=10000)
@@ -106,10 +109,19 @@ class Command(BaseCommand):
             title_spanish,
             movie_type,
             release_year,
+            director,
             imdb_id,
             external_votes,
         ) in existing_rows:
-            key = self._build_key(title_english, title_spanish, movie_type, release_year)
+            key = self._build_key(
+                title_english,
+                title_spanish,
+                release_year,
+                movie_type,
+                director,
+            )
+            if key in existing_movies:
+                existing_key_collision_count += 1
             existing_movies[key] = {
                 "id": movie_id,
                 "imdb_id": self._clean_text(imdb_id),
@@ -120,6 +132,8 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.NOTICE(
                 f"Claves existentes cargadas: {len(existing_movies)}. "
+                "Claves existentes duplicadas por clave normalizada: "
+                f"{existing_key_collision_count}. "
                 f"Iniciando importación por lotes de {self.BATCH_SIZE}."
             )
         )
@@ -144,8 +158,9 @@ class Command(BaseCommand):
                     key = self._build_key(
                         movie_payload["title_english"],
                         movie_payload["title_spanish"],
-                        movie_payload["type"],
                         movie_payload["release_year"],
+                        movie_payload["type"],
+                        movie_payload["director"],
                     )
 
                     existing_movie = existing_movies.get(key)
@@ -274,13 +289,45 @@ class Command(BaseCommand):
         }
 
     @staticmethod
-    def _build_key(title_english, title_spanish, movie_type, release_year):
+    def _build_key(title_english, title_spanish, release_year, movie_type, director):
         return (
-            str(title_english).strip().lower(),
-            str(title_spanish).strip().lower() if title_spanish else None,
+            Command._normalize_key_text(title_english),
+            Command._normalize_key_text(title_spanish),
             movie_type,
-            release_year,
+            Command._normalize_key_year(release_year),
+            Command._normalize_first_director(director),
         )
+
+    @staticmethod
+    def _normalize_key_text(value):
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_key_year(value):
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+
+        value = Command._clean_text(value)
+        if not value:
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_first_director(value):
+        if value is None:
+            return None
+
+        first_director = str(value).split(",", maxsplit=1)[0].strip().lower()
+        return first_director or None
 
     @staticmethod
     def _clean_text(value):
