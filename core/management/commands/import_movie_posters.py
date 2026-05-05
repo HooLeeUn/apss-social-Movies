@@ -1,12 +1,12 @@
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import quote, unquote
 
 import requests
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Q
 
@@ -73,6 +73,23 @@ class Command(BaseCommand):
             action="store_true",
             help="Omite el fallback a Fanart.tv y usa solo Wikidata/Wikimedia.",
         )
+        parser.add_argument(
+            "--only-fanart",
+            action="store_true",
+            help="Omite Wikidata/Wikimedia y usa solo Fanart.tv.",
+        )
+        parser.add_argument(
+            "--fanart-rate-limit-sleep",
+            type=float,
+            default=5.0,
+            help="Segundos de espera cuando Fanart.tv responde 429.",
+        )
+        parser.add_argument(
+            "--fanart-max-requests",
+            type=int,
+            default=None,
+            help="Máximo de requests a Fanart.tv para esta ejecución.",
+        )
 
     def handle(self, *args, **options):
         limit = options["limit"]
@@ -82,6 +99,12 @@ class Command(BaseCommand):
         debug = options["debug"]
         start_id = options["start_id"]
         skip_fanart = options["skip_fanart"]
+        only_fanart = options["only_fanart"]
+        fanart_rate_limit_sleep = max(0.0, options["fanart_rate_limit_sleep"])
+        fanart_max_requests = options["fanart_max_requests"]
+
+        if skip_fanart and only_fanart:
+            raise CommandError("Las opciones --skip-fanart y --only-fanart son incompatibles.")
 
         fanart_api_key = None if skip_fanart else self._get_fanart_api_key()
         if skip_fanart:
@@ -90,7 +113,12 @@ class Command(BaseCommand):
                     "--skip-fanart activo; se omitirá Fanart.tv y solo se usará Wikidata/Wikimedia."
                 )
             )
-        elif not fanart_api_key:
+        elif only_fanart:
+            self.stdout.write(
+                self.style.NOTICE("--only-fanart activo; se omitirá Wikidata/Wikimedia y se usará solo Fanart.tv.")
+            )
+
+        if not skip_fanart and not fanart_api_key:
             self.stdout.write(
                 self.style.WARNING(
                     "FANART_API_KEY no está configurada; se omitirá Fanart.tv y solo se usará Wikidata/Wikimedia."
@@ -125,7 +153,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.NOTICE(
                 f"Iniciando importación de posters para {total_candidates} películas "
-                f"(batch-size={batch_size}, pause={pause}s, skip-fanart={skip_fanart})."
+                f"(batch-size={batch_size}, pause={pause}s, skip-fanart={skip_fanart}, only-fanart={only_fanart})."
             )
         )
 
@@ -136,6 +164,11 @@ class Command(BaseCommand):
             "without_poster": 0,
             "errors": 0,
             "last_processed_id": None,
+            "fanart_requests": 0,
+            "fanart_cache_hits": 0,
+            "fanart_rate_limits": 0,
+            "fanart_no_poster": 0,
+            "fanart_request_limit_reached": False,
         }
 
         session = requests.Session()
@@ -147,6 +180,7 @@ class Command(BaseCommand):
         )
 
         candidate_iter = base_qs.values_list("id", "imdb_id", "type").iterator(chunk_size=5000)
+        fanart_cache: Dict[str, Optional[str]] = {}
 
         batch: List[MovieCandidate] = []
         for movie_id, imdb_id, movie_type in candidate_iter:
@@ -164,6 +198,10 @@ class Command(BaseCommand):
                     stats,
                     debug=debug,
                     skip_fanart=skip_fanart,
+                    only_fanart=only_fanart,
+                    fanart_cache=fanart_cache,
+                    fanart_rate_limit_sleep=fanart_rate_limit_sleep,
+                    fanart_max_requests=fanart_max_requests,
                 )
                 batch = []
 
@@ -176,6 +214,10 @@ class Command(BaseCommand):
                 stats,
                 debug=debug,
                 skip_fanart=skip_fanart,
+                only_fanart=only_fanart,
+                fanart_cache=fanart_cache,
+                fanart_rate_limit_sleep=fanart_rate_limit_sleep,
+                fanart_max_requests=fanart_max_requests,
             )
 
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
@@ -183,6 +225,13 @@ class Command(BaseCommand):
         self.stdout.write(f"Posters desde Wikidata/Wikimedia: {stats['wikidata']}")
         self.stdout.write(f"Posters desde Fanart.tv: {stats['fanart']}")
         self.stdout.write(f"Sin poster: {stats['without_poster']}")
+        self.stdout.write(f"Fanart requests: {stats['fanart_requests']}")
+        self.stdout.write(f"Fanart cache hits: {stats['fanart_cache_hits']}")
+        self.stdout.write(f"Fanart rate limits (429): {stats['fanart_rate_limits']}")
+        self.stdout.write(f"Fanart sin poster: {stats['fanart_no_poster']}")
+        self.stdout.write(
+            f"Fanart límite de requests alcanzado: {stats['fanart_request_limit_reached']}"
+        )
         self.stdout.write(f"Errores: {stats['errors']}")
         self.stdout.write(f"Último id procesado: {stats['last_processed_id']}")
         self.stdout.write(f"Cantidad procesada: {stats['processed']}")
@@ -196,12 +245,16 @@ class Command(BaseCommand):
         stats,
         debug=False,
         skip_fanart=False,
+        only_fanart=False,
+        fanart_cache=None,
+        fanart_rate_limit_sleep=5.0,
+        fanart_max_requests=None,
     ):
         batch_min_id = min(item.movie_id for item in batch)
         batch_max_id = max(item.movie_id for item in batch)
 
         imdb_ids = [item.imdb_id for item in batch]
-        wikidata_map = self._fetch_wikidata_posters(session, imdb_ids, pause, stats, debug=debug)
+        wikidata_map = {} if only_fanart else self._fetch_wikidata_posters(session, imdb_ids, pause, stats, debug=debug)
 
         to_update = []
         missing_for_fanart: List[MovieCandidate] = []
@@ -228,13 +281,22 @@ class Command(BaseCommand):
                         f"[DEBUG] Wikidata sin poster para {item.imdb_id}; probando fallback Fanart..."
                     )
                 poster_url = self._fetch_fanart_poster(
-                    session, item, fanart_api_key, pause, stats, debug=debug
+                    session,
+                    item,
+                    fanart_api_key,
+                    pause,
+                    stats,
+                    debug=debug,
+                    fanart_cache=fanart_cache,
+                    fanart_rate_limit_sleep=fanart_rate_limit_sleep,
+                    fanart_max_requests=fanart_max_requests,
                 )
                 if poster_url:
                     to_update.append(Movie(id=item.movie_id, image=poster_url))
                     stats["fanart"] += 1
                 else:
                     stats["without_poster"] += 1
+                    stats["fanart_no_poster"] += 1
 
         if to_update:
             with transaction.atomic():
@@ -311,7 +373,31 @@ SELECT ?imdb_id ?poster WHERE {{
 
         return results
 
-    def _fetch_fanart_poster(self, session, item, fanart_api_key, pause, stats, debug=False):
+    def _fetch_fanart_poster(
+        self,
+        session,
+        item,
+        fanart_api_key,
+        pause,
+        stats,
+        debug=False,
+        fanart_cache=None,
+        fanart_rate_limit_sleep=5.0,
+        fanart_max_requests=None,
+    ):
+        if fanart_cache is None:
+            fanart_cache = {}
+
+        cached_poster = fanart_cache.get(item.imdb_id, "__missing__")
+        if cached_poster != "__missing__":
+            stats["fanart_cache_hits"] += 1
+            return cached_poster
+
+        if fanart_max_requests is not None and stats["fanart_requests"] >= fanart_max_requests:
+            stats["fanart_request_limit_reached"] = True
+            fanart_cache[item.imdb_id] = None
+            return None
+
         if not fanart_api_key:
             if debug:
                 self.stdout.write(f"[DEBUG] FANART_API_KEY ausente; fallback no disponible para {item.imdb_id}")
@@ -323,14 +409,27 @@ SELECT ?imdb_id ?poster WHERE {{
             self.stdout.write(f"[DEBUG] Fanart request -> endpoint={endpoint}, imdb_id={item.imdb_id}")
 
         try:
+            stats["fanart_requests"] += 1
             response = session.get(url, params={"api_key": fanart_api_key}, timeout=DEFAULT_TIMEOUT)
             if response.status_code == 404:
+                fanart_cache[item.imdb_id] = None
+                return None
+            if response.status_code == 429:
+                stats["fanart_rate_limits"] += 1
+                if debug:
+                    self.stdout.write(
+                        f"[DEBUG] Fanart rate limit 429 para {item.imdb_id}; esperando {fanart_rate_limit_sleep}s."
+                    )
+                if fanart_rate_limit_sleep:
+                    time.sleep(fanart_rate_limit_sleep)
+                fanart_cache[item.imdb_id] = None
                 return None
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError) as exc:
             stats["errors"] += 1
             self.stdout.write(self.style.ERROR(f"Fanart error [{item.imdb_id}]: {exc}"))
+            fanart_cache[item.imdb_id] = None
             return None
         finally:
             if pause:
@@ -343,8 +442,10 @@ SELECT ?imdb_id ?poster WHERE {{
                 continue
             first = posters[0]
             if isinstance(first, dict) and first.get("url"):
+                fanart_cache[item.imdb_id] = first["url"]
                 return first["url"]
 
+        fanart_cache[item.imdb_id] = None
         return None
 
     @staticmethod
