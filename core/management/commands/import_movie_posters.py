@@ -68,6 +68,11 @@ class Command(BaseCommand):
             default=None,
             help="Procesa solo películas con id mayor o igual a este valor.",
         )
+        parser.add_argument(
+            "--skip-fanart",
+            action="store_true",
+            help="Omite el fallback a Fanart.tv y usa solo Wikidata/Wikimedia.",
+        )
 
     def handle(self, *args, **options):
         limit = options["limit"]
@@ -76,9 +81,16 @@ class Command(BaseCommand):
         pause = max(0.0, options["pause"])
         debug = options["debug"]
         start_id = options["start_id"]
+        skip_fanart = options["skip_fanart"]
 
-        fanart_api_key = self._get_fanart_api_key()
-        if not fanart_api_key:
+        fanart_api_key = None if skip_fanart else self._get_fanart_api_key()
+        if skip_fanart:
+            self.stdout.write(
+                self.style.NOTICE(
+                    "--skip-fanart activo; se omitirá Fanart.tv y solo se usará Wikidata/Wikimedia."
+                )
+            )
+        elif not fanart_api_key:
             self.stdout.write(
                 self.style.WARNING(
                     "FANART_API_KEY no está configurada; se omitirá Fanart.tv y solo se usará Wikidata/Wikimedia."
@@ -113,7 +125,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.NOTICE(
                 f"Iniciando importación de posters para {total_candidates} películas "
-                f"(batch-size={batch_size}, pause={pause}s)."
+                f"(batch-size={batch_size}, pause={pause}s, skip-fanart={skip_fanart})."
             )
         )
 
@@ -144,11 +156,27 @@ class Command(BaseCommand):
 
             batch.append(MovieCandidate(movie_id=movie_id, imdb_id=clean_imdb, movie_type=movie_type))
             if len(batch) >= batch_size:
-                self._process_batch(batch, session, fanart_api_key, pause, stats, debug=debug)
+                self._process_batch(
+                    batch,
+                    session,
+                    fanart_api_key,
+                    pause,
+                    stats,
+                    debug=debug,
+                    skip_fanart=skip_fanart,
+                )
                 batch = []
 
         if batch:
-            self._process_batch(batch, session, fanart_api_key, pause, stats, debug=debug)
+            self._process_batch(
+                batch,
+                session,
+                fanart_api_key,
+                pause,
+                stats,
+                debug=debug,
+                skip_fanart=skip_fanart,
+            )
 
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Procesadas: {stats['processed']}")
@@ -159,7 +187,16 @@ class Command(BaseCommand):
         self.stdout.write(f"Último id procesado: {stats['last_processed_id']}")
         self.stdout.write(f"Cantidad procesada: {stats['processed']}")
 
-    def _process_batch(self, batch, session, fanart_api_key, pause, stats, debug=False):
+    def _process_batch(
+        self,
+        batch,
+        session,
+        fanart_api_key,
+        pause,
+        stats,
+        debug=False,
+        skip_fanart=False,
+    ):
         batch_min_id = min(item.movie_id for item in batch)
         batch_max_id = max(item.movie_id for item in batch)
 
@@ -177,15 +214,27 @@ class Command(BaseCommand):
             else:
                 missing_for_fanart.append(item)
 
-        for item in missing_for_fanart:
+        if skip_fanart:
+            stats["without_poster"] += len(missing_for_fanart)
             if debug:
-                self.stdout.write(f"[DEBUG] Wikidata sin poster para {item.imdb_id}; probando fallback Fanart...")
-            poster_url = self._fetch_fanart_poster(session, item, fanart_api_key, pause, stats, debug=debug)
-            if poster_url:
-                to_update.append(Movie(id=item.movie_id, image=poster_url))
-                stats["fanart"] += 1
-            else:
-                stats["without_poster"] += 1
+                for item in missing_for_fanart:
+                    self.stdout.write(
+                        f"[DEBUG] Wikidata sin poster para {item.imdb_id}; fallback Fanart omitido."
+                    )
+        else:
+            for item in missing_for_fanart:
+                if debug:
+                    self.stdout.write(
+                        f"[DEBUG] Wikidata sin poster para {item.imdb_id}; probando fallback Fanart..."
+                    )
+                poster_url = self._fetch_fanart_poster(
+                    session, item, fanart_api_key, pause, stats, debug=debug
+                )
+                if poster_url:
+                    to_update.append(Movie(id=item.movie_id, image=poster_url))
+                    stats["fanart"] += 1
+                else:
+                    stats["without_poster"] += 1
 
         if to_update:
             with transaction.atomic():
