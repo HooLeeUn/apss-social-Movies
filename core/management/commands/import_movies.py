@@ -4,7 +4,7 @@ from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import models, transaction
 
 from core.models import Movie, build_genre_key
 
@@ -81,6 +81,9 @@ class Command(BaseCommand):
         duplicate_count = 0
         updated_existing_count = 0
         error_count = 0
+        self.director_reduced_count = 0
+        self.director_truncated_count = 0
+        self.charfield_truncated_counts = {}
 
         self.stdout.write(self.style.NOTICE(f"Iniciando importación desde: {csv_path}"))
         self.stdout.write(self.style.NOTICE(f"Autor asignado: {author.username}"))
@@ -251,6 +254,22 @@ class Command(BaseCommand):
         self.stdout.write(f"Registros existentes actualizados: {updated_existing_count}")
         self.stdout.write(f"Omitidas por duplicado: {duplicate_count}")
         self.stdout.write(f"Omitidas por error: {error_count}")
+        self.stdout.write(
+            "Directores reducidos a primer director: "
+            f"{self.director_reduced_count}"
+        )
+        self.stdout.write(
+            "Directores truncados por max_length: "
+            f"{self.director_truncated_count}"
+        )
+        if self.charfield_truncated_counts:
+            truncated_summary = ", ".join(
+                f"{field}={count}"
+                for field, count in sorted(self.charfield_truncated_counts.items())
+            )
+            self.stdout.write(f"CharFields truncados por max_length: {truncated_summary}")
+        else:
+            self.stdout.write("CharFields truncados por max_length: 0")
 
     def _flush_batch(self, items):
         with transaction.atomic():
@@ -273,20 +292,29 @@ class Command(BaseCommand):
 
         external_votes = self._parse_external_votes(row.get("external_votes"))
 
-        return {
-            "title_english": title_english,
-            "title_spanish": self._clean_text(row.get("title_spanish")),
+        raw_director = self._clean_text(row.get("director"))
+        director = self._first_director_for_storage(raw_director)
+        if raw_director and director != raw_director:
+            self.director_reduced_count += 1
+
+        payload = {
+            "title_english": self._truncate_char_field("title_english", title_english),
+            "title_spanish": self._truncate_char_field(
+                "title_spanish",
+                self._clean_text(row.get("title_spanish")),
+            ),
             "type": self._normalize_type(row.get("type")),
-            "genre": self._clean_text(row.get("genre")),
-            "genre_key": build_genre_key(row.get("genre")),
+            "genre": self._truncate_char_field("genre", self._clean_text(row.get("genre"))),
+            "genre_key": self._truncate_char_field("genre_key", build_genre_key(row.get("genre"))),
             "release_year": self._parse_year(row.get("release_year")),
-            "director": self._clean_text(row.get("director")),
+            "director": self._truncate_char_field("director", director),
             "cast_members": self._clean_text(row.get("cast_members")),
             "external_rating": self._parse_rating(row.get("external_rating")),
             "external_votes": external_votes if external_votes is not None else 0,
             "external_votes_provided": external_votes is not None,
-            "imdb_id": self._clean_text(row.get("imdb_id")),
+            "imdb_id": self._truncate_char_field("imdb_id", self._clean_text(row.get("imdb_id"))),
         }
+        return payload
 
     @staticmethod
     def _build_key(title_english, title_spanish, release_year, movie_type, director):
@@ -323,11 +351,40 @@ class Command(BaseCommand):
 
     @staticmethod
     def _normalize_first_director(value):
+        first_director = Command._first_director_for_storage(value)
+        if first_director is None:
+            return None
+
+        normalized = first_director.lower()
+        return normalized or None
+
+    @staticmethod
+    def _first_director_for_storage(value):
         if value is None:
             return None
 
-        first_director = str(value).split(",", maxsplit=1)[0].strip().lower()
+        first_director = str(value).split(",", maxsplit=1)[0].strip()
         return first_director or None
+
+    def _truncate_char_field(self, field_name, value):
+        value = self._clean_text(value)
+        if value is None:
+            return None
+
+        field = Movie._meta.get_field(field_name)
+        if not isinstance(field, models.CharField):
+            return value
+
+        max_length = getattr(field, "max_length", None)
+        if not max_length or len(value) <= max_length:
+            return value
+
+        self.charfield_truncated_counts[field_name] = (
+            self.charfield_truncated_counts.get(field_name, 0) + 1
+        )
+        if field_name == "director":
+            self.director_truncated_count += 1
+        return value[:max_length].rstrip() or None
 
     @staticmethod
     def _clean_text(value):

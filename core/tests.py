@@ -105,14 +105,13 @@ The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971,Alan Crosland Jr.,Charlto
         call_command("import_movies", str(csv_path), stdout=out)
 
         self.assertEqual(Movie.objects.count(), 2)
-        self.assertTrue(
-            Movie.objects.filter(director="Boris Sagal, Robert Gist, Alan Crosland Jr.").exists()
-        )
+        self.assertTrue(Movie.objects.filter(director="Boris Sagal").exists())
         self.assertTrue(Movie.objects.filter(director="Alan Crosland Jr.").exists())
 
         output = out.getvalue()
         self.assertIn("Creadas: 2", output)
         self.assertIn("Omitidas por duplicado: 1", output)
+        self.assertIn("Directores reducidos a primer director: 2", output)
 
     def test_import_movies_uses_first_director_to_match_existing_movies(self):
         existing_movie = Movie.objects.create(
@@ -200,6 +199,40 @@ Inception,El origen,Movie,Sci-Fi,2010,Christopher Nolan,Leonardo DiCaprio,8.8,tt
         self.assertIn("Creadas: 1", output)
         self.assertIn("Registros existentes actualizados: 0", output)
         self.assertIn("Omitidas por duplicado: 1", output)
+
+    def test_import_movies_truncates_charfields_but_not_textfields(self):
+        long_title = "T" * 300
+        long_spanish_title = "S" * 300
+        long_genre = "G" * 150
+        long_director = "D" * 300
+        long_cast = "Actor " * 120
+        csv_content = (
+            "title_english,title_spanish,type,genre,release_year,director,"
+            "cast_members,external_rating,imdb_id\n"
+            f"{long_title},{long_spanish_title},Movie,{long_genre},2020,"
+            f"{long_director},{long_cast},7.0,tt12345678901234567890\n"
+        )
+        csv_path = self._write_csv(csv_content)
+        out = io.StringIO()
+
+        call_command("import_movies", str(csv_path), stdout=out)
+
+        movie = Movie.objects.get()
+        self.assertEqual(movie.title_english, "T" * 255)
+        self.assertEqual(movie.title_spanish, "S" * 255)
+        self.assertEqual(movie.genre, "G" * 100)
+        self.assertEqual(movie.director, "D" * 255)
+        self.assertEqual(movie.cast_members, long_cast.strip())
+        self.assertEqual(movie.imdb_id, "tt123456789012345678")
+
+        output = out.getvalue()
+        self.assertIn("Directores truncados por max_length: 1", output)
+        self.assertIn("director=1", output)
+        self.assertIn("title_english=1", output)
+        self.assertIn("title_spanish=1", output)
+        self.assertIn("genre=1", output)
+        self.assertIn("genre_key=1", output)
+        self.assertIn("imdb_id=1", output)
 
     def test_import_movies_uses_given_author(self):
         alt_user = get_user_model().objects.create_user(
