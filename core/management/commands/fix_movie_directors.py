@@ -3,6 +3,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from core.models import Movie
 
@@ -53,6 +54,7 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         verbose = options["verbose"]
         max_examples = 20
+        bulk_size = 5000
 
         if not csv_path.exists() or not csv_path.is_file():
             raise CommandError(f"El archivo CSV no existe o no es válido: {csv_path}")
@@ -87,7 +89,10 @@ class Command(BaseCommand):
                     f"Faltan: {', '.join(sorted(missing))}"
                 )
 
+            movie_index = self._build_movie_index()
+
             with transaction.atomic():
+                to_update = []
                 for row_number, row in enumerate(reader, start=2):
                     counters["rows_read"] += 1
 
@@ -128,15 +133,15 @@ class Command(BaseCommand):
                             examples["ignored_incomplete"].append(message)
                         continue
 
-                    matches = Movie.objects.filter(
+                    key = self._build_key(
                         title_english=title_english,
                         title_spanish=title_spanish,
-                        type=movie_type,
+                        movie_type=movie_type,
                         genre=genre,
                         release_year=release_year,
                     )
-
-                    match_count = matches.count()
+                    matches = movie_index.get(key, [])
+                    match_count = len(matches)
                     lookup_values = (
                         f"title_english='{title_english}', title_spanish='{title_spanish}', "
                         f"type='{movie_type}', genre='{genre}', release_year='{release_year}'"
@@ -163,7 +168,7 @@ class Command(BaseCommand):
                             examples["multiple_matches"].append(message)
                         continue
 
-                    movie = matches.first()
+                    movie = matches[0]
                     old_director = movie.director
 
                     if old_director == csv_director:
@@ -192,7 +197,12 @@ class Command(BaseCommand):
                             examples["updated"].append(message)
                         continue
 
-                    movie.save(update_fields=["director", "updated_at"])
+                    movie.updated_at = timezone.now()
+                    to_update.append(movie)
+                    if len(to_update) >= bulk_size:
+                        Movie.objects.bulk_update(to_update, ["director", "updated_at"], batch_size=bulk_size)
+                        to_update.clear()
+
                     counters["updated"] += 1
                     message = (
                         f"Fila {row_number}: actualizado Movie(id={movie.id}). "
@@ -203,6 +213,9 @@ class Command(BaseCommand):
                         self.stdout.write(self.style.SUCCESS(message))
                     elif len(examples["updated"]) < max_examples:
                         examples["updated"].append(message)
+
+                if not dry_run and to_update:
+                    Movie.objects.bulk_update(to_update, ["director", "updated_at"], batch_size=bulk_size)
 
                 if dry_run:
                     transaction.set_rollback(True)
@@ -220,6 +233,40 @@ class Command(BaseCommand):
         self.stdout.write(f"Sin coincidencia: {counters['no_match']}")
         self.stdout.write(f"Coincidencias múltiples: {counters['multiple_matches']}")
         self.stdout.write(f"Filas ignoradas por datos incompletos: {counters['ignored_incomplete']}")
+
+    def _build_movie_index(self):
+        movie_index = {}
+        queryset = Movie.objects.only(
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "genre",
+            "release_year",
+            "director",
+        ).iterator(chunk_size=10000)
+
+        for movie in queryset:
+            key = self._build_key(
+                title_english=self._clean_text(movie.title_english),
+                title_spanish=self._clean_text(movie.title_spanish),
+                movie_type=self._clean_text(movie.type),
+                genre=self._clean_text(movie.genre),
+                release_year=movie.release_year,
+            )
+            movie_index.setdefault(key, []).append(movie)
+
+        return movie_index
+
+    @staticmethod
+    def _build_key(title_english, title_spanish, movie_type, genre, release_year):
+        return (
+            (title_english or "").strip(),
+            (title_spanish or "").strip(),
+            (movie_type or "").strip(),
+            (genre or "").strip(),
+            release_year,
+        )
 
     @staticmethod
     def _clean_text(value):
