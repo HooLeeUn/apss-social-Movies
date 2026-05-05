@@ -89,6 +89,7 @@ def apply_movie_search(queryset, search, include_relevance=True):
         "director",
         "cast_members",
         "genre",
+        "type",
         "synopsis",
     ]
 
@@ -106,6 +107,17 @@ def apply_movie_search(queryset, search, include_relevance=True):
                 default=Value(0),
                 output_field=IntegerField(),
             )
+
+        if term.isdigit():
+            year = int(term)
+            year_lookup = {"release_year": year}
+            term_match |= Q(**year_lookup)
+            score_expr += Case(
+                When(**year_lookup, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+
         filters &= term_match
 
     filtered_queryset = queryset.filter(filters)

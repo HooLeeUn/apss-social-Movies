@@ -3513,6 +3513,27 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids, [matched.id])
 
+    def test_search_supports_combined_title_and_release_year(self):
+        matched = self._create_movie("Titanic", release_year=1997, director="James Cameron")
+        self._create_movie("Titanic", release_year=1953, director="Jean Negulesco")
+
+        response = self.client.get(self.url, {"search": "titanic 1997"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [matched.id])
+
+    def test_search_supports_combined_genre_and_release_year(self):
+        matched = self._create_movie("Drama 1997", genre="Drama", release_year=1997)
+        self._create_movie("Drama Other Year", genre="Drama", release_year=2001)
+        self._create_movie("Action 1997", genre="Action", release_year=1997)
+
+        response = self.client.get(self.url, {"search": "drama 1997"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [matched.id])
+
     def test_search_is_accent_insensitive(self):
         matched = self._create_movie(
             "Action Dream",
