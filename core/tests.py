@@ -3523,6 +3523,40 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids, [matched.id])
 
+    def test_autocomplete_search_supports_combined_title_and_release_year(self):
+        matched = self._create_movie("Titanic", release_year=1997, director="James Cameron")
+        self._create_movie("Titanic", release_year=1953, director="Jean Negulesco")
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "search": "titanic 1997", "page_size": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0], {
+            "id": matched.id,
+            "title_english": matched.title_english,
+            "title_spanish": matched.title_spanish,
+            "type": matched.type,
+            "release_year": matched.release_year,
+            "image": matched.image,
+        })
+
+    def test_autocomplete_accepts_q_and_limit_for_small_listbox_payload(self):
+        for index in range(4):
+            self._create_movie(f"Matrix Result {index}", release_year=1999 + index)
+
+        response = self.client.get(self.url, {"autocomplete": "1", "q": "matrix", "limit": 2})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 4)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertEqual(
+            set(response.data["results"][0]),
+            {"id", "title_english", "title_spanish", "type", "release_year", "image"},
+        )
+
     def test_search_supports_combined_genre_and_release_year(self):
         matched = self._create_movie("Drama 1997", genre="Drama", release_year=1997)
         self._create_movie("Drama Other Year", genre="Drama", release_year=2001)

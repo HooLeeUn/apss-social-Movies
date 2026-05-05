@@ -21,7 +21,7 @@ from .serializers import (
     AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
     UserMovieRecommendationItemSerializer,
@@ -53,7 +53,7 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
-from .pagination import FeedMoviesPagination, DefaultPagination
+from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
 from .weekly_recommendations import (
     get_previous_closed_week_window,
@@ -1939,7 +1939,55 @@ class MovieListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = MovieListSerializer
 
+    autocomplete_truthy_values = {"1", "true", "yes"}
+
+    def is_autocomplete_request(self):
+        return self.request.query_params.get("autocomplete", "").lower() in self.autocomplete_truthy_values
+
+    def get_serializer_class(self):
+        if self.is_autocomplete_request():
+            return MovieAutocompleteSerializer
+        return MovieListSerializer
+
+    def get_paginator(self):
+        if self.is_autocomplete_request():
+            if not hasattr(self, "_autocomplete_paginator"):
+                self._autocomplete_paginator = AutocompletePagination()
+            return self._autocomplete_paginator
+        return super().get_paginator()
+
+    def _apply_common_filters(self, qs):
+        if movie_type := self.request.query_params.get("type"):
+            qs = qs.filter(type=movie_type)
+        if genre := self.request.query_params.get("genre"):
+            qs = qs.filter(genre__icontains=genre)
+        if release_year := self.request.query_params.get("release_year"):
+            qs = qs.filter(release_year=release_year)
+        return qs
+
+    def get_autocomplete_queryset(self):
+        qs = Movie.objects.only(
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "release_year",
+            "image",
+        )
+        qs = self._apply_common_filters(qs)
+
+        search = self.request.query_params.get("search") or self.request.query_params.get("q")
+        if search:
+            qs = apply_movie_search(qs, search)
+
+        release_year_desc = F("release_year").desc(nulls_last=True)
+        search_ordering = ["-search_relevance"] if search else []
+        return qs.order_by(*search_ordering, "title_english", release_year_desc, "-id")
+
     def get_queryset(self):
+        if self.is_autocomplete_request():
+            return self.get_autocomplete_queryset()
+
         user = self.request.user
         has_preferences = user.is_authenticated and UserTasteProfile.objects.filter(
             user_id=user.id,
@@ -1954,13 +2002,7 @@ class MovieListView(generics.ListAPIView):
             general_rating=F("display_rating"),
         )
         qs = qs.with_following_rating_stats(user)
-
-        if movie_type := self.request.query_params.get("type"):
-            qs = qs.filter(type=movie_type)
-        if genre := self.request.query_params.get("genre"):
-            qs = qs.filter(genre__icontains=genre)
-        if release_year := self.request.query_params.get("release_year"):
-            qs = qs.filter(release_year=release_year)
+        qs = self._apply_common_filters(qs)
 
         if search := self.request.query_params.get("search"):
             qs = apply_movie_search(qs, search)
