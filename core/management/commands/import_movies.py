@@ -86,16 +86,30 @@ class Command(BaseCommand):
         self.stdout.write(self.style.NOTICE(f"Autor asignado: {author.username}"))
         self.stdout.write(
             self.style.NOTICE(
-                "Precargando películas existentes (clave: title_english, release_year, type)..."
+                "Precargando películas existentes (clave: title_english, title_spanish, type, release_year)..."
             )
         )
 
         existing_movies = {}
         existing_rows = Movie.objects.values_list(
-            "id", "title_english", "release_year", "type", "imdb_id", "external_votes"
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "release_year",
+            "imdb_id",
+            "external_votes",
         ).iterator(chunk_size=10000)
-        for movie_id, title_english, release_year, movie_type, imdb_id, external_votes in existing_rows:
-            key = self._build_key(title_english, release_year, movie_type)
+        for (
+            movie_id,
+            title_english,
+            title_spanish,
+            movie_type,
+            release_year,
+            imdb_id,
+            external_votes,
+        ) in existing_rows:
+            key = self._build_key(title_english, title_spanish, movie_type, release_year)
             existing_movies[key] = {
                 "id": movie_id,
                 "imdb_id": self._clean_text(imdb_id),
@@ -129,8 +143,9 @@ class Command(BaseCommand):
                     movie_payload = self._build_movie_payload(row)
                     key = self._build_key(
                         movie_payload["title_english"],
-                        movie_payload["release_year"],
+                        movie_payload["title_spanish"],
                         movie_payload["type"],
+                        movie_payload["release_year"],
                     )
 
                     existing_movie = existing_movies.get(key)
@@ -259,8 +274,13 @@ class Command(BaseCommand):
         }
 
     @staticmethod
-    def _build_key(title_english, release_year, movie_type):
-        return (str(title_english).strip().lower(), release_year, movie_type)
+    def _build_key(title_english, title_spanish, movie_type, release_year):
+        return (
+            str(title_english).strip().lower(),
+            str(title_spanish).strip().lower() if title_spanish else None,
+            movie_type,
+            release_year,
+        )
 
     @staticmethod
     def _clean_text(value):
