@@ -3543,6 +3543,66 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             "image": matched.image,
         })
 
+    def test_autocomplete_search_matches_terms_inside_titles(self):
+        matched = self._create_movie(
+            "The Curious Case of Benjamin Button",
+            title_spanish="El curioso caso de Benjamin Button",
+            release_year=2008,
+        )
+        self._create_movie(
+            "Curious George",
+            title_spanish="El curioso George",
+            release_year=2006,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "benjamin button", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(matched.id, result_ids)
+
+    def test_autocomplete_search_matches_director_and_cast_terms(self):
+        directed = self._create_movie(
+            "Avatar",
+            release_year=2009,
+            director="James Cameron",
+            cast_members="Sam Worthington, Zoe Saldaña",
+        )
+        casted = self._create_movie(
+            "The Holiday",
+            release_year=2006,
+            director="Nancy Meyers",
+            cast_members="Cameron Diaz, Jude Law, Kate Winslet",
+        )
+        self._create_movie("Random Movie", director="Jane Doe", cast_members="Actor")
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "search": "james cameron", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(directed.id, result_ids)
+        self.assertNotIn(casted.id, result_ids)
+
+    def test_autocomplete_skips_synopsis_matches_for_lightweight_queries(self):
+        self._create_movie(
+            "Unrelated Title",
+            synopsis="A long synopsis that mentions transformers but not searchable metadata.",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "transformers", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"], [])
+
     def test_autocomplete_accepts_q_and_limit_for_small_listbox_payload(self):
         for index in range(4):
             self._create_movie(f"Matrix Result {index}", release_year=1999 + index)

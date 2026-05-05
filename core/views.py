@@ -78,45 +78,61 @@ def split_search_terms(search):
     return [term for term in re.split(r"\s+", search.strip()) if term]
 
 
-def apply_movie_search(queryset, search, include_relevance=True):
+MOVIE_SEARCH_FIELD_WEIGHTS = (
+    ("title_spanish", 60),
+    ("title_english", 55),
+    ("director", 30),
+    ("cast_members", 15),
+    ("genre", 12),
+    ("type", 8),
+)
+MOVIE_SEARCH_SYNOPSIS_WEIGHT = ("synopsis", 2)
+MOVIE_SEARCH_YEAR_WEIGHT = 6
+
+
+def apply_movie_search(
+    queryset,
+    search,
+    include_relevance=True,
+    include_synopsis=True,
+    use_unaccent=None,
+):
     terms = split_search_terms(search)
     if not terms:
         return queryset
 
-    search_fields = [
-        "title_english",
-        "title_spanish",
-        "director",
-        "cast_members",
-        "genre",
-        "type",
-        "synopsis",
-    ]
+    weighted_fields = list(MOVIE_SEARCH_FIELD_WEIGHTS)
+    if include_synopsis:
+        weighted_fields.append(MOVIE_SEARCH_SYNOPSIS_WEIGHT)
 
     filters = Q()
     score_expr = Value(0, output_field=IntegerField())
-    search_lookup_suffix = "__unaccent__icontains" if connection.vendor == "postgresql" else "__icontains"
+    if use_unaccent is None:
+        use_unaccent = connection.vendor == "postgresql"
+    search_lookup_suffix = "__unaccent__icontains" if use_unaccent else "__icontains"
 
     for term in terms:
         term_match = Q()
-        for field in search_fields:
+        for field, weight in weighted_fields:
             lookup = {f"{field}{search_lookup_suffix}": term}
             term_match |= Q(**lookup)
-            score_expr += Case(
-                When(**lookup, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            )
+            if include_relevance:
+                score_expr += Case(
+                    When(**lookup, then=Value(weight)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
 
         if term.isdigit():
             year = int(term)
             year_lookup = {"release_year": year}
             term_match |= Q(**year_lookup)
-            score_expr += Case(
-                When(**year_lookup, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            )
+            if include_relevance:
+                score_expr += Case(
+                    When(**year_lookup, then=Value(MOVIE_SEARCH_YEAR_WEIGHT)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
 
         filters &= term_match
 
@@ -124,6 +140,12 @@ def apply_movie_search(queryset, search, include_relevance=True):
     if not include_relevance:
         return filtered_queryset
     return filtered_queryset.annotate(search_relevance=score_expr)
+
+
+def apply_movie_autocomplete_search(queryset, search):
+    # Keep autocomplete lightweight: skip long synopsis scans and avoid unaccent() so
+    # PostgreSQL trigram indexes can support contains-style matching.
+    return apply_movie_search(queryset, search, include_synopsis=False, use_unaccent=False)
 
 
 VALID_FEED_GENRES = {
@@ -1978,7 +2000,7 @@ class MovieListView(generics.ListAPIView):
 
         search = self.request.query_params.get("search") or self.request.query_params.get("q")
         if search:
-            qs = apply_movie_search(qs, search)
+            qs = apply_movie_autocomplete_search(qs, search)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
         search_ordering = ["-search_relevance"] if search else []
