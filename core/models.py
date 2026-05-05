@@ -10,6 +10,7 @@ from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, Float
 from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
+from django.contrib.postgres.indexes import GinIndex, OpClass
 
 
 def build_genre_key(value):
@@ -368,6 +369,11 @@ class Movie(models.Model):
             models.Index(fields=["title_english", "release_year", "id"], name="movie_title_en_auto_idx"),
             models.Index(fields=["title_spanish", "release_year", "id"], name="movie_title_es_auto_idx"),
             models.Index(fields=["release_year", "id"], name="movie_year_auto_idx"),
+            GinIndex(OpClass("title_english", name="gin_trgm_ops"), name="movie_title_en_trgm_idx"),
+            GinIndex(OpClass("title_spanish", name="gin_trgm_ops"), name="movie_title_es_trgm_idx"),
+            GinIndex(OpClass("director", name="gin_trgm_ops"), name="movie_director_trgm_idx"),
+            GinIndex(OpClass("genre", name="gin_trgm_ops"), name="movie_genre_trgm_idx"),
+            GinIndex(OpClass("cast_members", name="gin_trgm_ops"), name="movie_cast_trgm_idx"),
         ]
 
     def save(self, *args, **kwargs):
