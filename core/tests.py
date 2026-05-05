@@ -93,6 +93,62 @@ Planet Earth,,tvSeries,Documentary,2006,,David Attenborough,9.4,
         self.assertIn("Creadas: 2", output)
         self.assertIn("Omitidas por duplicado: 1", output)
 
+    def test_import_movies_uses_first_director_to_detect_csv_duplicates(self):
+        csv_content = '''title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,external_votes
+The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971,"Boris Sagal, Robert Gist, Alan Crosland Jr.",Charlton Heston,6.4,100
+The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971," Boris Sagal , Different Director",Charlton Heston,6.4,200
+The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971,Alan Crosland Jr.,Charlton Heston,6.4,300
+'''
+        csv_path = self._write_csv(csv_content)
+        out = io.StringIO()
+
+        call_command("import_movies", str(csv_path), stdout=out)
+
+        self.assertEqual(Movie.objects.count(), 2)
+        self.assertTrue(
+            Movie.objects.filter(director="Boris Sagal, Robert Gist, Alan Crosland Jr.").exists()
+        )
+        self.assertTrue(Movie.objects.filter(director="Alan Crosland Jr.").exists())
+
+        output = out.getvalue()
+        self.assertIn("Creadas: 2", output)
+        self.assertIn("Omitidas por duplicado: 1", output)
+
+    def test_import_movies_uses_first_director_to_match_existing_movies(self):
+        existing_movie = Movie.objects.create(
+            author=self.author,
+            title_english="The Omega Man",
+            title_spanish="El último hombre vivo",
+            type=Movie.MOVIE,
+            genre="Sci-Fi",
+            release_year=1971,
+            director="Boris Sagal, Robert Gist",
+            cast_members="Charlton Heston",
+            external_rating=6.4,
+        )
+        csv_content = '''title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,imdb_id,external_votes
+The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971," boris sagal , Alan Crosland Jr.",Charlton Heston,6.4,tt0067525,500
+The Omega Man,El último hombre vivo,Movie,Sci-Fi,1971,Alan Crosland Jr.,Charlton Heston,6.4,tt0067525,700
+'''
+        csv_path = self._write_csv(csv_content)
+        out = io.StringIO()
+
+        call_command("import_movies", str(csv_path), stdout=out)
+
+        existing_movie.refresh_from_db()
+
+        self.assertEqual(Movie.objects.count(), 2)
+        self.assertEqual(existing_movie.imdb_id, "tt0067525")
+        self.assertEqual(existing_movie.external_votes, 500)
+        self.assertTrue(
+            Movie.objects.filter(director="Alan Crosland Jr.", external_votes=700).exists()
+        )
+
+        output = out.getvalue()
+        self.assertIn("Creadas: 1", output)
+        self.assertIn("Registros existentes actualizados: 1", output)
+        self.assertIn("Omitidas por duplicado: 1", output)
+
     def test_import_movies_updates_external_votes_and_missing_imdb_for_existing_movies(self):
         existing_movie = Movie.objects.create(
             author=self.author,
