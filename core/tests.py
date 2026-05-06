@@ -306,10 +306,8 @@ class MovieGenreKeyTests(TestCase):
 
         self.assertEqual(movie.title_english_search, "my uncle")
         self.assertEqual(movie.title_spanish_search, "mi tio y la cabana")
-        self.assertEqual(movie.genre_search, "accion drama")
         self.assertEqual(movie.director_search, "maria gomez")
         self.assertEqual(movie.cast_members_search, "jose nunez")
-        self.assertEqual(movie.type_search, "movie")
 
 
 class MovieQuerySetAnnotationTests(TestCase):

@@ -79,6 +79,37 @@ class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "external_votes", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
     search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members")
+    readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        (
+            "Información principal",
+            {
+                "fields": (
+                    "author",
+                    "title_english",
+                    "title_spanish",
+                    "type",
+                    "genre",
+                    "release_year",
+                    "director",
+                    "cast_members",
+                    "synopsis",
+                )
+            },
+        ),
+        (
+            "Datos externos",
+            {
+                "fields": (
+                    "external_rating",
+                    "external_votes",
+                    "imdb_id",
+                    "image",
+                )
+            },
+        ),
+        ("Auditoría", {"fields": ("created_at", "updated_at")}),
+    )
 
 
 class MovieRatingAdminForm(forms.ModelForm):
