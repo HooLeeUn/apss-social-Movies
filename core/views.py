@@ -104,7 +104,6 @@ MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP = {
     "title_english": "title_english_search",
     "director": "director_search",
     "cast_members": "cast_members_search",
-    "genre": "genre_search",
 }
 MOVIE_AUTOCOMPLETE_SEARCH_FIELDS = frozenset(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP)
 MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
@@ -114,13 +113,13 @@ MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
 )
 MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS = (
     "cast_members",
-    "genre",
 )
 MOVIE_AUTOCOMPLETE_EXTENDED_MATCH_FIELDS = (
     *MOVIE_AUTOCOMPLETE_FAST_FIELDS,
     *MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS,
 )
 MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH = 3
+MOVIE_AUTOCOMPLETE_SEARCH_LOOKUP_SUFFIX = "__contains"
 
 
 def _build_movie_term_match(term, weighted_fields, search_lookup_suffix):
@@ -182,6 +181,7 @@ def apply_movie_search(
     search_field_map=None,
     normalize_terms=False,
     allowed_fields=None,
+    search_lookup_suffix=None,
 ):
     if normalize_terms:
         search = normalize_movie_search_text(search)
@@ -196,9 +196,10 @@ def apply_movie_search(
     weighted_fields = _map_movie_weighted_fields(weighted_fields, search_field_map, allowed_fields)
     relevance_groups = _map_movie_relevance_groups(search_field_map, allowed_fields)
 
-    if use_unaccent is None:
-        use_unaccent = connection.vendor == "postgresql"
-    search_lookup_suffix = "__unaccent__icontains" if use_unaccent else "__icontains"
+    if search_lookup_suffix is None:
+        if use_unaccent is None:
+            use_unaccent = connection.vendor == "postgresql"
+        search_lookup_suffix = "__unaccent__icontains" if use_unaccent else "__icontains"
 
     # Main functional rule: every typed term must match at least one metadata
     # field. Inside a single term we use OR across metadata fields; across terms
@@ -319,7 +320,7 @@ def _build_autocomplete_terms_filter(terms, fields, include_release_year=False):
     for term in terms:
         term_match = Q()
         for field in fields:
-            term_match |= Q(**{f"{field}__icontains": term})
+            term_match |= Q(**{f"{field}{MOVIE_AUTOCOMPLETE_SEARCH_LOOKUP_SUFFIX}": term})
         if include_release_year and term.isdigit():
             term_match |= Q(release_year=int(term))
         filters &= term_match
@@ -366,7 +367,7 @@ def build_movie_autocomplete_fast_queryset(queryset, search):
     # Fast lane: query only pre-normalized title/director columns plus direct
     # release_year filters. Four-digit year terms are removed from the textual
     # predicate so PostgreSQL can use the release_year index instead of checking
-    # every autocomplete text column with icontains.
+    # every autocomplete text column with LIKE.
     text_terms, year_terms = _split_autocomplete_search_terms(search)
     if not text_terms and not year_terms:
         return queryset.none()
@@ -381,9 +382,9 @@ def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=N
     # Extended lane: appended only after the title/director fast lane cannot fill
     # the requested page. Each text term may match any autocomplete metadata that
     # is allowed for the endpoint, so cross-field queries like title + cast still
-    # keep AND semantics across all terms. type_search remains intentionally
-    # excluded, and four-digit years stay as release_year filters instead of text
-    # icontains predicates.
+    # keep AND semantics across all terms. genre_search and type_search remain
+    # intentionally excluded, and four-digit years stay as release_year filters
+    # instead of text LIKE predicates.
     text_terms, year_terms = _split_autocomplete_search_terms(search)
     if not text_terms and not year_terms:
         return queryset.none()
@@ -413,6 +414,7 @@ def apply_movie_autocomplete_search(queryset, search):
         include_synopsis=False,
         use_unaccent=False,
         search_field_map=MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP,
+        search_lookup_suffix=MOVIE_AUTOCOMPLETE_SEARCH_LOOKUP_SUFFIX,
         normalize_terms=True,
         allowed_fields=MOVIE_AUTOCOMPLETE_SEARCH_FIELDS,
     )

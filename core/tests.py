@@ -3787,23 +3787,44 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             title_spanish="La cabaña del tío",
             genre="Drama",
         )
-        accion = self._create_movie("Action Story", title_spanish="Aventura", genre="Acción")
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "la cabana del tio", "limit": 5},
+        )
 
-        for query, expected_id in (("la cabana del tio", full_phrase.id), ("accion", accion.id)):
-            response = self.client.get(
-                self.url,
-                {"autocomplete": "true", "q": query, "limit": 5},
-            )
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            result_ids = [movie["id"] for movie in response.data["results"]]
-            self.assertIn(expected_id, result_ids)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(full_phrase.id, result_ids)
 
         qs = apply_movie_autocomplete_search(Movie.objects.all(), "la cabana del tio")
         sql = str(qs.query).lower()
         self.assertIn("title_spanish_search", sql)
+        self.assertNotIn("genre_search", sql)
         self.assertNotIn("unaccent", sql)
+        self.assertNotIn("upper(", sql)
         self.assertNotIn("lower(", sql)
+
+    def test_autocomplete_search_does_not_match_genre_terms(self):
+        genre_match = self._create_movie(
+            "Action Story",
+            title_spanish="Aventura",
+            genre="Acción",
+        )
+
+        with CaptureQueriesContext(connection) as captured_queries:
+            response = self.client.get(
+                self.url,
+                {"autocomplete": "true", "q": "accion", "limit": 5},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [item["id"] for item in response.data["results"]]
+        self.assertNotIn(genre_match.id, result_ids)
+        combined_sql = "\n".join(query["sql"] for query in captured_queries).lower()
+        self.assertNotIn("genre_search", combined_sql)
+
+        qs = apply_movie_autocomplete_search(Movie.objects.all(), "accion")
+        self.assertNotIn("genre_search", str(qs.query).lower())
 
     def test_autocomplete_search_does_not_match_type_terms(self):
         series = self._create_movie(
@@ -4113,7 +4134,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(set(result_ids), {newest.id, oldest.id})
 
-    def test_autocomplete_does_not_search_year_with_text_icontains(self):
+    def test_autocomplete_does_not_search_year_with_text_like(self):
         self._create_movie("Titanic", release_year=1997)
 
         with CaptureQueriesContext(connection) as captured_queries:
@@ -4126,6 +4147,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         combined_sql = "\n".join(query["sql"] for query in captured_queries)
         self.assertIn('"core_movie"."release_year" = 1997', combined_sql)
         self.assertNotIn("LIKE '%1997%'", combined_sql)
+        self.assertNotIn("UPPER(", combined_sql)
 
     def test_search_supports_combined_genre_and_release_year(self):
         matched = self._create_movie("Drama 1997", genre="Drama", release_year=1997)
