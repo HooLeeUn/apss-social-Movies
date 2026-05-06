@@ -3536,11 +3536,14 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0], {
             "id": matched.id,
-            "title_english": matched.title_english,
+            "image": matched.image,
             "title_spanish": matched.title_spanish,
+            "title_english": matched.title_english,
             "type": matched.type,
             "release_year": matched.release_year,
-            "image": matched.image,
+            "genre": matched.genre,
+            "director": matched.director,
+            "cast_members": matched.cast_members,
         })
 
     def test_autocomplete_requires_all_terms_across_metadata(self):
@@ -3630,6 +3633,35 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         second_page_ids = {movie["id"] for movie in second_page.data["results"]}
         self.assertTrue(first_page_ids.isdisjoint(second_page_ids))
 
+    def test_autocomplete_returns_listbox_metadata_for_benjamin_button(self):
+        matched = self._create_movie(
+            "The Curious Case of Benjamin Button",
+            title_spanish="El curioso caso de Benjamin Button",
+            type=Movie.MOVIE,
+            genre="Drama, Fantasy, Romance",
+            release_year=2008,
+            director="David Fincher",
+            cast_members="Brad Pitt, Cate Blanchett, Taraji P. Henson",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "benjamin button", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.data["results"][0]
+        self.assertEqual(result["id"], matched.id)
+        self.assertEqual(result["title_spanish"], "El curioso caso de Benjamin Button")
+        self.assertEqual(result["title_english"], "The Curious Case of Benjamin Button")
+        self.assertEqual(result["release_year"], 2008)
+        self.assertEqual(result["type"], Movie.MOVIE)
+        self.assertEqual(result["genre"], "Drama, Fantasy, Romance")
+        self.assertEqual(result["director"], "David Fincher")
+        self.assertEqual(result["cast_members"], "Brad Pitt, Cate Blanchett, Taraji P. Henson")
+        self.assertNotIn("display_rating", result)
+        self.assertNotIn("following_avg_rating", result)
+
     def test_autocomplete_search_matches_terms_inside_titles(self):
         matched = self._create_movie(
             "The Curious Case of Benjamin Button",
@@ -3701,7 +3733,17 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(len(response.data["results"]), 2)
         self.assertEqual(
             set(response.data["results"][0]),
-            {"id", "title_english", "title_spanish", "type", "release_year", "image"},
+            {
+                "id",
+                "image",
+                "title_spanish",
+                "title_english",
+                "type",
+                "release_year",
+                "genre",
+                "director",
+                "cast_members",
+            },
         )
 
     def test_search_supports_combined_genre_and_release_year(self):
