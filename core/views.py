@@ -7,8 +7,9 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection, transaction
-from django.db.models import Case, Count, Avg, Exists, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Cast, Coalesce
+from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
@@ -21,7 +22,7 @@ from .serializers import (
     AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchResultSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
     UserMovieRecommendationItemSerializer,
@@ -2063,6 +2064,88 @@ class UserPostsListView(generics.ListAPIView):
             .order_by("-created_at")
         )
         return qs.with_my_rating(self.request.user)
+
+
+
+class MovieSearchView(generics.ListAPIView):
+    permission_classes = [permissions.AllowAny]
+    serializer_class = MovieSearchResultSerializer
+
+    def _apply_filters(self, qs):
+        if movie_type := self.request.query_params.get("type"):
+            qs = qs.filter(type=movie_type)
+        if genre := self.request.query_params.get("genre"):
+            qs = qs.filter(genre__icontains=genre)
+        if release_year := self.request.query_params.get("release_year"):
+            qs = qs.filter(release_year=release_year)
+        return qs
+
+    def _build_title_boost_annotations(self, normalized_query):
+        exact_title_filter = Q(title_english_search=normalized_query) | Q(title_spanish_search=normalized_query)
+        prefix_title_filter = Q(title_english_search__startswith=normalized_query) | Q(title_spanish_search__startswith=normalized_query)
+        year_terms = [int(term) for term in split_search_terms(normalized_query) if term.isdigit()]
+        year_filter = Q(release_year__in=year_terms) if year_terms else Q(pk__isnull=True)
+
+        return {
+            "exact_title_match": Case(
+                When(exact_title_filter, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            "prefix_title_match": Case(
+                When(prefix_title_filter, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            "year_match": Case(
+                When(year_filter, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+        }
+
+    def get_queryset(self):
+        raw_query = (self.request.query_params.get("q") or self.request.query_params.get("search") or "").strip()
+        if not raw_query:
+            raise ValidationError({"q": "This query parameter is required."})
+
+        user = self.request.user
+        search_query = SearchQuery(
+            Func(Value(raw_query), function="unaccent"),
+            config="simple",
+            search_type="websearch",
+        )
+        normalized_query = normalize_movie_search_text(raw_query)
+
+        qs = Movie.objects.with_display_rating().with_my_rating(user)
+        qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
+            general_rating=F("display_rating"),
+        )
+        qs = qs.with_following_rating_stats(user)
+        qs = self._apply_filters(qs)
+        # SearchVectorField can be queried like an annotated SearchVector;
+        # this compiles to PostgreSQL @@ and uses the GIN index.
+        qs = qs.filter(search_vector=search_query)
+        qs = qs.annotate(
+            search_rank=SearchRank(
+                F("search_vector"),
+                search_query,
+                weights=[0.03, 0.12, 0.40, 1.00],
+                normalization=32,
+            ),
+            **self._build_title_boost_annotations(normalized_query),
+        )
+
+        release_year_desc = F("release_year").desc(nulls_last=True)
+        return qs.order_by(
+            "-exact_title_match",
+            "-prefix_title_match",
+            "-year_match",
+            "-search_rank",
+            "-display_rating",
+            release_year_desc,
+            "-id",
+        )
 
 
 class MovieListView(generics.ListAPIView):
