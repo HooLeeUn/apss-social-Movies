@@ -22,7 +22,7 @@ from .serializers import (
     AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchResultSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
     UserMovieRecommendationItemSerializer,
@@ -2069,7 +2069,17 @@ class UserPostsListView(generics.ListAPIView):
 
 class MovieSearchView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
-    serializer_class = MovieSearchResultSerializer
+    serializer_class = MovieSearchLightSerializer
+    social_serializer_class = MovieSearchResultSerializer
+    include_social_truthy_values = {"1", "true", "yes"}
+
+    def include_social_fields(self):
+        return self.request.query_params.get("include_social", "").lower() in self.include_social_truthy_values
+
+    def get_serializer_class(self):
+        if self.include_social_fields():
+            return self.social_serializer_class
+        return super().get_serializer_class()
 
     def _apply_filters(self, qs):
         if movie_type := self.request.query_params.get("type"):
@@ -2117,11 +2127,28 @@ class MovieSearchView(generics.ListAPIView):
         )
         normalized_query = normalize_movie_search_text(raw_query)
 
-        qs = Movie.objects.with_display_rating().with_my_rating(user)
-        qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
-            general_rating=F("display_rating"),
-        )
-        qs = qs.with_following_rating_stats(user)
+        if self.include_social_fields():
+            qs = Movie.objects.with_display_rating().with_my_rating(user)
+            qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
+                general_rating=F("display_rating"),
+            )
+            qs = qs.with_following_rating_stats(user)
+        else:
+            qs = Movie.objects.annotate(
+                display_rating=Cast("external_rating", FloatField()),
+            ).only(
+                "id",
+                "image",
+                "title_spanish",
+                "title_english",
+                "type",
+                "genre",
+                "release_year",
+                "director",
+                "cast_members",
+                "external_rating",
+                "external_votes",
+            )
         qs = self._apply_filters(qs)
         # SearchVectorField can be queried like an annotated SearchVector;
         # this compiles to PostgreSQL @@ and uses the GIN index.
