@@ -290,6 +290,26 @@ def _apply_autocomplete_year_filters(queryset, year_terms):
     return queryset
 
 
+def _annotate_recency_score(queryset):
+    current_year = timezone.now().year
+    return queryset.annotate(
+        recency_score=Case(
+            When(release_year__isnull=True, then=Value(4)),
+            When(release_year__gte=current_year - 9, then=Value(0)),
+            When(release_year__gte=current_year - 19, then=Value(1)),
+            When(release_year__gte=current_year - 29, then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        )
+    )
+
+
+def _get_autocomplete_recency_ordering(queryset, year_terms):
+    if year_terms:
+        return queryset, []
+    return _annotate_recency_score(queryset), ["recency_score"]
+
+
 def _map_autocomplete_fields(fields):
     return tuple(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP[field] for field in fields)
 
@@ -313,12 +333,14 @@ def _build_autocomplete_group_match(terms, fields):
     return _build_autocomplete_terms_filter(text_terms, fields)
 
 
-def _order_autocomplete_fast_queryset(queryset, terms):
+def _order_autocomplete_fast_queryset(queryset, terms, year_terms=None):
+    year_terms = year_terms or []
     title_fields = _map_autocomplete_fields(("title_spanish", "title_english"))
     director_fields = _map_autocomplete_fields(("director",))
     title_match = _build_autocomplete_group_match(terms, title_fields)
     director_match = _build_autocomplete_group_match(terms, director_fields)
     release_year_desc = F("release_year").desc(nulls_last=True)
+    queryset, recency_ordering = _get_autocomplete_recency_ordering(queryset, year_terms)
 
     return queryset.annotate(
         autocomplete_title_match=Case(
@@ -334,6 +356,7 @@ def _order_autocomplete_fast_queryset(queryset, terms):
     ).order_by(
         "-autocomplete_title_match",
         "-autocomplete_director_match",
+        *recency_ordering,
         release_year_desc,
         "-id",
     )
@@ -351,7 +374,7 @@ def build_movie_autocomplete_fast_queryset(queryset, search):
     fast_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_FAST_FIELDS)
     filters = _build_autocomplete_terms_filter(text_terms, fast_fields)
     queryset = _apply_autocomplete_year_filters(queryset, year_terms)
-    return _order_autocomplete_fast_queryset(queryset.filter(filters), text_terms)
+    return _order_autocomplete_fast_queryset(queryset.filter(filters), text_terms, year_terms)
 
 
 def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=None):
@@ -371,7 +394,11 @@ def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=N
     if fast_queryset is not None:
         extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))
     release_year_desc = F("release_year").desc(nulls_last=True)
-    return extended_queryset.order_by(release_year_desc, "-id")
+    extended_queryset, recency_ordering = _get_autocomplete_recency_ordering(
+        extended_queryset,
+        year_terms,
+    )
+    return extended_queryset.order_by(*recency_ordering, release_year_desc, "-id")
 
 
 def apply_movie_autocomplete_search(queryset, search):

@@ -47,7 +47,12 @@ from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
-from core.views import MovieListView, MovieSearchView, apply_movie_autocomplete_search
+from core.views import (
+    MovieListView,
+    MovieSearchView,
+    apply_movie_autocomplete_search,
+    build_movie_autocomplete_fast_queryset,
+)
 from core.weekly_recommendations import (
     get_previous_closed_week_window,
     get_weekly_recommendation_candidates,
@@ -4046,6 +4051,28 @@ class MovieListViewSearchAndFiltersTests(TestCase):
                 "cast_members",
             },
         )
+
+    def test_autocomplete_adds_recency_score_only_without_explicit_year(self):
+        older = self._create_movie("Matrix Recency", release_year=1996)
+        recent = self._create_movie("Matrix Recency", release_year=2024)
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "matrix recency", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:2], [recent.id, older.id])
+
+        qs = build_movie_autocomplete_fast_queryset(Movie.objects.all(), "matrix recency")
+        self.assertIn("recency_score", qs.query.annotations)
+
+        qs_with_year = build_movie_autocomplete_fast_queryset(
+            Movie.objects.all(),
+            "matrix recency 1996",
+        )
+        self.assertNotIn("recency_score", qs_with_year.query.annotations)
 
     def test_autocomplete_splits_year_terms_into_release_year_filter(self):
         titanic_1997 = self._create_movie("Titanic", release_year=1997)
