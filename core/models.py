@@ -12,6 +12,7 @@ from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
 from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.contrib.postgres.search import SearchVectorField
 
 
 def normalize_movie_search_text(value):
@@ -385,6 +386,7 @@ class Movie(models.Model):
     cast_members_search = models.TextField(default="", blank=True)
     genre_search = models.TextField(default="", blank=True)
     type_search = models.TextField(default="", blank=True)
+    search_vector = SearchVectorField(null=True)
     synopsis = models.TextField(blank=True, default="")
     external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
     external_votes = models.PositiveIntegerField(default=0)
@@ -412,6 +414,7 @@ class Movie(models.Model):
             GinIndex(OpClass("cast_members_search", name="gin_trgm_ops"), name="movie_cast_search_trgm_idx"),
             GinIndex(OpClass("genre_search", name="gin_trgm_ops"), name="movie_genre_search_trgm_idx"),
             GinIndex(OpClass("type_search", name="gin_trgm_ops"), name="movie_type_search_trgm_idx"),
+            GinIndex(fields=["search_vector"], name="movie_search_vector_gin_idx"),
         ]
 
     SEARCH_FIELD_SOURCES = {

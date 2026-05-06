@@ -1,10 +1,12 @@
 import io
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -39,12 +41,12 @@ from core.models import (
     UserDailyFeedPool,
     UserNotification,
 )
-from core.serializers import CommentSerializer
+from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer
 from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
-from core.views import apply_movie_autocomplete_search
+from core.views import MovieListView, MovieSearchView, apply_movie_autocomplete_search
 from core.weekly_recommendations import (
     get_previous_closed_week_window,
     get_weekly_recommendation_candidates,
@@ -3498,6 +3500,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             password="test1234",
         )
         self.url = reverse("movie-list")
+        self.search_url = reverse("movie-search")
 
     def _create_movie(self, title, **overrides):
         data = {
@@ -3515,6 +3518,163 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         }
         data.update(overrides)
         return Movie.objects.create(**data)
+
+    def test_full_text_search_accepts_q_parameter(self):
+        matched = self._create_movie(
+            "The Matrix",
+            title_spanish="Matrix",
+            release_year=1999,
+            director="Lana Wachowski",
+            external_rating=8.7,
+        )
+        self._create_movie("Unrelated Movie", title_spanish="Sin relación")
+
+        response = self.client.get(self.search_url, {"q": "matrix"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(matched.id, result_ids)
+        self.assertEqual(response.data["results"][0]["id"], matched.id)
+        self.assertIn("search_rank", response.data["results"][0])
+
+    def test_movie_search_defaults_to_lightweight_payload(self):
+        matched = self._create_movie(
+            "The Matrix",
+            title_spanish="Matrix",
+            release_year=1999,
+            director="Lana Wachowski",
+            cast_members="Keanu Reeves",
+            external_rating=8.7,
+            external_votes=1900000,
+        )
+
+        response = self.client.get(self.search_url, {"q": "matrix", "page_size": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.data["results"][0]
+        self.assertEqual(result["id"], matched.id)
+        self.assertEqual(
+            set(result),
+            {
+                "id",
+                "image",
+                "title_spanish",
+                "title_english",
+                "type",
+                "genre",
+                "release_year",
+                "director",
+                "cast_members",
+                "external_rating",
+                "external_votes",
+                "display_rating",
+                "search_rank",
+            },
+        )
+        self.assertNotIn("comments_count", result)
+        self.assertNotIn("following_avg_rating", result)
+        self.assertNotIn("is_in_my_list", result)
+
+    def test_movie_search_default_queryset_skips_social_and_rating_annotations(self):
+        view = MovieSearchView()
+        view.request = SimpleNamespace(
+            query_params={"q": "matrix"},
+            user=AnonymousUser(),
+        )
+
+        self.assertIs(view.get_serializer_class(), MovieSearchLightSerializer)
+        qs = view.get_queryset()
+
+        heavy_annotations = {
+            "real_ratings_count",
+            "real_ratings_avg",
+            "my_rating",
+            "following_avg_rating",
+            "following_ratings_count",
+            "comments_count",
+            "is_in_my_list",
+            "is_in_my_recommendations",
+            "general_rating",
+        }
+        self.assertTrue(heavy_annotations.isdisjoint(qs.query.annotations))
+
+    def test_movie_search_include_social_uses_full_payload(self):
+        self._create_movie("The Matrix", title_spanish="Matrix", release_year=1999)
+
+        response = self.client.get(self.search_url, {"q": "matrix", "include_social": "true"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.data["results"][0]
+        self.assertIn("comments_count", result)
+        self.assertIn("following_avg_rating", result)
+        self.assertIn("is_in_my_list", result)
+
+        view = MovieSearchView()
+        view.request = SimpleNamespace(
+            query_params={"q": "matrix", "include_social": "true"},
+            user=AnonymousUser(),
+        )
+        self.assertIs(view.get_serializer_class(), MovieSearchResultSerializer)
+
+    def test_full_text_search_accepts_search_parameter(self):
+        matched = self._create_movie(
+            "The Matrix",
+            title_spanish="Matrix",
+            release_year=1999,
+            director="Lana Wachowski",
+            external_rating=8.7,
+        )
+        self._create_movie("Unrelated Movie", title_spanish="Sin relación")
+
+        response = self.client.get(self.search_url, {"search": "matrix"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(matched.id, result_ids)
+
+    def test_full_text_search_is_accent_insensitive(self):
+        matched = self._create_movie(
+            "Amelie",
+            title_spanish="Amélie",
+            director="Jean-Pierre Jeunet",
+        )
+        self._create_movie("Accent Free Different Movie", title_spanish="Otra pelicula")
+
+        response = self.client.get(self.search_url, {"q": "amelie"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(matched.id, result_ids)
+
+    def test_autocomplete_still_uses_autocomplete_serializer_without_search_vector(self):
+        matched = self._create_movie("The Matrix", title_spanish="Matrix", release_year=1999)
+
+        view = MovieListView()
+        view.request = SimpleNamespace(query_params={"autocomplete": "true"})
+
+        self.assertIs(view.get_serializer_class(), MovieAutocompleteSerializer)
+
+        response = self.client.get(self.url, {"autocomplete": "true", "q": "matrix", "limit": 5})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], matched.id)
+        self.assertEqual(
+            set(response.data["results"][0]),
+            {
+                "id",
+                "image",
+                "title_spanish",
+                "title_english",
+                "type",
+                "release_year",
+                "genre",
+                "director",
+                "cast_members",
+            },
+        )
+
+        qs = apply_movie_autocomplete_search(Movie.objects.all(), "matrix")
+        self.assertNotIn("search_vector", str(qs.query).lower())
 
     def test_search_supports_multiple_terms_across_fields(self):
         matched = self._create_movie(

@@ -1042,6 +1042,58 @@ class MovieListSerializer(serializers.ModelSerializer):
         ]
 
 
+class MovieSearchLightSerializer(serializers.ModelSerializer):
+    search_rank = serializers.FloatField(read_only=True)
+    display_rating = serializers.FloatField(read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "image",
+            "title_spanish",
+            "title_english",
+            "type",
+            "genre",
+            "release_year",
+            "director",
+            "cast_members",
+            "external_rating",
+            "external_votes",
+            "display_rating",
+            "search_rank",
+        ]
+
+
+class MovieSearchResultSerializer(serializers.ModelSerializer):
+    author = UserMiniSerializer(read_only=True)
+    search_rank = serializers.FloatField(read_only=True)
+    real_ratings_count = serializers.IntegerField(read_only=True)
+    real_ratings_avg = serializers.FloatField(read_only=True)
+    display_rating = serializers.FloatField(read_only=True)
+    general_rating = serializers.FloatField(read_only=True)
+    my_rating = serializers.IntegerField(read_only=True)
+    following_avg_rating = serializers.FloatField(read_only=True, allow_null=True)
+    following_ratings_count = serializers.IntegerField(read_only=True)
+    comments_count = serializers.IntegerField(read_only=True)
+    is_in_my_list = serializers.BooleanField(read_only=True)
+    is_in_my_recommendations = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = [
+            "id", "author",
+            "title_english", "title_spanish",
+            "type", "genre", "release_year",
+            "director", "cast_members", "synopsis",
+            "image", "external_rating", "external_votes", "imdb_id", "created_at", "updated_at",
+            "real_ratings_count", "real_ratings_avg",
+            "display_rating", "general_rating", "my_rating", "following_avg_rating", "following_ratings_count", "comments_count",
+            "is_in_my_list", "is_in_my_recommendations",
+            "search_rank",
+        ]
+
+
 class MyMovieListItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(source="movie.id", read_only=True)
     title_english = serializers.CharField(source="movie.title_english", read_only=True)
