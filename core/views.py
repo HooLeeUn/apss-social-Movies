@@ -105,18 +105,19 @@ MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP = {
     "director": "director_search",
     "cast_members": "cast_members_search",
     "genre": "genre_search",
-    "type": "type_search",
 }
 MOVIE_AUTOCOMPLETE_SEARCH_FIELDS = frozenset(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP)
-MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
+MOVIE_AUTOCOMPLETE_TITLE_FIELDS = (
     "title_spanish",
     "title_english",
+)
+MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
+    *MOVIE_AUTOCOMPLETE_TITLE_FIELDS,
     "director",
 )
 MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS = (
     "cast_members",
     "genre",
-    "type",
 )
 MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH = 3
 
@@ -311,37 +312,137 @@ def _build_autocomplete_group_match(terms, fields):
     return _build_autocomplete_terms_filter(text_terms, fields)
 
 
-def _order_autocomplete_fast_queryset(queryset, terms):
+def _build_autocomplete_title_rank(search_text):
     title_fields = _map_autocomplete_fields(("title_spanish", "title_english"))
-    director_fields = _map_autocomplete_fields(("director",))
-    title_match = _build_autocomplete_group_match(terms, title_fields)
-    director_match = _build_autocomplete_group_match(terms, director_fields)
-    release_year_desc = F("release_year").desc(nulls_last=True)
+    if not search_text:
+        return Value(0, output_field=IntegerField())
 
+    exact_title_match = Q()
+    prefix_title_match = Q()
+    for field in title_fields:
+        exact_title_match |= Q(**{field: search_text})
+        prefix_title_match |= Q(**{f"{field}__startswith": search_text})
+
+    return Case(
+        When(exact_title_match, then=Value(2)),
+        When(prefix_title_match, then=Value(1)),
+        default=Value(0),
+        output_field=IntegerField(),
+    )
+
+
+def _order_autocomplete_lane_queryset(queryset, text_terms):
+    release_year_desc = F("release_year").desc(nulls_last=True)
     return queryset.annotate(
-        autocomplete_title_match=Case(
-            When(title_match, then=Value(1)),
-            default=Value(0),
-            output_field=IntegerField(),
-        ),
-        autocomplete_director_match=Case(
-            When(director_match, then=Value(1)),
-            default=Value(0),
-            output_field=IntegerField(),
-        ),
+        autocomplete_title_rank=_build_autocomplete_title_rank(" ".join(text_terms)),
     ).order_by(
-        "-autocomplete_title_match",
-        "-autocomplete_director_match",
+        "-autocomplete_title_rank",
         release_year_desc,
         "-id",
     )
 
 
+def _get_autocomplete_recency_buckets(reference_year=None):
+    current_year = reference_year or timezone.localdate().year
+    return (
+        Q(release_year__gte=current_year - 10),
+        Q(release_year__gte=current_year - 20, release_year__lt=current_year - 10),
+        Q(release_year__gte=current_year - 30, release_year__lt=current_year - 20),
+        Q(release_year__lt=current_year - 30) | Q(release_year__isnull=True),
+    )
+
+
+def _exclude_autocomplete_seen(queryset, seen_querysets):
+    for seen_queryset in seen_querysets:
+        queryset = queryset.exclude(pk__in=seen_queryset.order_by().values("pk"))
+    return queryset
+
+
+def _build_autocomplete_lane_queryset(queryset, text_terms, fields, seen_querysets):
+    if not text_terms:
+        return None
+
+    field_names = _map_autocomplete_fields(fields)
+    filters = _build_autocomplete_terms_filter(text_terms, field_names)
+    lane_queryset = queryset.filter(filters)
+    lane_queryset = _exclude_autocomplete_seen(lane_queryset, seen_querysets)
+    return _order_autocomplete_lane_queryset(lane_queryset, text_terms)
+
+
+def _build_autocomplete_release_year_lane_queryset(queryset, terms, seen_querysets):
+    year_candidates = []
+    text_terms = []
+    for term in terms:
+        if term.isdigit():
+            year = int(term)
+            if year not in year_candidates:
+                year_candidates.append(year)
+        else:
+            text_terms.append(term)
+    if not year_candidates:
+        return None
+
+    lane_queryset = queryset.filter(release_year__in=year_candidates)
+    if text_terms:
+        searchable_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_SEARCH_FIELDS)
+        lane_queryset = lane_queryset.filter(
+            _build_autocomplete_terms_filter(text_terms, searchable_fields)
+        )
+    lane_queryset = _exclude_autocomplete_seen(lane_queryset, seen_querysets)
+    return _order_autocomplete_lane_queryset(lane_queryset, text_terms)
+
+
+def build_movie_autocomplete_lane_querysets(queryset, search):
+    text_terms, year_terms = _split_autocomplete_search_terms(search)
+    all_terms = _get_autocomplete_terms(search)
+    if not text_terms and not year_terms:
+        return []
+
+    if year_terms:
+        year_filtered_queryset = _apply_autocomplete_year_filters(queryset, year_terms)
+        if not text_terms:
+            return [_order_autocomplete_lane_queryset(year_filtered_queryset, [])]
+        buckets = (Q(pk__isnull=False),)
+        include_release_year_lane = False
+    else:
+        buckets = _get_autocomplete_recency_buckets()
+        include_release_year_lane = True
+
+    lane_definitions = (
+        (MOVIE_AUTOCOMPLETE_TITLE_FIELDS, text_terms),
+        (("director",), text_terms),
+        (MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS, text_terms),
+    )
+    querysets = []
+    seen_querysets = []
+    for bucket_filter in buckets:
+        bucket_queryset = queryset.filter(bucket_filter)
+        bucket_queryset = _apply_autocomplete_year_filters(bucket_queryset, year_terms)
+        for fields, lane_terms in lane_definitions:
+            lane_queryset = _build_autocomplete_lane_queryset(
+                bucket_queryset,
+                lane_terms,
+                fields,
+                seen_querysets,
+            )
+            if lane_queryset is not None:
+                querysets.append(lane_queryset)
+                seen_querysets.append(lane_queryset)
+        if include_release_year_lane:
+            release_year_lane = _build_autocomplete_release_year_lane_queryset(
+                bucket_queryset,
+                all_terms,
+                seen_querysets,
+            )
+            if release_year_lane is not None:
+                querysets.append(release_year_lane)
+                seen_querysets.append(release_year_lane)
+    return querysets
+
+
 def build_movie_autocomplete_fast_queryset(queryset, search):
-    # Fast lane: query only pre-normalized title/director columns plus direct
-    # release_year filters. Four-digit year terms are removed from the textual
-    # predicate so PostgreSQL can use the release_year index instead of checking
-    # every autocomplete text column with icontains.
+    # Compatibility helper for direct callers that still expect the legacy
+    # title/director fast predicate.
     text_terms, year_terms = _split_autocomplete_search_terms(search)
     if not text_terms and not year_terms:
         return queryset.none()
@@ -349,13 +450,13 @@ def build_movie_autocomplete_fast_queryset(queryset, search):
     fast_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_FAST_FIELDS)
     filters = _build_autocomplete_terms_filter(text_terms, fast_fields)
     queryset = _apply_autocomplete_year_filters(queryset, year_terms)
-    return _order_autocomplete_fast_queryset(queryset.filter(filters), text_terms)
+    return _order_autocomplete_lane_queryset(queryset.filter(filters), text_terms)
 
 
 def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=None):
-    # Extended lane: only the heavier metadata fields, appended after fast lane
-    # results and with fast IDs excluded by subquery. Four-digit years are still
-    # applied as release_year filters and never as text icontains predicates.
+    # Compatibility helper for direct callers. The API endpoint uses explicit
+    # lane querysets so title, director, extended metadata, and release years can
+    # be paginated in optimized recency buckets.
     text_terms, year_terms = _split_autocomplete_search_terms(search)
     if not text_terms and not year_terms:
         return queryset.none()
@@ -365,8 +466,7 @@ def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=N
     extended_queryset = _apply_autocomplete_year_filters(queryset, year_terms).filter(filters)
     if fast_queryset is not None:
         extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))
-    release_year_desc = F("release_year").desc(nulls_last=True)
-    return extended_queryset.order_by(release_year_desc, "-id")
+    return _order_autocomplete_lane_queryset(extended_queryset, text_terms)
 
 
 def apply_movie_autocomplete_search(queryset, search):
@@ -2383,28 +2483,26 @@ class MovieListView(generics.ListAPIView):
         offset = (page_number - 1) * page_size
         base_queryset = self._get_autocomplete_base_queryset()
 
-        fast_queryset = build_movie_autocomplete_fast_queryset(base_queryset, search)
-        fast_count = fast_queryset.count()
+        autocomplete_querysets = build_movie_autocomplete_lane_querysets(base_queryset, search)
 
         page_results = []
-        if offset < fast_count:
-            page_results = list(fast_queryset[offset:offset + page_size])
+        total_count = 0
+        remaining_offset = offset
+        for autocomplete_queryset in autocomplete_querysets:
+            lane_count = autocomplete_queryset.count()
+            total_count += lane_count
 
-        total_count = fast_count
-        if len(page_results) < page_size:
-            extended_queryset = build_movie_autocomplete_extended_queryset(
-                base_queryset,
-                search,
-                fast_queryset=fast_queryset,
-            )
-            extended_count = extended_queryset.count()
-            total_count += extended_count
+            if len(page_results) >= page_size:
+                continue
+            if remaining_offset >= lane_count:
+                remaining_offset -= lane_count
+                continue
 
-            extended_offset = max(0, offset - fast_count)
             remaining = page_size - len(page_results)
             page_results.extend(
-                extended_queryset[extended_offset:extended_offset + remaining]
+                autocomplete_queryset[remaining_offset:remaining_offset + remaining]
             )
+            remaining_offset = 0
 
         serializer = self.get_serializer(page_results, many=True)
         next_url = None

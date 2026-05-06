@@ -3800,7 +3800,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertNotIn("unaccent", sql)
         self.assertNotIn("lower(", sql)
 
-    def test_autocomplete_search_matches_type_terms(self):
+    def test_autocomplete_search_does_not_match_type_terms(self):
         series = self._create_movie(
             "Unrelated Title",
             title_spanish="Titulo sin coincidencia",
@@ -3819,11 +3819,11 @@ class MovieListViewSearchAndFiltersTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [item["id"] for item in response.data["results"]]
-        self.assertIn(series.id, result_ids)
+        self.assertNotIn(series.id, result_ids)
         self.assertNotIn(movie.id, result_ids)
 
         qs = apply_movie_autocomplete_search(Movie.objects.all(), "series")
-        self.assertIn("type_search", str(qs.query).lower())
+        self.assertNotIn("type_search", str(qs.query).lower())
 
     def test_autocomplete_prioritizes_titles_when_all_terms_match(self):
         title_match = self._create_movie(
@@ -3846,6 +3846,74 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids[:2], [title_match.id, metadata_match.id])
+
+    def test_autocomplete_orders_lanes_inside_recency_bucket(self):
+        title_match = self._create_movie(
+            "Cameron Falls",
+            release_year=2022,
+            director="Other Director",
+            cast_members="Actor",
+        )
+        director_match = self._create_movie(
+            "Ocean Story",
+            release_year=2022,
+            director="James Cameron",
+            cast_members="Actor",
+        )
+        cast_match = self._create_movie(
+            "Holiday Story",
+            release_year=2022,
+            director="Other Director",
+            cast_members="Cameron Diaz",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "cameron", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:3], [title_match.id, director_match.id, cast_match.id])
+
+    def test_autocomplete_recency_bucket_precedes_older_title_lane(self):
+        old_title_match = self._create_movie(
+            "Cameron Classic",
+            release_year=1999,
+            director="Other Director",
+            cast_members="Actor",
+        )
+        recent_director_match = self._create_movie(
+            "Recent Ocean",
+            release_year=2022,
+            director="James Cameron",
+            cast_members="Actor",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "cameron", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:2], [recent_director_match.id, old_title_match.id])
+
+    def test_autocomplete_historical_bucket_still_returns_specific_titles(self):
+        historical_match = self._create_movie(
+            "Metropolis Raretoken",
+            release_year=1927,
+            director="Fritz Lang",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "raretoken", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [historical_match.id])
 
     def test_autocomplete_paginates_without_capping_total_results_to_limit(self):
         for index in range(5):
