@@ -35,8 +35,6 @@ def build_movie_search_fields(movie):
         "title_spanish_search": normalize_movie_search_text(movie.title_spanish),
         "director_search": normalize_movie_search_text(movie.director),
         "cast_members_search": normalize_movie_search_text(movie.cast_members),
-        "genre_search": normalize_movie_search_text(movie.genre),
-        "type_search": normalize_movie_search_text(movie.type),
     }
 
 
@@ -384,8 +382,6 @@ class Movie(models.Model):
     title_spanish_search = models.TextField(default="", blank=True)
     director_search = models.TextField(default="", blank=True)
     cast_members_search = models.TextField(default="", blank=True)
-    genre_search = models.TextField(default="", blank=True)
-    type_search = models.TextField(default="", blank=True)
     search_vector = SearchVectorField(null=True)
     synopsis = models.TextField(blank=True, default="")
     external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
@@ -412,8 +408,6 @@ class Movie(models.Model):
             GinIndex(OpClass("title_spanish_search", name="gin_trgm_ops"), name="movie_title_es_search_trgm_idx"),
             GinIndex(OpClass("director_search", name="gin_trgm_ops"), name="movie_director_search_trgm_idx"),
             GinIndex(OpClass("cast_members_search", name="gin_trgm_ops"), name="movie_cast_search_trgm_idx"),
-            GinIndex(OpClass("genre_search", name="gin_trgm_ops"), name="movie_genre_search_trgm_idx"),
-            GinIndex(OpClass("type_search", name="gin_trgm_ops"), name="movie_type_search_trgm_idx"),
             GinIndex(fields=["search_vector"], name="movie_search_vector_gin_idx"),
         ]
 
@@ -422,8 +416,6 @@ class Movie(models.Model):
         "title_spanish": "title_spanish_search",
         "director": "director_search",
         "cast_members": "cast_members_search",
-        "genre": "genre_search",
-        "type": "type_search",
     }
 
     def populate_search_fields(self):
