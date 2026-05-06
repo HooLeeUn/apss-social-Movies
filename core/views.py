@@ -44,6 +44,7 @@ from .models import (
     normalize_movie_search_text,
     MovieRating,
     ProfileFavoriteMovie,
+    Profile,
     Post,
     Rating,
     UserTasteProfile,
