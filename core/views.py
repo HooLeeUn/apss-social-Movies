@@ -105,7 +105,6 @@ MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP = {
     "director": "director_search",
     "cast_members": "cast_members_search",
     "genre": "genre_search",
-    "type": "type_search",
 }
 MOVIE_AUTOCOMPLETE_SEARCH_FIELDS = frozenset(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP)
 MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
@@ -116,7 +115,6 @@ MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
 MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS = (
     "cast_members",
     "genre",
-    "type",
 )
 MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH = 3
 
