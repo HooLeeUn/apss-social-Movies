@@ -116,6 +116,10 @@ MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS = (
     "cast_members",
     "genre",
 )
+MOVIE_AUTOCOMPLETE_EXTENDED_MATCH_FIELDS = (
+    *MOVIE_AUTOCOMPLETE_FAST_FIELDS,
+    *MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS,
+)
 MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH = 3
 
 
@@ -351,15 +355,18 @@ def build_movie_autocomplete_fast_queryset(queryset, search):
 
 
 def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=None):
-    # Extended lane: only the heavier metadata fields, appended after fast lane
-    # results and with fast IDs excluded by subquery. Four-digit years are still
-    # applied as release_year filters and never as text icontains predicates.
+    # Extended lane: appended only after the title/director fast lane cannot fill
+    # the requested page. Each text term may match any autocomplete metadata that
+    # is allowed for the endpoint, so cross-field queries like title + cast still
+    # keep AND semantics across all terms. type_search remains intentionally
+    # excluded, and four-digit years stay as release_year filters instead of text
+    # icontains predicates.
     text_terms, year_terms = _split_autocomplete_search_terms(search)
     if not text_terms and not year_terms:
         return queryset.none()
 
-    extended_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS)
-    filters = _build_autocomplete_terms_filter(text_terms, extended_fields)
+    match_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_EXTENDED_MATCH_FIELDS)
+    filters = _build_autocomplete_terms_filter(text_terms, match_fields)
     extended_queryset = _apply_autocomplete_year_filters(queryset, year_terms).filter(filters)
     if fast_queryset is not None:
         extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))

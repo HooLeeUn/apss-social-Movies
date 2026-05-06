@@ -3964,6 +3964,51 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids, [brad_pitt.id])
 
+    def test_autocomplete_extended_lane_matches_cross_title_and_cast_terms(self):
+        titanic = self._create_movie(
+            "Titanic",
+            release_year=1997,
+            director="James Cameron",
+            cast_members="Leonardo DiCaprio, Kate Winslet",
+        )
+        benjamin_button = self._create_movie(
+            "The Curious Case of Benjamin Button",
+            title_spanish="El curioso caso de Benjamin Button",
+            release_year=2008,
+            director="David Fincher",
+            cast_members="Brad Pitt, Cate Blanchett, Taraji P. Henson",
+        )
+        self._create_movie(
+            "Leonardo",
+            release_year=2020,
+            director="Different Director",
+            cast_members="Actor",
+        )
+        self._create_movie(
+            "Benjamin Button Documentary",
+            release_year=2011,
+            director="Different Director",
+            cast_members="Different Cast",
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "titanic leonardo", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertIn(titanic.id, result_ids)
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "benjamin button brad", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [benjamin_button.id])
+
     def test_autocomplete_skips_synopsis_matches_for_lightweight_queries(self):
         self._create_movie(
             "Unrelated Title",
