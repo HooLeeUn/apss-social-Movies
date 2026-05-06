@@ -254,6 +254,10 @@ def apply_movie_search(
     return filtered_queryset.annotate(search_relevance=score_expr)
 
 
+def _is_autocomplete_year_term(term):
+    return term.isdigit() and len(term) == 4 and int(term) >= 1000
+
+
 def _get_autocomplete_terms(search):
     normalized_search = normalize_movie_search_text(search)
     terms = split_search_terms(normalized_search)
@@ -262,6 +266,26 @@ def _get_autocomplete_terms(search):
         for term in terms
         if term.isdigit() or len(term) >= MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH
     ]
+
+
+def _split_autocomplete_search_terms(search):
+    terms = _get_autocomplete_terms(search)
+    year_terms = []
+    text_terms = []
+    for term in terms:
+        if _is_autocomplete_year_term(term):
+            year = int(term)
+            if year not in year_terms:
+                year_terms.append(year)
+        else:
+            text_terms.append(term)
+    return text_terms, year_terms
+
+
+def _apply_autocomplete_year_filters(queryset, year_terms):
+    for year in year_terms:
+        queryset = queryset.filter(release_year=year)
+    return queryset
 
 
 def _map_autocomplete_fields(fields):
@@ -314,29 +338,31 @@ def _order_autocomplete_fast_queryset(queryset, terms):
 
 
 def build_movie_autocomplete_fast_queryset(queryset, search):
-    # Fast lane: query only pre-normalized title/director columns plus numeric
-    # release years. This keeps the first response cheap and avoids the old
-    # search_relevance ORDER BY that forced PostgreSQL to score every match
-    # before applying LIMIT.
-    terms = _get_autocomplete_terms(search)
-    if not terms:
+    # Fast lane: query only pre-normalized title/director columns plus direct
+    # release_year filters. Four-digit year terms are removed from the textual
+    # predicate so PostgreSQL can use the release_year index instead of checking
+    # every autocomplete text column with icontains.
+    text_terms, year_terms = _split_autocomplete_search_terms(search)
+    if not text_terms and not year_terms:
         return queryset.none()
 
     fast_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_FAST_FIELDS)
-    filters = _build_autocomplete_terms_filter(terms, fast_fields, include_release_year=True)
-    return _order_autocomplete_fast_queryset(queryset.filter(filters), terms)
+    filters = _build_autocomplete_terms_filter(text_terms, fast_fields)
+    queryset = _apply_autocomplete_year_filters(queryset, year_terms)
+    return _order_autocomplete_fast_queryset(queryset.filter(filters), text_terms)
 
 
 def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=None):
     # Extended lane: only the heavier metadata fields, appended after fast lane
-    # results and with fast IDs excluded by subquery.
-    terms = _get_autocomplete_terms(search)
-    if not terms:
+    # results and with fast IDs excluded by subquery. Four-digit years are still
+    # applied as release_year filters and never as text icontains predicates.
+    text_terms, year_terms = _split_autocomplete_search_terms(search)
+    if not text_terms and not year_terms:
         return queryset.none()
 
     extended_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS)
-    filters = _build_autocomplete_terms_filter(terms, extended_fields)
-    extended_queryset = queryset.filter(filters)
+    filters = _build_autocomplete_terms_filter(text_terms, extended_fields)
+    extended_queryset = _apply_autocomplete_year_filters(queryset, year_terms).filter(filters)
     if fast_queryset is not None:
         extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))
     release_year_desc = F("release_year").desc(nulls_last=True)
@@ -2400,7 +2426,12 @@ class MovieListView(generics.ListAPIView):
 
         search = self.request.query_params.get("search") or self.request.query_params.get("q")
         if search:
-            return apply_movie_autocomplete_search(qs, search)
+            text_terms, year_terms = _split_autocomplete_search_terms(search)
+            qs = _apply_autocomplete_year_filters(qs, year_terms)
+            if not text_terms:
+                release_year_desc = F("release_year").desc(nulls_last=True)
+                return qs.order_by("title_english", release_year_desc, "-id")
+            return apply_movie_autocomplete_search(qs, " ".join(text_terms))
 
         release_year_desc = F("release_year").desc(nulls_last=True)
         return qs.order_by("title_english", release_year_desc, "-id")
