@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import models, transaction
 
-from core.models import Movie, build_genre_key
+from core.models import Movie, build_genre_key, build_movie_search_fields
 
 
 class Command(BaseCommand):
@@ -314,6 +314,12 @@ class Command(BaseCommand):
             "external_votes_provided": external_votes is not None,
             "imdb_id": self._truncate_char_field("imdb_id", self._clean_text(row.get("imdb_id"))),
         }
+        search_source = {
+            key: value
+            for key, value in payload.items()
+            if key != "external_votes_provided"
+        }
+        payload.update(build_movie_search_fields(Movie(**search_source)))
         return payload
 
     @staticmethod

@@ -39,6 +39,7 @@ from .models import (
     Movie,
     MovieListItem,
     MovieRecommendationItem,
+    normalize_movie_search_text,
     MovieRating,
     ProfileFavoriteMovie,
     Post,
@@ -96,6 +97,16 @@ MOVIE_SEARCH_RELEVANCE_GROUPS = (
     (("genre", "type"), 60),
 )
 
+MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP = {
+    "title_spanish": "title_spanish_search",
+    "title_english": "title_english_search",
+    "director": "director_search",
+    "cast_members": "cast_members_search",
+    "genre": "genre_search",
+    "type": "type_search",
+}
+MOVIE_AUTOCOMPLETE_SEARCH_FIELDS = frozenset(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP)
+
 
 def _build_movie_term_match(term, weighted_fields, search_lookup_suffix):
     """Return an OR predicate for one search term across searchable metadata."""
@@ -120,13 +131,46 @@ def _build_movie_terms_group_match(terms, fields, search_lookup_suffix):
     return group_match
 
 
+def _map_movie_search_field(field, search_field_map):
+    if not search_field_map:
+        return field
+    return search_field_map.get(field, field)
+
+
+def _map_movie_weighted_fields(weighted_fields, search_field_map, allowed_fields=None):
+    return [
+        (_map_movie_search_field(field, search_field_map), weight)
+        for field, weight in weighted_fields
+        if allowed_fields is None or field in allowed_fields
+    ]
+
+
+def _map_movie_relevance_groups(search_field_map, allowed_fields=None):
+    mapped_groups = []
+    for fields, weight in MOVIE_SEARCH_RELEVANCE_GROUPS:
+        mapped_fields = tuple(
+            _map_movie_search_field(field, search_field_map)
+            for field in fields
+            if allowed_fields is None or field in allowed_fields
+        )
+        if mapped_fields:
+            mapped_groups.append((mapped_fields, weight))
+    return mapped_groups
+
+
 def apply_movie_search(
     queryset,
     search,
     include_relevance=True,
     include_synopsis=True,
     use_unaccent=None,
+    search_field_map=None,
+    normalize_terms=False,
+    allowed_fields=None,
 ):
+    if normalize_terms:
+        search = normalize_movie_search_text(search)
+
     terms = split_search_terms(search)
     if not terms:
         return queryset
@@ -134,6 +178,8 @@ def apply_movie_search(
     weighted_fields = list(MOVIE_SEARCH_FIELD_WEIGHTS)
     if include_synopsis:
         weighted_fields.append(MOVIE_SEARCH_SYNOPSIS_WEIGHT)
+    weighted_fields = _map_movie_weighted_fields(weighted_fields, search_field_map, allowed_fields)
+    relevance_groups = _map_movie_relevance_groups(search_field_map, allowed_fields)
 
     if use_unaccent is None:
         use_unaccent = connection.vendor == "postgresql"
@@ -161,7 +207,7 @@ def apply_movie_search(
         relevance_terms = terms
 
     text_relevance_terms = [term for term in relevance_terms if not term.isdigit()]
-    for fields, weight in MOVIE_SEARCH_RELEVANCE_GROUPS:
+    for fields, weight in relevance_groups:
         if not text_relevance_terms:
             break
         group_match = _build_movie_terms_group_match(
@@ -196,9 +242,18 @@ def apply_movie_search(
 
 
 def apply_movie_autocomplete_search(queryset, search):
-    # Keep autocomplete lightweight: skip long synopsis scans and avoid unaccent() so
-    # PostgreSQL trigram indexes can support contains-style matching.
-    return apply_movie_search(queryset, search, include_synopsis=False, use_unaccent=False)
+    # Keep autocomplete lightweight and accent-insensitive without wrapping DB columns
+    # in functions: normalize user input in Python and query pre-normalized columns
+    # backed by trigram GIN indexes.
+    return apply_movie_search(
+        queryset,
+        search,
+        include_synopsis=False,
+        use_unaccent=False,
+        search_field_map=MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP,
+        normalize_terms=True,
+        allowed_fields=MOVIE_AUTOCOMPLETE_SEARCH_FIELDS,
+    )
 
 
 VALID_FEED_GENRES = {
