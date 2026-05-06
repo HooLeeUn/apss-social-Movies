@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from core.models import Movie
+from core.models import Movie, normalize_movie_search_text
 
 
 class Command(BaseCommand):
@@ -183,6 +183,7 @@ class Command(BaseCommand):
                         continue
 
                     movie.director = csv_director
+                    movie.director_search = normalize_movie_search_text(csv_director)
 
                     if dry_run:
                         counters["updated"] += 1
@@ -200,7 +201,7 @@ class Command(BaseCommand):
                     movie.updated_at = timezone.now()
                     to_update.append(movie)
                     if len(to_update) >= bulk_size:
-                        Movie.objects.bulk_update(to_update, ["director", "updated_at"], batch_size=bulk_size)
+                        Movie.objects.bulk_update(to_update, ["director", "director_search", "updated_at"], batch_size=bulk_size)
                         to_update.clear()
 
                     counters["updated"] += 1
@@ -215,7 +216,7 @@ class Command(BaseCommand):
                         examples["updated"].append(message)
 
                 if not dry_run and to_update:
-                    Movie.objects.bulk_update(to_update, ["director", "updated_at"], batch_size=bulk_size)
+                    Movie.objects.bulk_update(to_update, ["director", "director_search", "updated_at"], batch_size=bulk_size)
 
                 if dry_run:
                     transaction.set_rollback(True)

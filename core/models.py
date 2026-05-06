@@ -1,4 +1,5 @@
 import re
+import unicodedata
 
 from django.conf import settings
 from django.db import models
@@ -11,6 +12,31 @@ from django.db.models.functions import Cast
 from django.db.models import Q
 from django.db.models.functions import Coalesce
 from django.contrib.postgres.indexes import GinIndex, OpClass
+
+
+def normalize_movie_search_text(value):
+    if value is None:
+        return ""
+
+    without_accents = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", str(value))
+        if not unicodedata.combining(char)
+    )
+    lowered = without_accents.lower()
+    cleaned = "".join(char if char.isalnum() else " " for char in lowered)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def build_movie_search_fields(movie):
+    return {
+        "title_english_search": normalize_movie_search_text(movie.title_english),
+        "title_spanish_search": normalize_movie_search_text(movie.title_spanish),
+        "director_search": normalize_movie_search_text(movie.director),
+        "cast_members_search": normalize_movie_search_text(movie.cast_members),
+        "genre_search": normalize_movie_search_text(movie.genre),
+        "type_search": normalize_movie_search_text(movie.type),
+    }
 
 
 def build_genre_key(value):
@@ -353,6 +379,12 @@ class Movie(models.Model):
     release_year = models.PositiveIntegerField(null=True, blank=True)
     director = models.CharField(max_length=255, null=True, blank=True)
     cast_members = models.TextField(null=True, blank=True)
+    title_english_search = models.TextField(default="", blank=True)
+    title_spanish_search = models.TextField(default="", blank=True)
+    director_search = models.TextField(default="", blank=True)
+    cast_members_search = models.TextField(default="", blank=True)
+    genre_search = models.TextField(default="", blank=True)
+    type_search = models.TextField(default="", blank=True)
     synopsis = models.TextField(blank=True, default="")
     external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
     external_votes = models.PositiveIntegerField(default=0)
@@ -374,10 +406,41 @@ class Movie(models.Model):
             GinIndex(OpClass("director", name="gin_trgm_ops"), name="movie_director_trgm_idx"),
             GinIndex(OpClass("genre", name="gin_trgm_ops"), name="movie_genre_trgm_idx"),
             GinIndex(OpClass("cast_members", name="gin_trgm_ops"), name="movie_cast_trgm_idx"),
+            GinIndex(OpClass("title_english_search", name="gin_trgm_ops"), name="movie_title_en_search_trgm_idx"),
+            GinIndex(OpClass("title_spanish_search", name="gin_trgm_ops"), name="movie_title_es_search_trgm_idx"),
+            GinIndex(OpClass("director_search", name="gin_trgm_ops"), name="movie_director_search_trgm_idx"),
+            GinIndex(OpClass("cast_members_search", name="gin_trgm_ops"), name="movie_cast_search_trgm_idx"),
+            GinIndex(OpClass("genre_search", name="gin_trgm_ops"), name="movie_genre_search_trgm_idx"),
+            GinIndex(OpClass("type_search", name="gin_trgm_ops"), name="movie_type_search_trgm_idx"),
         ]
+
+    SEARCH_FIELD_SOURCES = {
+        "title_english": "title_english_search",
+        "title_spanish": "title_spanish_search",
+        "director": "director_search",
+        "cast_members": "cast_members_search",
+        "genre": "genre_search",
+        "type": "type_search",
+    }
+
+    def populate_search_fields(self):
+        for field_name, value in build_movie_search_fields(self).items():
+            setattr(self, field_name, value)
 
     def save(self, *args, **kwargs):
         self.genre_key = build_genre_key(self.genre)
+        self.populate_search_fields()
+
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if "genre" in update_fields:
+                update_fields.add("genre_key")
+            changed_search_sources = update_fields.intersection(self.SEARCH_FIELD_SOURCES)
+            for source_field in changed_search_sources:
+                update_fields.add(self.SEARCH_FIELD_SOURCES[source_field])
+            kwargs["update_fields"] = update_fields
+
         super().save(*args, **kwargs)
 
     def __str__(self):

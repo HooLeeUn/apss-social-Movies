@@ -31,6 +31,7 @@ from core.models import (
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
     build_genre_key,
+    normalize_movie_search_text,
     UserDirectorPreference,
     UserGenrePreference,
     UserTasteProfile,
@@ -43,6 +44,7 @@ from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
 )
+from core.views import apply_movie_autocomplete_search
 from core.weekly_recommendations import (
     get_previous_closed_week_window,
     get_weekly_recommendation_candidates,
@@ -279,6 +281,27 @@ class MovieGenreKeyTests(TestCase):
         )
 
         self.assertEqual(movie.genre_key, "Action|Comedy|Drama")
+
+    def test_normalize_movie_search_text_removes_accents_and_special_characters(self):
+        self.assertEqual(normalize_movie_search_text("Tío / Cabaña: Acción!"), "tio cabana accion")
+
+    def test_movie_populates_accentless_search_fields_on_save(self):
+        movie = Movie.objects.create(
+            author=self.user,
+            title_english="My Uncle",
+            title_spanish="Mi tío y la cabaña",
+            genre="Acción, Drama",
+            type=Movie.MOVIE,
+            director="María Gómez",
+            cast_members="José Núñez",
+        )
+
+        self.assertEqual(movie.title_english_search, "my uncle")
+        self.assertEqual(movie.title_spanish_search, "mi tio y la cabana")
+        self.assertEqual(movie.genre_search, "accion drama")
+        self.assertEqual(movie.director_search, "maria gomez")
+        self.assertEqual(movie.cast_members_search, "jose nunez")
+        self.assertEqual(movie.type_search, "movie")
 
 
 class MovieQuerySetAnnotationTests(TestCase):
@@ -3546,6 +3569,11 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             "cast_members": matched.cast_members,
         })
 
+        qs = apply_movie_autocomplete_search(Movie.objects.all(), "titanic 1997")
+        sql = str(qs.query).lower()
+        self.assertIn("release_year", sql)
+        self.assertIn("title_english_search", sql)
+
     def test_autocomplete_requires_all_terms_across_metadata(self):
         title_year_cast_match = self._create_movie(
             "Cabana Pearl",
@@ -3586,6 +3614,55 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(set(result_ids), {title_year_cast_match.id, director_match.id})
+
+    def test_autocomplete_search_is_accent_insensitive_without_db_unaccent(self):
+        full_phrase = self._create_movie(
+            "Family Cabin",
+            title_spanish="La cabaña del tío",
+            genre="Drama",
+        )
+        accion = self._create_movie("Action Story", title_spanish="Aventura", genre="Acción")
+
+        for query, expected_id in (("la cabana del tio", full_phrase.id), ("accion", accion.id)):
+            response = self.client.get(
+                self.url,
+                {"autocomplete": "true", "q": query, "limit": 5},
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            result_ids = [movie["id"] for movie in response.data["results"]]
+            self.assertIn(expected_id, result_ids)
+
+        qs = apply_movie_autocomplete_search(Movie.objects.all(), "la cabana del tio")
+        sql = str(qs.query).lower()
+        self.assertIn("title_spanish_search", sql)
+        self.assertNotIn("unaccent", sql)
+        self.assertNotIn("lower(", sql)
+
+    def test_autocomplete_search_matches_type_terms(self):
+        series = self._create_movie(
+            "Unrelated Title",
+            title_spanish="Titulo sin coincidencia",
+            type=Movie.SERIES,
+        )
+        movie = self._create_movie(
+            "Another Unrelated Title",
+            title_spanish="Otro titulo sin coincidencia",
+            type=Movie.MOVIE,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "series", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [item["id"] for item in response.data["results"]]
+        self.assertIn(series.id, result_ids)
+        self.assertNotIn(movie.id, result_ids)
+
+        qs = apply_movie_autocomplete_search(Movie.objects.all(), "series")
+        self.assertIn("type_search", str(qs.query).lower())
 
     def test_autocomplete_prioritizes_titles_when_all_terms_match(self):
         title_match = self._create_movie(
