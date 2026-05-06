@@ -11,8 +11,9 @@ from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
@@ -3982,6 +3983,59 @@ class MovieListViewSearchAndFiltersTests(TestCase):
                 "cast_members",
             },
         )
+
+    def test_autocomplete_splits_year_terms_into_release_year_filter(self):
+        titanic_1997 = self._create_movie("Titanic", release_year=1997)
+        self._create_movie("Titanic", release_year=1953)
+        self._create_movie("Unrelated 1997", release_year=1997)
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "titanic 1997", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [titanic_1997.id])
+
+    def test_autocomplete_year_filter_remains_accent_insensitive_for_text_terms(self):
+        matched = self._create_movie("The Shack", title_spanish="La cabaña", release_year=2017)
+        self._create_movie("La cabaña", title_spanish="La cabaña", release_year=2010)
+        self._create_movie("Unrelated", title_spanish="Sin relación", release_year=2017)
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "la cabana 2017", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [matched.id])
+
+    def test_autocomplete_year_only_returns_movies_for_that_year(self):
+        newest = self._create_movie("Year Match B", release_year=1997)
+        oldest = self._create_movie("Year Match A", release_year=1997)
+        self._create_movie("Different Year", release_year=1998)
+
+        response = self.client.get(self.url, {"autocomplete": "true", "q": "1997", "limit": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(set(result_ids), {newest.id, oldest.id})
+
+    def test_autocomplete_does_not_search_year_with_text_icontains(self):
+        self._create_movie("Titanic", release_year=1997)
+
+        with CaptureQueriesContext(connection) as captured_queries:
+            response = self.client.get(
+                self.url,
+                {"autocomplete": "true", "q": "titanic 1997", "limit": 10},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        combined_sql = "\n".join(query["sql"] for query in captured_queries)
+        self.assertIn('"core_movie"."release_year" = 1997', combined_sql)
+        self.assertNotIn("LIKE '%1997%'", combined_sql)
 
     def test_search_supports_combined_genre_and_release_year(self):
         matched = self._create_movie("Drama 1997", genre="Drama", release_year=1997)
