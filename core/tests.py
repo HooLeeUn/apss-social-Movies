@@ -3800,7 +3800,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertNotIn("unaccent", sql)
         self.assertNotIn("lower(", sql)
 
-    def test_autocomplete_search_matches_type_terms(self):
+    def test_autocomplete_search_does_not_match_type_terms(self):
         series = self._create_movie(
             "Unrelated Title",
             title_spanish="Titulo sin coincidencia",
@@ -3812,18 +3812,21 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             type=Movie.MOVIE,
         )
 
-        response = self.client.get(
-            self.url,
-            {"autocomplete": "true", "q": "series", "limit": 5},
-        )
+        with CaptureQueriesContext(connection) as captured_queries:
+            response = self.client.get(
+                self.url,
+                {"autocomplete": "true", "q": "series", "limit": 5},
+            )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result_ids = [item["id"] for item in response.data["results"]]
-        self.assertIn(series.id, result_ids)
+        self.assertNotIn(series.id, result_ids)
         self.assertNotIn(movie.id, result_ids)
+        combined_sql = "\n".join(query["sql"] for query in captured_queries).lower()
+        self.assertNotIn("type_search", combined_sql)
 
         qs = apply_movie_autocomplete_search(Movie.objects.all(), "series")
-        self.assertIn("type_search", str(qs.query).lower())
+        self.assertNotIn("type_search", str(qs.query).lower())
 
     def test_autocomplete_prioritizes_titles_when_all_terms_match(self):
         title_match = self._create_movie(
@@ -3934,6 +3937,12 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             director="Nancy Meyers",
             cast_members="Cameron Diaz, Jude Law, Kate Winslet",
         )
+        brad_pitt = self._create_movie(
+            "Fight Club",
+            release_year=1999,
+            director="David Fincher",
+            cast_members="Brad Pitt, Edward Norton",
+        )
         self._create_movie("Random Movie", director="Jane Doe", cast_members="Actor")
 
         response = self.client.get(
@@ -3945,6 +3954,15 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertIn(directed.id, result_ids)
         self.assertNotIn(casted.id, result_ids)
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "search": "brad pitt", "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids, [brad_pitt.id])
 
     def test_autocomplete_skips_synopsis_matches_for_lightweight_queries(self):
         self._create_movie(
