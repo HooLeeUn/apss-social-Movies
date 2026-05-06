@@ -1006,6 +1006,11 @@ class FriendshipRequestCreateView(APIView):
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         if target == request.user:
             return Response({"detail": "You cannot send a friendship request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
+        if (
+            target.profile.visibility == Profile.Visibility.PUBLIC
+            and target.profile.friend_requests_restricted
+        ):
+            return Response({"detail": "This user is not accepting friendship requests."}, status=status.HTTP_403_FORBIDDEN)
 
         friendship = Friendship.between(request.user, target).first()
         if friendship is None:

@@ -186,9 +186,9 @@ class UserDirectorPreferenceAdmin(PreferenceDistributionAdmin):
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "is_public", "visibility")
+    list_display = ("id", "user", "is_public", "visibility", "friend_requests_restricted")
     search_fields = ("user__username",)
-    list_filter = ("is_public", "visibility")
+    list_filter = ("is_public", "visibility", "friend_requests_restricted")
     autocomplete_fields = ("user",)
 
 
