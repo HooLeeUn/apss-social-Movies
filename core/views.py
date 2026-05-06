@@ -16,13 +16,14 @@ from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.utils.urls import remove_query_param, replace_query_param
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import (
     AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
-    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchResultSerializer,
+    PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
     UserMovieRecommendationItemSerializer,
@@ -107,6 +108,17 @@ MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP = {
     "type": "type_search",
 }
 MOVIE_AUTOCOMPLETE_SEARCH_FIELDS = frozenset(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP)
+MOVIE_AUTOCOMPLETE_FAST_FIELDS = (
+    "title_spanish",
+    "title_english",
+    "director",
+)
+MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS = (
+    "cast_members",
+    "genre",
+    "type",
+)
+MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH = 3
 
 
 def _build_movie_term_match(term, weighted_fields, search_lookup_suffix):
@@ -242,13 +254,104 @@ def apply_movie_search(
     return filtered_queryset.annotate(search_relevance=score_expr)
 
 
+def _get_autocomplete_terms(search):
+    normalized_search = normalize_movie_search_text(search)
+    terms = split_search_terms(normalized_search)
+    return [
+        term
+        for term in terms
+        if term.isdigit() or len(term) >= MOVIE_AUTOCOMPLETE_MIN_TERM_LENGTH
+    ]
+
+
+def _map_autocomplete_fields(fields):
+    return tuple(MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP[field] for field in fields)
+
+
+def _build_autocomplete_terms_filter(terms, fields, include_release_year=False):
+    filters = Q()
+    for term in terms:
+        term_match = Q()
+        for field in fields:
+            term_match |= Q(**{f"{field}__icontains": term})
+        if include_release_year and term.isdigit():
+            term_match |= Q(release_year=int(term))
+        filters &= term_match
+    return filters
+
+
+def _build_autocomplete_group_match(terms, fields):
+    text_terms = [term for term in terms if not term.isdigit()]
+    if not text_terms:
+        return Q(pk__isnull=False)
+    return _build_autocomplete_terms_filter(text_terms, fields)
+
+
+def _order_autocomplete_fast_queryset(queryset, terms):
+    title_fields = _map_autocomplete_fields(("title_spanish", "title_english"))
+    director_fields = _map_autocomplete_fields(("director",))
+    title_match = _build_autocomplete_group_match(terms, title_fields)
+    director_match = _build_autocomplete_group_match(terms, director_fields)
+    release_year_desc = F("release_year").desc(nulls_last=True)
+
+    return queryset.annotate(
+        autocomplete_title_match=Case(
+            When(title_match, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+        autocomplete_director_match=Case(
+            When(director_match, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+    ).order_by(
+        "-autocomplete_title_match",
+        "-autocomplete_director_match",
+        release_year_desc,
+        "-id",
+    )
+
+
+def build_movie_autocomplete_fast_queryset(queryset, search):
+    # Fast lane: query only pre-normalized title/director columns plus numeric
+    # release years. This keeps the first response cheap and avoids the old
+    # search_relevance ORDER BY that forced PostgreSQL to score every match
+    # before applying LIMIT.
+    terms = _get_autocomplete_terms(search)
+    if not terms:
+        return queryset.none()
+
+    fast_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_FAST_FIELDS)
+    filters = _build_autocomplete_terms_filter(terms, fast_fields, include_release_year=True)
+    return _order_autocomplete_fast_queryset(queryset.filter(filters), terms)
+
+
+def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=None):
+    # Extended lane: only the heavier metadata fields, appended after fast lane
+    # results and with fast IDs excluded by subquery.
+    terms = _get_autocomplete_terms(search)
+    if not terms:
+        return queryset.none()
+
+    extended_fields = _map_autocomplete_fields(MOVIE_AUTOCOMPLETE_EXTENDED_FIELDS)
+    filters = _build_autocomplete_terms_filter(terms, extended_fields)
+    extended_queryset = queryset.filter(filters)
+    if fast_queryset is not None:
+        extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))
+    release_year_desc = F("release_year").desc(nulls_last=True)
+    return extended_queryset.order_by(release_year_desc, "-id")
+
+
 def apply_movie_autocomplete_search(queryset, search):
-    # Keep autocomplete lightweight and accent-insensitive without wrapping DB columns
-    # in functions: normalize user input in Python and query pre-normalized columns
-    # backed by trigram GIN indexes.
+    # Legacy queryset helper: keep the old broad autocomplete predicate for
+    # callers that inspect or reuse it directly, but drop the expensive
+    # search_relevance annotation. The API endpoint below uses the explicit
+    # two-phase fast/extended lane builders instead.
     return apply_movie_search(
         queryset,
         search,
+        include_relevance=False,
         include_synopsis=False,
         use_unaccent=False,
         search_field_map=MOVIE_AUTOCOMPLETE_SEARCH_FIELD_MAP,
@@ -2069,7 +2172,17 @@ class UserPostsListView(generics.ListAPIView):
 
 class MovieSearchView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
-    serializer_class = MovieSearchResultSerializer
+    serializer_class = MovieSearchLightSerializer
+    social_serializer_class = MovieSearchResultSerializer
+    include_social_truthy_values = {"1", "true", "yes"}
+
+    def include_social_fields(self):
+        return self.request.query_params.get("include_social", "").lower() in self.include_social_truthy_values
+
+    def get_serializer_class(self):
+        if self.include_social_fields():
+            return self.social_serializer_class
+        return super().get_serializer_class()
 
     def _apply_filters(self, qs):
         if movie_type := self.request.query_params.get("type"):
@@ -2117,11 +2230,28 @@ class MovieSearchView(generics.ListAPIView):
         )
         normalized_query = normalize_movie_search_text(raw_query)
 
-        qs = Movie.objects.with_display_rating().with_my_rating(user)
-        qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
-            general_rating=F("display_rating"),
-        )
-        qs = qs.with_following_rating_stats(user)
+        if self.include_social_fields():
+            qs = Movie.objects.with_display_rating().with_my_rating(user)
+            qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
+                general_rating=F("display_rating"),
+            )
+            qs = qs.with_following_rating_stats(user)
+        else:
+            qs = Movie.objects.annotate(
+                display_rating=Cast("external_rating", FloatField()),
+            ).only(
+                "id",
+                "image",
+                "title_spanish",
+                "title_english",
+                "type",
+                "genre",
+                "release_year",
+                "director",
+                "cast_members",
+                "external_rating",
+                "external_votes",
+            )
         qs = self._apply_filters(qs)
         # SearchVectorField can be queried like an annotated SearchVector;
         # this compiles to PostgreSQL @@ and uses the GIN index.
@@ -2178,7 +2308,7 @@ class MovieListView(generics.ListAPIView):
             qs = qs.filter(release_year=release_year)
         return qs
 
-    def get_autocomplete_queryset(self):
+    def _get_autocomplete_base_queryset(self):
         qs = Movie.objects.only(
             "id",
             "title_english",
@@ -2190,15 +2320,90 @@ class MovieListView(generics.ListAPIView):
             "director",
             "cast_members",
         )
-        qs = self._apply_common_filters(qs)
+        return self._apply_common_filters(qs)
+
+    def _get_autocomplete_page_size(self):
+        paginator = self.get_paginator()
+        page_size = paginator.get_page_size(self.request) if paginator else None
+        return page_size or AutocompletePagination.page_size
+
+    def _get_autocomplete_page_number(self):
+        page_number = self.request.query_params.get(self.get_paginator().page_query_param, 1)
+        if page_number in self.get_paginator().last_page_strings:
+            return 1
+        try:
+            return max(1, int(page_number))
+        except (TypeError, ValueError):
+            return 1
+
+    def _build_autocomplete_page_url(self, page_number):
+        if page_number < 1:
+            return None
+        url = self.request.build_absolute_uri()
+        if page_number == 1:
+            return remove_query_param(url, self.get_paginator().page_query_param)
+        return replace_query_param(url, self.get_paginator().page_query_param, page_number)
+
+    def list(self, request, *args, **kwargs):
+        if not self.is_autocomplete_request():
+            return super().list(request, *args, **kwargs)
+
+        search = request.query_params.get("search") or request.query_params.get("q")
+        if not search:
+            return super().list(request, *args, **kwargs)
+
+        page_size = self._get_autocomplete_page_size()
+        page_number = self._get_autocomplete_page_number()
+        offset = (page_number - 1) * page_size
+        base_queryset = self._get_autocomplete_base_queryset()
+
+        fast_queryset = build_movie_autocomplete_fast_queryset(base_queryset, search)
+        fast_count = fast_queryset.count()
+
+        page_results = []
+        if offset < fast_count:
+            page_results = list(fast_queryset[offset:offset + page_size])
+
+        total_count = fast_count
+        if len(page_results) < page_size:
+            extended_queryset = build_movie_autocomplete_extended_queryset(
+                base_queryset,
+                search,
+                fast_queryset=fast_queryset,
+            )
+            extended_count = extended_queryset.count()
+            total_count += extended_count
+
+            extended_offset = max(0, offset - fast_count)
+            remaining = page_size - len(page_results)
+            page_results.extend(
+                extended_queryset[extended_offset:extended_offset + remaining]
+            )
+
+        serializer = self.get_serializer(page_results, many=True)
+        next_url = None
+        if offset + len(page_results) < total_count:
+            next_url = self._build_autocomplete_page_url(page_number + 1)
+        previous_url = None
+        if page_number > 1:
+            previous_url = self._build_autocomplete_page_url(page_number - 1)
+
+        return Response({
+            "count": total_count,
+            "next": next_url,
+            "previous": previous_url,
+            "results": serializer.data,
+        })
+
+    def get_autocomplete_queryset(self):
+        qs = self._get_autocomplete_base_queryset()
 
         search = self.request.query_params.get("search") or self.request.query_params.get("q")
         if search:
-            qs = apply_movie_autocomplete_search(qs, search)
+            return apply_movie_autocomplete_search(qs, search)
 
         release_year_desc = F("release_year").desc(nulls_last=True)
-        search_ordering = ["-search_relevance"] if search else []
-        return qs.order_by(*search_ordering, "title_english", release_year_desc, "-id")
+        return qs.order_by("title_english", release_year_desc, "-id")
 
     def get_queryset(self):
         if self.is_autocomplete_request():

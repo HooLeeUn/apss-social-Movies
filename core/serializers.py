@@ -1042,6 +1042,29 @@ class MovieListSerializer(serializers.ModelSerializer):
         ]
 
 
+class MovieSearchLightSerializer(serializers.ModelSerializer):
+    search_rank = serializers.FloatField(read_only=True)
+    display_rating = serializers.FloatField(read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "image",
+            "title_spanish",
+            "title_english",
+            "type",
+            "genre",
+            "release_year",
+            "director",
+            "cast_members",
+            "external_rating",
+            "external_votes",
+            "display_rating",
+            "search_rank",
+        ]
+
+
 class MovieSearchResultSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     search_rank = serializers.FloatField(read_only=True)
