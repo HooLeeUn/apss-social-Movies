@@ -2048,6 +2048,9 @@ class MovieListView(generics.ListAPIView):
             "type",
             "release_year",
             "image",
+            "genre",
+            "director",
+            "cast_members",
         )
         qs = self._apply_common_filters(qs)
 

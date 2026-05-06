@@ -1003,11 +1003,14 @@ class MovieAutocompleteSerializer(serializers.ModelSerializer):
         model = Movie
         fields = [
             "id",
-            "title_english",
+            "image",
             "title_spanish",
+            "title_english",
             "type",
             "release_year",
-            "image",
+            "genre",
+            "director",
+            "cast_members",
         ]
 
 
