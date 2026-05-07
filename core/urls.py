@@ -66,6 +66,7 @@ urlpatterns = [
     path("friendships/<int:pk>/accept/", FriendshipRequestAcceptView.as_view(), name="friendship-accept"),
     path("friendships/<int:pk>/reject/", FriendshipRequestRejectView.as_view(), name="friendship-reject"),
     path("friendships/requests/<int:pk>/cancel/", FriendshipRequestCancelView.as_view(), name="friendship-request-cancel"),
+    path("friendships/<int:pk>/", FriendshipDeleteView.as_view(), name="friendship-delete-by-id"),
     path("friendships/<str:username>/", FriendshipDeleteView.as_view(), name="friendship-delete"),
     path("feed/", FeedFollowingView.as_view(), name="feed-following"),
     path("feed/comments/public/", PublicCommentsFeedView.as_view(), name="public-comments-feed"),

@@ -1137,11 +1137,18 @@ class FriendshipRequestCancelView(APIView):
 class FriendshipDeleteView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request, username):
-        target = User.objects.filter(username=username).first()
-        if not target:
-            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-        friendship = Friendship.between(request.user, target).first()
+    def delete(self, request, username=None, pk=None):
+        if pk is not None:
+            friendship = Friendship.objects.filter(
+                Q(user1=request.user) | Q(user2=request.user),
+                pk=pk,
+            ).first()
+        else:
+            target = User.objects.filter(username=username).first()
+            if not target:
+                return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+            friendship = Friendship.between(request.user, target).first()
+
         if not friendship or friendship.status != Friendship.STATUS_ACCEPTED:
             return Response({"detail": "Friendship not found."}, status=status.HTTP_404_NOT_FOUND)
 
