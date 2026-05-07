@@ -902,6 +902,7 @@ class Profile(models.Model):
         choices=Visibility.choices,
         default=Visibility.PUBLIC,
     )
+    friend_requests_restricted = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Profile({self.user.username})"

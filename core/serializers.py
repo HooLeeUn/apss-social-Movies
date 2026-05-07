@@ -3,6 +3,7 @@ from datetime import date
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.validators import UnicodeUsernameValidator
+from django.db.models import Q
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from .models import (
@@ -183,6 +184,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated or obj == request.user:
             return False
 
+        profile = obj.profile if hasattr(obj, "profile") else None
+        if (
+            profile
+            and profile.visibility == Profile.Visibility.PUBLIC
+            and profile.friend_requests_restricted
+        ):
+            return False
+
         friendship = self._get_friendship(obj)
         if not friendship:
             return True
@@ -359,13 +368,32 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Profile
-        fields = ["visibility"]
+        fields = ["visibility", "friend_requests_restricted"]
+
+    def validate(self, attrs):
+        next_visibility = attrs.get("visibility", self.instance.visibility if self.instance else None)
+        requested_friend_requests_restricted = attrs.get("friend_requests_restricted")
+
+        if (
+            requested_friend_requests_restricted is True
+            and next_visibility != Profile.Visibility.PUBLIC
+        ):
+            raise serializers.ValidationError({
+                "friend_requests_restricted": "Only public profiles can restrict friendship requests."
+            })
+
+        return attrs
 
     def update(self, instance, validated_data):
         visibility = validated_data.get("visibility")
         previous_visibility = instance.visibility
+        previous_friend_requests_restricted = instance.friend_requests_restricted
+
         if visibility is not None:
             instance.is_public = visibility == Profile.Visibility.PUBLIC
+            if visibility == Profile.Visibility.PRIVATE:
+                validated_data["friend_requests_restricted"] = False
+
         instance = super().update(instance, validated_data)
 
         if (
@@ -373,6 +401,16 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
             and previous_visibility == Profile.Visibility.PUBLIC
         ):
             Follow.objects.filter(following=instance.user).delete()
+
+        if (
+            not previous_friend_requests_restricted
+            and instance.friend_requests_restricted
+        ):
+            Friendship.objects.filter(
+                status=Friendship.STATUS_ACCEPTED,
+            ).filter(
+                Q(user1=instance.user) | Q(user2=instance.user)
+            ).delete()
 
         return instance
 
