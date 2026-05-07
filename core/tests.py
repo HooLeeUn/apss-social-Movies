@@ -2264,7 +2264,7 @@ class SocialPrivacyAndFriendshipTests(TestCase):
 
         response = self.client.post(reverse("friendship-request-create", kwargs={"username": self.public_user.username}))
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(Friendship.objects.count(), 1)
 
     def test_prevents_self_follow_and_self_friendship(self):
@@ -2291,9 +2291,11 @@ class SocialPrivacyAndFriendshipTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data["is_public"])
-        self.assertEqual(response.data["friendship_status"], "pending_sent")
+        self.assertEqual(response.data["friendship_status"], "sent_pending")
         self.assertFalse(response.data["can_follow"])
         self.assertFalse(response.data["can_send_friend_request"])
+        self.assertTrue(response.data["is_private_profile"])
+        self.assertFalse(response.data["is_restricted_by_visited_user"])
 
     def test_public_profile_can_enable_friend_requests_restricted(self):
         self.client.force_authenticate(user=self.user)
@@ -2589,6 +2591,134 @@ class SocialPrivacyAndFriendshipTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
+
+    def test_user_follow_endpoint_alias_is_idempotent_and_uses_follow_model(self):
+        self.client.force_authenticate(user=self.user)
+
+        first_response = self.client.post(reverse("user-follow", kwargs={"username": self.public_user.username}))
+        second_response = self.client.post(reverse("user-follow", kwargs={"username": self.public_user.username}))
+        delete_response = self.client.delete(reverse("user-follow", kwargs={"username": self.public_user.username}))
+        second_delete_response = self.client.delete(reverse("user-follow", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Follow.objects.filter(follower=self.user, following=self.public_user).count(), 1)
+        self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_delete_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
+
+    def test_cannot_follow_when_visited_user_restricted_authenticated_user(self):
+        UserVisibilityBlock.objects.create(owner=self.public_user, blocked_user=self.user)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("user-follow", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
+
+    def test_user_friend_request_endpoint_creates_pending_and_delete_cancels(self):
+        self.client.force_authenticate(user=self.user)
+
+        create_response = self.client.post(reverse("user-friend-request", kwargs={"username": self.private_user.username}))
+        duplicate_response = self.client.post(reverse("user-friend-request", kwargs={"username": self.private_user.username}))
+        cancel_response = self.client.delete(reverse("user-friend-request", kwargs={"username": self.private_user.username}))
+
+        friendship = Friendship.between(self.user, self.private_user).get()
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Friendship.between(self.user, self.private_user).count(), 1)
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        friendship.refresh_from_db()
+        self.assertEqual(friendship.status, Friendship.STATUS_CANCELLED)
+
+    def test_friendship_accept_and_reject_aliases_update_existing_friendship(self):
+        accept_friendship = Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.private_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        self.client.force_authenticate(user=self.private_user)
+
+        accept_response = self.client.post(reverse("friendship-accept", kwargs={"pk": accept_friendship.pk}))
+        accept_friendship.refresh_from_db()
+
+        rejected_requester = get_user_model().objects.create_user(
+            username="reject_requester", email="reject@example.com", password="test1234"
+        )
+        reject_friendship = Friendship.objects.create(
+            requester=rejected_requester,
+            user1=rejected_requester,
+            user2=self.private_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        reject_response = self.client.post(reverse("friendship-reject", kwargs={"pk": reject_friendship.pk}))
+        reject_friendship.refresh_from_db()
+
+        self.assertEqual(accept_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(accept_friendship.status, Friendship.STATUS_ACCEPTED)
+        self.assertEqual(reject_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reject_friendship.status, Friendship.STATUS_REJECTED)
+
+    def test_me_friend_requests_separates_sent_and_received(self):
+        sender = get_user_model().objects.create_user(
+            username="incoming_sender", first_name="Julian", last_name="Hernandez", email="incoming@example.com", password="test1234"
+        )
+        recipient = get_user_model().objects.create_user(
+            username="outgoing_recipient", first_name="Dennisse", last_name="Jamaica", email="outgoing@example.com", password="test1234"
+        )
+        Friendship.objects.create(requester=self.user, user1=self.user, user2=recipient, status=Friendship.STATUS_PENDING)
+        Friendship.objects.create(requester=sender, user1=sender, user2=self.user, status=Friendship.STATUS_PENDING)
+        Follow.objects.create(follower=sender, following=recipient)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("me-friend-requests"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["username"] for item in response.data["sent"]], ["outgoing_recipient"])
+        self.assertEqual([item["username"] for item in response.data["received"]], ["incoming_sender"])
+        self.assertIn("followers_count", response.data["sent"][0])
+
+    def test_profile_endpoint_friendship_status_values(self):
+        self.client.force_authenticate(user=self.user)
+        none_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        Friendship.objects.create(requester=self.user, user1=self.user, user2=self.public_user, status=Friendship.STATUS_PENDING)
+        sent_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        Friendship.between(self.user, self.public_user).delete()
+        Friendship.objects.create(requester=self.public_user, user1=self.user, user2=self.public_user, status=Friendship.STATUS_PENDING)
+        received_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        Friendship.between(self.user, self.public_user).update(status=Friendship.STATUS_ACCEPTED)
+        friends_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(none_response.data["friendship_status"], "none")
+        self.assertEqual(sent_response.data["friendship_status"], "sent_pending")
+        self.assertEqual(received_response.data["friendship_status"], "received_pending")
+        self.assertEqual(friends_response.data["friendship_status"], "friends")
+
+    def test_private_profile_allows_friend_request_button_but_not_follow(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.private_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["can_follow"])
+        self.assertTrue(response.data["can_send_friend_request"])
+        self.assertTrue(response.data["is_private_profile"])
+
+    def test_public_restricted_profile_disables_friend_request_button(self):
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["can_send_friend_request"])
+        self.assertTrue(response.data["friend_requests_restricted"])
+
 
 
 class MeFollowingEndpointTests(TestCase):
@@ -5346,7 +5476,13 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data["can_view_full_profile"])
         self.assertEqual(response.data["profile_access"], "restricted")
-        self.assertEqual(set(response.data.keys()), {"id", "username", "first_name", "last_name", "display_name", "avatar", "can_view_full_profile", "profile_access"})
+        self.assertEqual(set(response.data.keys()), {
+            "id", "username", "first_name", "last_name", "display_name", "avatar",
+            "is_public", "visibility", "is_following", "friendship_status",
+            "can_follow", "can_send_friend_request", "friend_requests_restricted",
+            "is_private_profile", "is_restricted_by_visited_user",
+            "can_view_full_profile", "profile_access",
+        })
 
     def test_profile_private_is_visible_to_accepted_friend(self):
         self.owner.profile.visibility = Profile.Visibility.PRIVATE
@@ -5363,7 +5499,9 @@ class ProfilePrivacyVisibilityTests(TestCase):
 
         self.client.force_authenticate(self.viewer)
         blocked_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
-        self.assertEqual(blocked_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(blocked_response.data["can_view_full_profile"])
+        self.assertTrue(blocked_response.data["is_restricted_by_visited_user"])
 
         self.client.force_authenticate(self.owner)
         own_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))

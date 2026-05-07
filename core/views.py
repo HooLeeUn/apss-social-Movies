@@ -31,6 +31,7 @@ from .serializers import (
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
+    FriendRequestUserSummarySerializer,
 )
 from .models import (
     AppBranding,
@@ -67,7 +68,6 @@ from .feed_pool import DailyFeedPoolService
 from .visibility import (
     can_view_user_profile,
     filter_out_authors_who_blocked_viewer,
-    is_blocked_from_user_content,
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
@@ -76,6 +76,44 @@ from django.utils import timezone
 User = get_user_model()
 logger = logging.getLogger(__name__)
 BRANDING_CACHE_KEY = "app_branding_active_v1"
+
+
+def is_restricted_by_visited_user(visited_user, authenticated_user):
+    if not authenticated_user or not getattr(authenticated_user, "is_authenticated", False):
+        return False
+    if not visited_user or visited_user.id == authenticated_user.id:
+        return False
+    return UserVisibilityBlock.objects.filter(
+        owner=visited_user,
+        blocked_user=authenticated_user,
+    ).exists()
+
+
+def get_user_follow_target(username):
+    return User.objects.filter(username=username).select_related("profile").first()
+
+
+def validate_follow_allowed(request_user, target):
+    if target == request_user:
+        return "You cannot follow yourself.", status.HTTP_400_BAD_REQUEST
+    if is_restricted_by_visited_user(target, request_user):
+        return "You cannot follow this user.", status.HTTP_403_FORBIDDEN
+    profile = target.profile if hasattr(target, "profile") else None
+    if profile and profile.visibility == Profile.Visibility.PRIVATE:
+        return "You cannot follow a private profile.", status.HTTP_403_FORBIDDEN
+    return None, None
+
+
+def validate_friend_request_allowed(request_user, target):
+    if target == request_user:
+        return "You cannot send a friendship request to yourself.", status.HTTP_400_BAD_REQUEST
+    if is_restricted_by_visited_user(target, request_user):
+        return "You cannot send a friendship request to this user.", status.HTTP_403_FORBIDDEN
+    if request_user.profile.friend_requests_restricted:
+        return "You are not allowed to send friendship requests.", status.HTTP_403_FORBIDDEN
+    if target.profile.friend_requests_restricted:
+        return "This user is not accepting friendship requests.", status.HTTP_403_FORBIDDEN
+    return None, None
 
 
 def split_search_terms(search):
@@ -744,9 +782,6 @@ class UserProfileView(RetrieveAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
-        if is_blocked_from_user_content(obj, request.user):
-            raise PermissionDenied("You do not have permission to view this profile.")
-
         can_view_full_profile = can_view_user_profile(obj, request.user)
         serializer = self.get_serializer(
             obj,
@@ -793,16 +828,13 @@ class FollowToggleView(APIView):
 
     def post(self, request, username):
         """Seguir a username"""
-        target = User.objects.filter(username=username).select_related("profile").first()
+        target = get_user_follow_target(username)
         if not target:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if target == request.user:
-            return Response({"detail": "You cannot follow yourself."}, status=status.HTTP_400_BAD_REQUEST)
-
-        profile = target.profile if hasattr(target, "profile") else None
-        if profile and profile.visibility == profile.Visibility.PRIVATE:
-            return Response({"detail": "You cannot follow a private profile."}, status=status.HTTP_403_FORBIDDEN)
+        error_detail, error_status = validate_follow_allowed(request.user, target)
+        if error_detail:
+            return Response({"detail": error_detail}, status=error_status)
 
         try:
             obj, created = Follow.objects.get_or_create(
@@ -1005,12 +1037,10 @@ class FriendshipRequestCreateView(APIView):
         target = User.objects.filter(username=username).select_related("profile").first()
         if not target:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-        if target == request.user:
-            return Response({"detail": "You cannot send a friendship request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
-        if request.user.profile.friend_requests_restricted:
-            return Response({"detail": "You are not allowed to send friendship requests."}, status=status.HTTP_403_FORBIDDEN)
-        if target.profile.friend_requests_restricted:
-            return Response({"detail": "This user is not accepting friendship requests."}, status=status.HTTP_403_FORBIDDEN)
+
+        error_detail, error_status = validate_friend_request_allowed(request.user, target)
+        if error_detail:
+            return Response({"detail": error_detail}, status=error_status)
 
         friendship = Friendship.between(request.user, target).first()
         if friendship is None:
@@ -1027,13 +1057,30 @@ class FriendshipRequestCreateView(APIView):
             return Response({"detail": "You are already friends."}, status=status.HTTP_400_BAD_REQUEST)
 
         if friendship.status == Friendship.STATUS_PENDING:
-            return Response({"detail": "A friendship request is already pending."}, status=status.HTTP_400_BAD_REQUEST)
+            serializer = FriendshipSerializer(friendship, context={"request": request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
 
         friendship.requester = request.user
         friendship.status = Friendship.STATUS_PENDING
         friendship.save()
         serializer = FriendshipSerializer(friendship, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, username):
+        target = User.objects.filter(username=username).first()
+        if not target:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        friendship = Friendship.between(request.user, target).filter(
+            status=Friendship.STATUS_PENDING,
+            requester=request.user,
+        ).first()
+        if friendship:
+            friendship.status = Friendship.STATUS_CANCELLED
+            friendship.save()
+            serializer = FriendshipSerializer(friendship, context={"request": request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({"cancelled": False}, status=status.HTTP_200_OK)
 
 
 class FriendshipRequestAcceptView(APIView):
@@ -1187,6 +1234,34 @@ class SentFriendshipRequestsView(ListAPIView):
             .filter(status=Friendship.STATUS_PENDING, requester=self.request.user)
             .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
         )
+
+
+class MeFriendRequestsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pending = (
+            Friendship.objects
+            .filter(status=Friendship.STATUS_PENDING)
+            .filter(Q(user1=request.user) | Q(user2=request.user))
+            .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
+        )
+        sent_users = []
+        received_users = []
+        for friendship in pending:
+            other_user = friendship.other_user(request.user)
+            other_user.friendship_id = friendship.id
+            other_user.followers_count = other_user.followers.count()
+            if friendship.requester_id == request.user.id:
+                sent_users.append(other_user)
+            else:
+                received_users.append(other_user)
+
+        context = {"request": request}
+        return Response({
+            "sent": FriendRequestUserSummarySerializer(sent_users, many=True, context=context).data,
+            "received": FriendRequestUserSummarySerializer(received_users, many=True, context=context).data,
+        }, status=status.HTTP_200_OK)
 
 
 class FeedFollowingView(ListAPIView):

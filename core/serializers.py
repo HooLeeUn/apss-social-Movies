@@ -124,6 +124,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
     friendship_status = serializers.SerializerMethodField()
     can_follow = serializers.SerializerMethodField()
     can_send_friend_request = serializers.SerializerMethodField()
+    friend_requests_restricted = serializers.SerializerMethodField()
+    is_private_profile = serializers.SerializerMethodField()
+    is_restricted_by_visited_user = serializers.SerializerMethodField()
     can_view_full_profile = serializers.SerializerMethodField()
     profile_access = serializers.SerializerMethodField()
     display_name = serializers.SerializerMethodField()
@@ -139,6 +142,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "posts_count", "avg_post_rating",
             "is_following", "friendship_status",
             "can_follow", "can_send_friend_request",
+            "friend_requests_restricted", "is_private_profile", "is_restricted_by_visited_user",
             "display_name", "can_view_full_profile", "profile_access",
         ]
         
@@ -165,9 +169,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not friendship:
             return "none"
         if friendship.status == Friendship.STATUS_ACCEPTED:
-            return Friendship.STATUS_ACCEPTED
+            return "friends"
         if friendship.status == Friendship.STATUS_PENDING:
-            return "pending_sent" if friendship.requester_id == request.user.id else "pending_received"
+            return "sent_pending" if friendship.requester_id == request.user.id else "received_pending"
         return "none"
 
     def get_can_follow(self, obj):
@@ -177,6 +181,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         profile = obj.profile if hasattr(obj, "profile") else None
         if profile and profile.visibility == Profile.Visibility.PRIVATE:
             return False
+        if self.get_is_restricted_by_visited_user(obj):
+            return False
         return not Follow.objects.filter(follower=request.user, following=obj).exists()
 
     def get_can_send_friend_request(self, obj):
@@ -184,18 +190,31 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated or obj == request.user:
             return False
 
+        if self.get_is_restricted_by_visited_user(obj):
+            return False
+
         profile = obj.profile if hasattr(obj, "profile") else None
-        if (
-            profile
-            and profile.visibility == Profile.Visibility.PUBLIC
-            and profile.friend_requests_restricted
-        ):
+        if profile and profile.friend_requests_restricted:
             return False
 
         friendship = self._get_friendship(obj)
         if not friendship:
             return True
         return friendship.status in {Friendship.STATUS_REJECTED, Friendship.STATUS_CANCELLED}
+
+    def get_friend_requests_restricted(self, obj):
+        profile = obj.profile if hasattr(obj, "profile") else None
+        return bool(profile and profile.friend_requests_restricted)
+
+    def get_is_private_profile(self, obj):
+        profile = obj.profile if hasattr(obj, "profile") else None
+        return bool(profile and profile.visibility == Profile.Visibility.PRIVATE)
+
+    def get_is_restricted_by_visited_user(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated or obj == request.user:
+            return False
+        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=request.user).exists()
 
     def get_avatar(self, obj):
         if hasattr(obj, "profile") and obj.profile.avatar:
@@ -237,6 +256,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "last_name": data["last_name"],
             "display_name": data["display_name"],
             "avatar": data["avatar"],
+            "is_public": data["is_public"],
+            "visibility": data["visibility"],
+            "is_following": data["is_following"],
+            "friendship_status": data["friendship_status"],
+            "can_follow": data["can_follow"],
+            "can_send_friend_request": data["can_send_friend_request"],
+            "friend_requests_restricted": data["friend_requests_restricted"],
+            "is_private_profile": data["is_private_profile"],
+            "is_restricted_by_visited_user": data["is_restricted_by_visited_user"],
             "can_view_full_profile": data["can_view_full_profile"],
             "profile_access": data["profile_access"],
         }
@@ -1383,6 +1411,28 @@ class UserTasteProfileInspectSerializer(serializers.ModelSerializer):
             "type_preferences",
             "director_preferences",
         ]
+
+
+class FriendRequestUserSummarySerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="friendship_id", read_only=True)
+    display_name = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
+    followers_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "display_name", "avatar", "followers_count"]
+
+    def get_display_name(self, obj):
+        full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
+        return full_name or obj.username
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
 
 
 class FriendshipUserSerializer(serializers.ModelSerializer):
