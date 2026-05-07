@@ -2691,12 +2691,32 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         received_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
 
         Friendship.between(self.user, self.public_user).update(status=Friendship.STATUS_ACCEPTED)
+        accepted_friendship = Friendship.between(self.user, self.public_user).get()
         friends_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
 
         self.assertEqual(none_response.data["friendship_status"], "none")
+        self.assertIsNone(none_response.data["friendship_id"])
         self.assertEqual(sent_response.data["friendship_status"], "sent_pending")
+        self.assertIsNone(sent_response.data["friendship_id"])
         self.assertEqual(received_response.data["friendship_status"], "received_pending")
+        self.assertIsNone(received_response.data["friendship_id"])
         self.assertEqual(friends_response.data["friendship_status"], "friends")
+        self.assertEqual(friends_response.data["friendship_id"], accepted_friendship.id)
+
+    def test_friendship_delete_by_id_cancels_accepted_friendship(self):
+        friendship = Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.public_user,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.delete(reverse("friendship-delete-by-id", kwargs={"pk": friendship.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        friendship.refresh_from_db()
+        self.assertEqual(friendship.status, Friendship.STATUS_CANCELLED)
 
     def test_private_profile_allows_friend_request_button_but_not_follow(self):
         self.client.force_authenticate(user=self.user)
@@ -5478,7 +5498,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(response.data["profile_access"], "restricted")
         self.assertEqual(set(response.data.keys()), {
             "id", "username", "first_name", "last_name", "display_name", "avatar",
-            "is_public", "visibility", "is_following", "friendship_status",
+            "is_public", "visibility", "is_following", "friendship_status", "friendship_id",
             "can_follow", "can_send_friend_request", "friend_requests_restricted",
             "is_private_profile", "is_restricted_by_visited_user",
             "can_view_full_profile", "profile_access",

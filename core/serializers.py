@@ -122,6 +122,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     avg_post_rating = serializers.FloatField(read_only=True)
     is_following = serializers.SerializerMethodField()
     friendship_status = serializers.SerializerMethodField()
+    friendship_id = serializers.SerializerMethodField()
     can_follow = serializers.SerializerMethodField()
     can_send_friend_request = serializers.SerializerMethodField()
     friend_requests_restricted = serializers.SerializerMethodField()
@@ -140,7 +141,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "age", "gender_identity",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
-            "is_following", "friendship_status",
+            "is_following", "friendship_status", "friendship_id",
             "can_follow", "can_send_friend_request",
             "friend_requests_restricted", "is_private_profile", "is_restricted_by_visited_user",
             "display_name", "can_view_full_profile", "profile_access",
@@ -173,6 +174,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if friendship.status == Friendship.STATUS_PENDING:
             return "sent_pending" if friendship.requester_id == request.user.id else "received_pending"
         return "none"
+
+    def get_friendship_id(self, obj):
+        friendship = self._get_friendship(obj)
+        if friendship and friendship.status == Friendship.STATUS_ACCEPTED:
+            return friendship.id
+        return None
 
     def get_can_follow(self, obj):
         request = self.context.get("request")
@@ -260,6 +267,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "visibility": data["visibility"],
             "is_following": data["is_following"],
             "friendship_status": data["friendship_status"],
+            "friendship_id": data["friendship_id"],
             "can_follow": data["can_follow"],
             "can_send_friend_request": data["can_send_friend_request"],
             "friend_requests_restricted": data["friend_requests_restricted"],
