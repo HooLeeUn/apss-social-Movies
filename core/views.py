@@ -1007,10 +1007,9 @@ class FriendshipRequestCreateView(APIView):
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         if target == request.user:
             return Response({"detail": "You cannot send a friendship request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
-        if (
-            target.profile.visibility == Profile.Visibility.PUBLIC
-            and target.profile.friend_requests_restricted
-        ):
+        if request.user.profile.friend_requests_restricted:
+            return Response({"detail": "You are not allowed to send friendship requests."}, status=status.HTTP_403_FORBIDDEN)
+        if target.profile.friend_requests_restricted:
             return Response({"detail": "This user is not accepting friendship requests."}, status=status.HTTP_403_FORBIDDEN)
 
         friendship = Friendship.between(request.user, target).first()
@@ -1048,6 +1047,8 @@ class FriendshipRequestAcceptView(APIView):
             return Response({"detail": "You cannot accept your own friendship request."}, status=status.HTTP_400_BAD_REQUEST)
         if friendship.other_user(friendship.requester).id != request.user.id:
             return Response({"detail": "You cannot accept this friendship request."}, status=status.HTTP_403_FORBIDDEN)
+        if friendship.friend_requests_restricted_for_pair():
+            return Response({"detail": Friendship.RESTRICTED_FRIENDSHIP_ERROR}, status=status.HTTP_403_FORBIDDEN)
 
         friendship.status = Friendship.STATUS_ACCEPTED
         friendship.save()

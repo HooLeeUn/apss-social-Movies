@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -2364,6 +2365,112 @@ class SocialPrivacyAndFriendshipTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(Friendship.between(self.user, self.public_user).exists())
+
+    def test_restricted_public_profile_cannot_send_friendship_requests(self):
+        self.user.profile.friend_requests_restricted = True
+        self.user.profile.save(update_fields=["friend_requests_restricted"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("friendship-request-create", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["detail"], "You are not allowed to send friendship requests.")
+        self.assertFalse(Friendship.between(self.user, self.public_user).exists())
+
+    def test_cannot_create_accepted_friendship_when_user1_restricts_friend_requests(self):
+        self.user.profile.friend_requests_restricted = True
+        self.user.profile.save(update_fields=["friend_requests_restricted"])
+
+        with self.assertRaisesMessage(ValidationError, Friendship.RESTRICTED_FRIENDSHIP_ERROR):
+            Friendship.objects.create(
+                requester=self.user,
+                user1=self.user,
+                user2=self.public_user,
+                status=Friendship.STATUS_ACCEPTED,
+            )
+
+        self.assertFalse(Friendship.between(self.user, self.public_user).exists())
+
+    def test_cannot_create_accepted_friendship_when_user2_restricts_friend_requests(self):
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+
+        with self.assertRaisesMessage(ValidationError, Friendship.RESTRICTED_FRIENDSHIP_ERROR):
+            Friendship.objects.create(
+                requester=self.user,
+                user1=self.user,
+                user2=self.public_user,
+                status=Friendship.STATUS_ACCEPTED,
+            )
+
+        self.assertFalse(Friendship.between(self.user, self.public_user).exists())
+
+    def test_cannot_create_pending_friendship_when_either_user_restricts_friend_requests(self):
+        self.user.profile.friend_requests_restricted = True
+        self.user.profile.save(update_fields=["friend_requests_restricted"])
+
+        with self.assertRaisesMessage(ValidationError, Friendship.RESTRICTED_FRIENDSHIP_ERROR):
+            Friendship.objects.create(
+                requester=self.user,
+                user1=self.user,
+                user2=self.public_user,
+                status=Friendship.STATUS_PENDING,
+            )
+
+        self.user.profile.friend_requests_restricted = False
+        self.user.profile.save(update_fields=["friend_requests_restricted"])
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+
+        with self.assertRaisesMessage(ValidationError, Friendship.RESTRICTED_FRIENDSHIP_ERROR):
+            Friendship.objects.create(
+                requester=self.user,
+                user1=self.user,
+                user2=self.public_user,
+                status=Friendship.STATUS_PENDING,
+            )
+
+        self.assertFalse(Friendship.between(self.user, self.public_user).exists())
+
+    def test_friendship_full_clean_fails_for_admin_model_validation_when_user_restricts_friend_requests(self):
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+        friendship = Friendship(
+            requester=self.user,
+            user1=self.user,
+            user2=self.public_user,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+        with self.assertRaisesMessage(ValidationError, Friendship.RESTRICTED_FRIENDSHIP_ERROR):
+            friendship.full_clean()
+
+    def test_accepting_pending_friendship_fails_when_user_restricts_friend_requests(self):
+        friendship = Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.public_user,
+            status=Friendship.STATUS_PENDING,
+        )
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+        self.client.force_authenticate(user=self.public_user)
+
+        response = self.client.post(reverse("friendship-request-accept", kwargs={"pk": friendship.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        friendship.refresh_from_db()
+        self.assertEqual(friendship.status, Friendship.STATUS_PENDING)
+
+    def test_friend_requests_restricted_does_not_affect_follows(self):
+        self.public_user.profile.friend_requests_restricted = True
+        self.public_user.profile.save(update_fields=["friend_requests_restricted"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(reverse("follow-toggle", kwargs={"username": self.public_user.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
 
 
 class MeFollowingEndpointTests(TestCase):

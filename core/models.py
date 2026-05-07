@@ -5,7 +5,7 @@ from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db.models import Avg, Count, OuterRef, Subquery, IntegerField, FloatField, Case, When, F, Value, CharField, Exists
 from django.db.models.functions import Cast
@@ -793,6 +793,8 @@ class Follow(models.Model):
 
 
 class Friendship(models.Model):
+    RESTRICTED_FRIENDSHIP_ERROR = "No se puede crear una amistad porque uno de los usuarios restringe solicitudes de amistad."
+
     STATUS_PENDING = "pending"
     STATUS_ACCEPTED = "accepted"
     STATUS_REJECTED = "rejected"
@@ -839,6 +841,42 @@ class Friendship(models.Model):
 
         if self.requester_id not in {self.user1_id, self.user2_id}:
             raise ValidationError({"requester": "Requester must belong to the friendship pair."})
+
+        if (
+            self.status in {self.STATUS_PENDING, self.STATUS_ACCEPTED}
+            and self.friend_requests_restricted_for_pair()
+        ):
+            raise ValidationError(self.RESTRICTED_FRIENDSHIP_ERROR)
+
+    def friend_requests_restricted_for_pair(self):
+        user_ids = [user_id for user_id in (self.user1_id, self.user2_id) if user_id]
+        if not user_ids:
+            return False
+
+        users_by_id = {}
+        for field_name in ("user1", "user2"):
+            user = self._state.fields_cache.get(field_name)
+            if user is not None and user.pk in user_ids:
+                users_by_id[user.pk] = user
+
+        missing_user_ids = [user_id for user_id in user_ids if user_id not in users_by_id]
+        if missing_user_ids:
+            users_by_id.update({
+                user.pk: user
+                for user in User.objects.filter(pk__in=missing_user_ids).select_related("profile")
+            })
+
+        for user_id in user_ids:
+            user = users_by_id.get(user_id)
+            if user is None:
+                continue
+            try:
+                if user.profile.friend_requests_restricted:
+                    return True
+            except ObjectDoesNotExist:
+                continue
+
+        return False
 
     def save(self, *args, **kwargs):
         if self.user1_id and self.user2_id and self.user1_id > self.user2_id:

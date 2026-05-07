@@ -64,6 +64,7 @@ class FriendshipAdmin(admin.ModelAdmin):
     list_display = ("id", "requester", "user1", "user2", "status", "created_at", "updated_at")
     list_filter = ("status", "created_at", "updated_at")
     search_fields = ("requester__username", "user1__username", "user2__username")
+    list_select_related = ("requester", "user1__profile", "user2__profile")
 
 @admin.register(Comment)
 class CommentAdmin(admin.ModelAdmin):
