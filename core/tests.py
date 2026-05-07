@@ -2208,6 +2208,16 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.private_user.profile.visibility = Profile.Visibility.PRIVATE
         self.private_user.profile.save(update_fields=["is_public", "visibility"])
 
+    def test_social_route_contract_exposes_legacy_and_user_aliases(self):
+        self.assertEqual(reverse("follow-toggle", kwargs={"username": "target"}), "/api/follow/target/")
+        self.assertEqual(reverse("user-follow", kwargs={"username": "target"}), "/api/users/target/follow/")
+        self.assertEqual(reverse("friendship-request-create", kwargs={"username": "target"}), "/api/friendships/requests/target/")
+        self.assertEqual(reverse("user-friend-request", kwargs={"username": "target"}), "/api/users/target/friend-request/")
+        self.assertEqual(reverse("friendship-request-accept", kwargs={"pk": 1}), "/api/friendships/requests/1/accept/")
+        self.assertEqual(reverse("friendship-request-reject", kwargs={"pk": 1}), "/api/friendships/requests/1/reject/")
+        self.assertEqual(reverse("friendship-accept", kwargs={"pk": 1}), "/api/friendships/1/accept/")
+        self.assertEqual(reverse("friendship-reject", kwargs={"pk": 1}), "/api/friendships/1/reject/")
+
     def test_private_user_can_follow_public_profile(self):
         self.private_user.profile.visibility = Profile.Visibility.PRIVATE
         self.private_user.profile.is_public = False
@@ -2607,6 +2617,22 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertEqual(second_delete_response.status_code, status.HTTP_200_OK)
         self.assertFalse(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
 
+    def test_legacy_and_user_follow_routes_support_post_and_delete(self):
+        self.client.force_authenticate(user=self.user)
+        routes = [
+            reverse("follow-toggle", kwargs={"username": self.public_user.username}),
+            reverse("user-follow", kwargs={"username": self.public_user.username}),
+        ]
+
+        for route in routes:
+            post_response = self.client.post(route)
+            self.assertIn(post_response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+            self.assertTrue(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
+
+            delete_response = self.client.delete(route)
+            self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+            self.assertFalse(Follow.objects.filter(follower=self.user, following=self.public_user).exists())
+
     def test_cannot_follow_when_visited_user_restricted_authenticated_user(self):
         UserVisibilityBlock.objects.create(owner=self.public_user, blocked_user=self.user)
         self.client.force_authenticate(user=self.user)
@@ -2630,6 +2656,24 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
         friendship.refresh_from_db()
         self.assertEqual(friendship.status, Friendship.STATUS_CANCELLED)
+
+    def test_legacy_and_user_friend_request_routes_support_post_and_delete(self):
+        self.client.force_authenticate(user=self.user)
+        routes = [
+            reverse("friendship-request-create", kwargs={"username": self.private_user.username}),
+            reverse("user-friend-request", kwargs={"username": self.private_user.username}),
+        ]
+
+        for route in routes:
+            post_response = self.client.post(route)
+            self.assertIn(post_response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+            friendship = Friendship.between(self.user, self.private_user).get()
+            self.assertEqual(friendship.status, Friendship.STATUS_PENDING)
+
+            delete_response = self.client.delete(route)
+            self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+            friendship.refresh_from_db()
+            self.assertEqual(friendship.status, Friendship.STATUS_CANCELLED)
 
     def test_friendship_accept_and_reject_aliases_update_existing_friendship(self):
         accept_friendship = Friendship.objects.create(
@@ -2693,10 +2737,22 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         Friendship.between(self.user, self.public_user).update(status=Friendship.STATUS_ACCEPTED)
         friends_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
 
+        Friendship.between(self.user, self.public_user).update(status=Friendship.STATUS_REJECTED)
+        rejected_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        Friendship.between(self.user, self.public_user).update(status=Friendship.STATUS_CANCELLED)
+        cancelled_response = self.client.get(reverse("user-profile", kwargs={"username": self.public_user.username}))
+
+        self_response = self.client.get(reverse("user-profile", kwargs={"username": self.user.username}))
+
         self.assertEqual(none_response.data["friendship_status"], "none")
         self.assertEqual(sent_response.data["friendship_status"], "sent_pending")
         self.assertEqual(received_response.data["friendship_status"], "received_pending")
         self.assertEqual(friends_response.data["friendship_status"], "friends")
+        self.assertNotEqual(friends_response.data["friendship_status"], Friendship.STATUS_ACCEPTED)
+        self.assertEqual(rejected_response.data["friendship_status"], "none")
+        self.assertEqual(cancelled_response.data["friendship_status"], "none")
+        self.assertEqual(self_response.data["friendship_status"], "none")
 
     def test_private_profile_allows_friend_request_button_but_not_follow(self):
         self.client.force_authenticate(user=self.user)

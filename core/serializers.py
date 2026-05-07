@@ -163,7 +163,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return "none"
         if obj == request.user:
-            return "self"
+            return "none"
 
         friendship = self._get_friendship(obj)
         if not friendship:
@@ -197,10 +197,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if profile and profile.friend_requests_restricted:
             return False
 
-        friendship = self._get_friendship(obj)
-        if not friendship:
-            return True
-        return friendship.status in {Friendship.STATUS_REJECTED, Friendship.STATUS_CANCELLED}
+        return self.get_friendship_status(obj) == "none"
 
     def get_friend_requests_restricted(self, obj):
         profile = obj.profile if hasattr(obj, "profile") else None
