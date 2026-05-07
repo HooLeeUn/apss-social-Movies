@@ -28,6 +28,7 @@ from core.models import (
     Follow,
     Friendship,
     Movie,
+    MovieListItem,
     Profile,
     ProfileFavoriteMovie,
     MovieRating,
@@ -2344,9 +2345,76 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.assertTrue(Follow.objects.filter(follower=self.user, following=followed).exists())
         self.assertTrue(UserVisibilityBlock.objects.filter(owner=self.user, blocked_user=blocked).exists())
 
-    def test_disabling_friend_requests_restricted_does_not_restore_deleted_friendships(self):
+    def test_enabling_friend_requests_restricted_deletes_private_message_history_only(self):
+        friend = get_user_model().objects.create_user(
+            username="message_friend", email="message-friend@example.com", password="test1234"
+        )
+        outsider = get_user_model().objects.create_user(
+            username="message_outsider", email="message-outsider@example.com", password="test1234"
+        )
+        movie = Movie.objects.create(author=self.user, title_english="Privacy Movie", type=Movie.MOVIE)
+        sent_private_message = Comment.objects.create(
+            author=self.user,
+            movie=movie,
+            target_user=friend,
+            body=f"@{friend.username} sent private message",
+            visibility=Comment.VISIBILITY_MENTIONED,
+        )
+        received_private_message = Comment.objects.create(
+            author=friend,
+            movie=movie,
+            target_user=self.user,
+            body=f"@{self.user.username} received private message",
+            visibility=Comment.VISIBILITY_MENTIONED,
+        )
+        other_private_message = Comment.objects.create(
+            author=friend,
+            movie=movie,
+            target_user=outsider,
+            body=f"@{outsider.username} unrelated private message",
+            visibility=Comment.VISIBILITY_MENTIONED,
+        )
+        public_comment = Comment.objects.create(
+            author=self.user,
+            movie=movie,
+            body="public comment must stay",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        rating = MovieRating.objects.create(user=self.user, movie=movie, score=8)
+        favorite = ProfileFavoriteMovie.objects.create(user=self.user, slot=1, movie=movie)
+        movie_list_item = MovieListItem.objects.create(user=self.user, movie=movie)
+        Follow.objects.create(follower=friend, following=self.user)
+        Follow.objects.create(follower=self.user, following=outsider)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.patch(
+            reverse("profile-privacy"),
+            {"friend_requests_restricted": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(Comment.objects.filter(pk=sent_private_message.pk).exists())
+        self.assertFalse(Comment.objects.filter(pk=received_private_message.pk).exists())
+        self.assertTrue(Comment.objects.filter(pk=other_private_message.pk).exists())
+        self.assertTrue(Comment.objects.filter(pk=public_comment.pk).exists())
+        self.assertTrue(MovieRating.objects.filter(pk=rating.pk).exists())
+        self.assertTrue(ProfileFavoriteMovie.objects.filter(pk=favorite.pk).exists())
+        self.assertTrue(MovieListItem.objects.filter(pk=movie_list_item.pk).exists())
+        self.assertTrue(Follow.objects.filter(follower=friend, following=self.user).exists())
+        self.assertTrue(Follow.objects.filter(follower=self.user, following=outsider).exists())
+
+    def test_disabling_friend_requests_restricted_does_not_restore_deleted_friendships_or_private_history(self):
         friend = get_user_model().objects.create_user(
             username="former_friend", email="former-friend@example.com", password="test1234"
+        )
+        movie = Movie.objects.create(author=self.user, title_english="Former Privacy Movie", type=Movie.MOVIE)
+        private_message = Comment.objects.create(
+            author=friend,
+            movie=movie,
+            target_user=self.user,
+            body=f"@{self.user.username} private history",
+            visibility=Comment.VISIBILITY_MENTIONED,
         )
         Friendship.objects.create(
             requester=self.user,
@@ -2367,6 +2435,7 @@ class SocialPrivacyAndFriendshipTests(TestCase):
         self.user.profile.refresh_from_db()
         self.assertFalse(self.user.profile.friend_requests_restricted)
         self.assertFalse(Friendship.between(self.user, friend).exists())
+        self.assertFalse(Comment.objects.filter(pk=private_message.pk).exists())
 
         self.client.force_authenticate(user=friend)
         future_request_response = self.client.post(

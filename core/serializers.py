@@ -411,6 +411,11 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
             ).filter(
                 Q(user1=instance.user) | Q(user2=instance.user)
             ).delete()
+            Comment.objects.filter(
+                visibility=Comment.VISIBILITY_MENTIONED,
+            ).filter(
+                Q(author=instance.user) | Q(target_user=instance.user)
+            ).delete()
 
         return instance
 
