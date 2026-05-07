@@ -1622,6 +1622,8 @@ class MeMessagesView(generics.ListAPIView):
                         "title_spanish": item.comment.movie.title_spanish,
                         "type": item.comment.movie.type,
                         "genre": item.comment.movie.genre,
+                        "release_year": item.comment.movie.release_year,
+                        "image": item.comment.movie.image,
                     }
                     if item.comment and item.comment.movie
                     else None
