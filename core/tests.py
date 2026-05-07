@@ -1593,6 +1593,55 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual([item["id"] for item in payload], [valid_directed.id])
         self.assertFalse(payload[0]["is_read"])
 
+    def test_me_messages_includes_movie_metadata_with_image_and_allows_missing_image(self):
+        poster_url = "https://cdn.example.com/posters/arrival.jpg"
+        self.movie.image = poster_url
+        self.movie.genre = "Sci-Fi"
+        self.movie.title_spanish = "La llegada"
+        self.movie.save(update_fields=["image", "genre", "title_spanish"])
+        without_image_movie = Movie.objects.create(
+            author=self.user,
+            title_english="No Poster",
+            title_spanish="Sin póster",
+            type=Movie.SERIES,
+            genre="Drama",
+            release_year=2020,
+        )
+        with_image_message = Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Mira esta @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        without_image_message = Comment.objects.create(
+            author=self.friend_user,
+            movie=without_image_movie,
+            body=f"También esta @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.me_messages_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["results"] if isinstance(response.data, dict) else response.data
+        messages_by_id = {item["id"]: item for item in payload}
+
+        movie_payload = messages_by_id[with_image_message.id]["movie"]
+        self.assertEqual(movie_payload["id"], self.movie.id)
+        self.assertEqual(movie_payload["title_english"], "Arrival")
+        self.assertEqual(movie_payload["title_spanish"], "La llegada")
+        self.assertEqual(movie_payload["type"], Movie.MOVIE)
+        self.assertEqual(movie_payload["genre"], "Sci-Fi")
+        self.assertEqual(movie_payload["release_year"], 2016)
+        self.assertEqual(movie_payload["image"], poster_url)
+
+        without_image_payload = messages_by_id[without_image_message.id]["movie"]
+        self.assertEqual(without_image_payload["id"], without_image_movie.id)
+        self.assertEqual(without_image_payload["image"], None)
+
     def test_me_messages_summary_counts_only_valid_received_directed_comments(self):
         unread_comment = Comment.objects.create(
             author=self.friend_user,

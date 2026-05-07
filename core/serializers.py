@@ -823,8 +823,23 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
         return None
 
 
+class DirectedMessageMovieSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = [
+            "id",
+            "title_english",
+            "title_spanish",
+            "type",
+            "genre",
+            "release_year",
+            "image",
+        ]
+
+
 class DirectedConversationMessageSerializer(serializers.ModelSerializer):
     author = DirectedConversationOtherUserSerializer(read_only=True)
+    movie = DirectedMessageMovieSerializer(read_only=True)
     target_user = DirectedConversationOtherUserSerializer(read_only=True)
     likes_count = serializers.SerializerMethodField()
     dislikes_count = serializers.SerializerMethodField()
@@ -861,6 +876,7 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
             "recipient",
             "counterpart",
             "direction",
+            "movie",
         ]
 
     def get_sender(self, obj):
@@ -948,10 +964,8 @@ class MeMessageAuthorSerializer(serializers.ModelSerializer):
         return None
 
 
-class MeMessageMovieSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Movie
-        fields = ["id", "title_english", "title_spanish", "type", "genre"]
+class MeMessageMovieSerializer(DirectedMessageMovieSerializer):
+    pass
 
 
 class MeMessageSerializer(serializers.ModelSerializer):
