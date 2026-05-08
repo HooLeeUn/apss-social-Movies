@@ -609,6 +609,8 @@ def build_actor_payload(actor, request):
 
 def build_notification_message(notification):
     actor_username = notification.actor.username if notification.actor else "Alguien"
+    if notification.type == UserNotification.TYPE_FRIEND_REQUEST_RECEIVED:
+        return f"Tienes una solicitud de amistad de @{actor_username}"
     if notification.type == UserNotification.TYPE_PUBLIC_COMMENT_REACTION:
         if notification.reaction_type == CommentReaction.REACT_DISLIKE:
             return f"A {actor_username} no le gustó tu comentario público"
@@ -619,6 +621,76 @@ def build_notification_message(notification):
         return f"A {actor_username} le gustó tu mensaje"
     return "Tienes una notificación"
 
+
+
+
+def get_received_pending_friend_requests_queryset(user):
+    return (
+        Friendship.objects
+        .filter(status=Friendship.STATUS_PENDING)
+        .filter(Q(user1=user) | Q(user2=user))
+        .exclude(requester=user)
+        .select_related("user1", "user2", "user1__profile", "user2__profile", "requester", "requester__profile")
+        .order_by("-updated_at", "-created_at", "-id")
+    )
+
+
+def get_friend_request_notification_state(recipient, friendship):
+    return (
+        UserNotification.objects
+        .filter(
+            recipient=recipient,
+            actor=friendship.requester,
+            type=UserNotification.TYPE_FRIEND_REQUEST_RECEIVED,
+            comment__isnull=True,
+            movie__isnull=True,
+        )
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def is_friend_request_notification_read(recipient, friendship):
+    notification = get_friend_request_notification_state(recipient, friendship)
+    if not notification or not notification.is_read:
+        return False
+    if not notification.read_at:
+        return True
+    return notification.read_at >= friendship.updated_at
+
+
+def mark_friend_request_notifications_read(user, friendship_ids=None):
+    friendships = get_received_pending_friend_requests_queryset(user)
+    if friendship_ids is not None:
+        friendships = friendships.filter(id__in=friendship_ids)
+
+    updated = 0
+    now = timezone.now()
+    for friendship in friendships:
+        existing = get_friend_request_notification_state(user, friendship)
+        was_unread = not (
+            existing
+            and existing.is_read
+            and (not existing.read_at or existing.read_at >= friendship.updated_at)
+        )
+        if existing:
+            UserNotification.objects.filter(pk=existing.pk).update(
+                is_read=True,
+                read_at=now,
+                target_tab=UserNotification.TARGET_ACTIVITY,
+            )
+        else:
+            UserNotification.objects.create(
+                recipient=user,
+                actor=friendship.requester,
+                type=UserNotification.TYPE_FRIEND_REQUEST_RECEIVED,
+                target_tab=UserNotification.TARGET_ACTIVITY,
+                is_read=True,
+                read_at=now,
+            )
+        if was_unread:
+            updated += 1
+    return updated
 
 def get_current_reaction_notifications_queryset(user):
     base_queryset = UserNotification.objects.filter(recipient=user)
@@ -1801,9 +1873,54 @@ class MeNotificationsView(APIView):
     def get(self, request):
         include_read = self._should_include_read(request)
         unread_private_messages = get_unread_private_message_count(request.user)
-        unread_reactions = get_current_reaction_notifications_queryset(request.user).filter(is_read=False).count()
+        unread_reactions = get_current_reaction_notifications_queryset(request.user).filter(
+            is_read=False,
+            type__in=[
+                UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+                UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            ],
+        ).count()
 
-        reaction_notifications = get_current_reaction_notifications_queryset(request.user)
+        pending_friend_requests = list(get_received_pending_friend_requests_queryset(request.user))
+        friend_request_items = []
+        unread_friend_requests = 0
+        for friendship in pending_friend_requests:
+            is_read = is_friend_request_notification_read(request.user, friendship)
+            if is_read and not include_read:
+                continue
+            if not is_read:
+                unread_friend_requests += 1
+            actor_payload = build_actor_payload(friendship.requester, request)
+            message = f"Tienes una solicitud de amistad de @{friendship.requester.username}"
+            friend_request_items.append({
+                "id": f"friend-request-{friendship.id}",
+                "notification_id": f"friend-request-{friendship.id}",
+                "type": UserNotification.TYPE_FRIEND_REQUEST_RECEIVED,
+                "actor": actor_payload,
+                "sender": actor_payload,
+                "target_tab": UserNotification.TARGET_ACTIVITY,
+                "target": "/profile-feed?friendsTab=pending",
+                "context": {
+                    "route": "/profile-feed?friendsTab=pending",
+                    "friendsTab": "pending",
+                },
+                "message": message,
+                "text": message,
+                "friendship_id": friendship.id,
+                "created_at": friendship.created_at,
+                "is_read": is_read,
+                "object": {
+                    "friendship_id": friendship.id,
+                    "sender": actor_payload,
+                },
+            })
+
+        reaction_notifications = get_current_reaction_notifications_queryset(request.user).filter(
+            type__in=[
+                UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+                UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+            ]
+        )
         if not include_read:
             reaction_notifications = reaction_notifications.filter(is_read=False)
         reaction_notifications = reaction_notifications.select_related("actor", "actor__profile", "movie", "comment").order_by("-created_at", "-id")
@@ -1879,13 +1996,13 @@ class MeNotificationsView(APIView):
         ]
 
         items = sorted(
-            [*reaction_items, *private_items],
+            [*reaction_items, *private_items, *friend_request_items],
             key=lambda payload: payload["created_at"],
             reverse=True,
         )
         return Response(
             {
-                "total_unread": unread_private_messages + unread_reactions,
+                "total_unread": unread_private_messages + unread_reactions + unread_friend_requests,
                 "items": items,
             },
             status=status.HTTP_200_OK,
@@ -1924,6 +2041,8 @@ class MeNotificationsMarkReadView(APIView):
                 return ("private_message", parsed_pk)
             if normalized_prefix in {"notification", "notif", "n"}:
                 return ("notification", parsed_pk)
+            if normalized_prefix in {"friend_request", "friend-request", "friendship_request", "friendship-request"}:
+                return ("friend_request", parsed_pk)
             return (None, None)
 
         if "-" in raw_value:
@@ -1937,6 +2056,8 @@ class MeNotificationsMarkReadView(APIView):
                 return ("private_message", parsed_pk)
             if normalized_prefix in {"notification", "notif", "n"}:
                 return ("notification", parsed_pk)
+            if normalized_prefix in {"friend_request", "friend-request", "friendship_request", "friendship-request"}:
+                return ("friend_request", parsed_pk)
             return (None, None)
 
         try:
@@ -1953,6 +2074,7 @@ class MeNotificationsMarkReadView(APIView):
 
         normalized_notification_ids = []
         normalized_private_message_ids = []
+        normalized_friend_request_ids = []
         for raw_id in notification_ids:
             item_type, parsed_id = self._parse_notification_identifier(raw_id)
             if item_type == "private_message":
@@ -1960,6 +2082,9 @@ class MeNotificationsMarkReadView(APIView):
                 continue
             if item_type == "notification":
                 normalized_notification_ids.append(parsed_id)
+                continue
+            if item_type == "friend_request":
+                normalized_friend_request_ids.append(parsed_id)
                 continue
 
         notification_type = request.data.get("type")
@@ -1979,6 +2104,13 @@ class MeNotificationsMarkReadView(APIView):
             notifications_qs = notifications_qs.filter(target_tab=target_tab)
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
 
+        friend_requests_updated = 0
+        if normalized_friend_request_ids:
+            friend_requests_updated = mark_friend_request_notifications_read(
+                request.user,
+                normalized_friend_request_ids,
+            )
+
         messages_updated = 0
         private_message_ids = request.data.get("private_message_ids") or []
         raw_private_message_id = request.data.get("private_message_id")
@@ -1995,6 +2127,7 @@ class MeNotificationsMarkReadView(APIView):
 
         should_mark_private_messages = (
             not normalized_notification_ids
+            and not normalized_friend_request_ids
             and not notification_type
             and (not target_tab or target_tab == UserNotification.TARGET_PRIVATE_INBOX)
         )
@@ -2012,12 +2145,12 @@ class MeNotificationsMarkReadView(APIView):
         if should_mark_private_messages or normalized_private_message_ids:
             messages_updated = private_messages_qs.update(is_read=True)
 
-        updated_total = notifications_updated + messages_updated
+        updated_total = notifications_updated + messages_updated + friend_requests_updated
 
         return Response(
             {
                 "updated": updated_total,
-                "updated_notifications": notifications_updated,
+                "updated_notifications": notifications_updated + friend_requests_updated,
                 "updated_private_messages": messages_updated,
             },
             status=status.HTTP_200_OK,
@@ -2042,6 +2175,8 @@ class MeNotificationsMarkAllReadView(APIView):
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
         )
+        friend_requests_updated = mark_friend_request_notifications_read(request.user)
+
         valid_private_message_ids = get_valid_directed_comment_ids(private_messages_qs)
         messages_updated = 0
         if valid_private_message_ids:
@@ -2049,8 +2184,8 @@ class MeNotificationsMarkAllReadView(APIView):
 
         return Response(
             {
-                "updated": notifications_updated + messages_updated,
-                "updated_notifications": notifications_updated,
+                "updated": notifications_updated + messages_updated + friend_requests_updated,
+                "updated_notifications": notifications_updated + friend_requests_updated,
                 "updated_private_messages": messages_updated,
             },
             status=status.HTTP_200_OK,
@@ -2070,14 +2205,17 @@ class MeNotificationsMarkReadBatchView(APIView):
 
         normalized_notification_ids = []
         normalized_private_message_ids = []
+        normalized_friend_request_ids = []
         for raw_id in raw_ids:
             item_type, parsed_id = MeNotificationsMarkReadView._parse_notification_identifier(raw_id)
             if item_type == "notification":
                 normalized_notification_ids.append(parsed_id)
             elif item_type == "private_message":
                 normalized_private_message_ids.append(parsed_id)
+            elif item_type == "friend_request":
+                normalized_friend_request_ids.append(parsed_id)
 
-        if not normalized_notification_ids and not normalized_private_message_ids:
+        if not normalized_notification_ids and not normalized_private_message_ids and not normalized_friend_request_ids:
             return Response(
                 {
                     "updated": 0,
@@ -2094,6 +2232,13 @@ class MeNotificationsMarkReadBatchView(APIView):
                 is_read=False,
                 id__in=normalized_notification_ids,
             ).update(is_read=True, read_at=timezone.now())
+
+        friend_requests_updated = 0
+        if normalized_friend_request_ids:
+            friend_requests_updated = mark_friend_request_notifications_read(
+                request.user,
+                normalized_friend_request_ids,
+            )
 
         messages_updated = 0
         if normalized_private_message_ids:
@@ -2116,8 +2261,8 @@ class MeNotificationsMarkReadBatchView(APIView):
 
         return Response(
             {
-                "updated": notifications_updated + messages_updated,
-                "updated_notifications": notifications_updated,
+                "updated": notifications_updated + messages_updated + friend_requests_updated,
+                "updated_notifications": notifications_updated + friend_requests_updated,
                 "updated_private_messages": messages_updated,
             },
             status=status.HTTP_200_OK,
@@ -2151,6 +2296,9 @@ class MeNotificationsMarkContextReadView(APIView):
             notifications_qs = notifications_qs.filter(type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION)
 
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
+        friend_requests_updated = 0
+        if context == UserNotification.TARGET_ACTIVITY:
+            friend_requests_updated = mark_friend_request_notifications_read(request.user)
 
         messages_updated = 0
         if context == UserNotification.TARGET_PRIVATE_INBOX:
@@ -2172,8 +2320,8 @@ class MeNotificationsMarkContextReadView(APIView):
 
         return Response(
             {
-                "updated": notifications_updated + messages_updated,
-                "updated_notifications": notifications_updated,
+                "updated": notifications_updated + messages_updated + friend_requests_updated,
+                "updated_notifications": notifications_updated + friend_requests_updated,
                 "updated_private_messages": messages_updated,
             },
             status=status.HTTP_200_OK,

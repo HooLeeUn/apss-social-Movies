@@ -1095,10 +1095,12 @@ class UserNotification(models.Model):
     TYPE_PRIVATE_MESSAGE = "private_message"
     TYPE_PUBLIC_COMMENT_REACTION = "public_comment_reaction"
     TYPE_PRIVATE_COMMENT_REACTION = "private_comment_reaction"
+    TYPE_FRIEND_REQUEST_RECEIVED = "friend_request_received"
     TYPE_CHOICES = [
         (TYPE_PRIVATE_MESSAGE, "Private message"),
         (TYPE_PUBLIC_COMMENT_REACTION, "Public comment reaction"),
         (TYPE_PRIVATE_COMMENT_REACTION, "Private comment reaction"),
+        (TYPE_FRIEND_REQUEST_RECEIVED, "Friend request received"),
     ]
 
     TARGET_ACTIVITY = "activity"
