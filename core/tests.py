@@ -3187,6 +3187,133 @@ class NotificationsAPITests(TestCase):
         self.assertEqual(response.data["total_unread"], 2)
         self.assertIn(response.data["items"][0]["target_tab"], {"activity", "private_inbox"})
 
+    def _create_pending_friendship_request(self, requester=None, receiver=None):
+        requester = requester or self.actor
+        receiver = receiver or self.owner
+        return Friendship.objects.create(
+            requester=requester,
+            user1=min(requester, receiver, key=lambda user: user.id),
+            user2=max(requester, receiver, key=lambda user: user.id),
+            status=Friendship.STATUS_PENDING,
+        )
+
+    def test_notifications_include_pending_friend_request_for_receiver_only(self):
+        friendship = self._create_pending_friendship_request()
+
+        self.client.force_authenticate(self.owner)
+        receiver_response = self.client.get(self.notifications_url)
+        self.assertEqual(receiver_response.status_code, status.HTTP_200_OK)
+        friend_request_item = next(
+            item
+            for item in receiver_response.data["items"]
+            if item["type"] == UserNotification.TYPE_FRIEND_REQUEST_RECEIVED
+        )
+        self.assertEqual(friend_request_item["id"], f"friend-request-{friendship.id}")
+        self.assertEqual(friend_request_item["notification_id"], f"friend-request-{friendship.id}")
+        self.assertEqual(friend_request_item["friendship_id"], friendship.id)
+        self.assertEqual(friend_request_item["actor"]["username"], self.actor.username)
+        self.assertEqual(friend_request_item["sender"]["username"], self.actor.username)
+        self.assertEqual(friend_request_item["target"], "/profile-feed?friendsTab=pending")
+        self.assertIn(f"@{self.actor.username}", friend_request_item["message"])
+        self.assertFalse(friend_request_item["is_read"])
+        self.assertEqual(receiver_response.data["total_unread"], 2)
+
+        self.client.force_authenticate(self.actor)
+        sender_response = self.client.get(self.notifications_url)
+        self.assertEqual(sender_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            any(
+                item["type"] == UserNotification.TYPE_FRIEND_REQUEST_RECEIVED
+                for item in sender_response.data["items"]
+            )
+        )
+
+    def test_mark_read_hides_friend_request_without_removing_request(self):
+        friendship = self._create_pending_friendship_request()
+        notification_id = f"friend-request-{friendship.id}"
+        self.client.force_authenticate(self.owner)
+
+        mark_response = self.client.post(
+            self.notifications_mark_read_url,
+            {"id": notification_id},
+            format="json",
+        )
+        self.assertEqual(mark_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mark_response.data["updated"], 1)
+        self.assertEqual(mark_response.data["updated_notifications"], 1)
+        self.assertEqual(mark_response.data["updated_private_messages"], 0)
+
+        notifications_response = self.client.get(self.notifications_url)
+        self.assertEqual(notifications_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            any(item["id"] == notification_id for item in notifications_response.data["items"])
+        )
+
+        friend_requests_response = self.client.get(reverse("me-friend-requests"))
+        self.assertEqual(friend_requests_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(friend_requests_response.data["received"]), 1)
+        self.assertEqual(friend_requests_response.data["received"][0]["id"], friendship.id)
+
+    def test_mark_read_batch_hides_friend_request_notification(self):
+        friendship = self._create_pending_friendship_request()
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            self.notifications_mark_read_batch_url,
+            {"ids": [f"friend-request-{friendship.id}"]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 1)
+        self.assertEqual(response.data["updated_notifications"], 1)
+
+        notifications_response = self.client.get(self.notifications_url)
+        self.assertEqual(notifications_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            any(
+                item["type"] == UserNotification.TYPE_FRIEND_REQUEST_RECEIVED
+                for item in notifications_response.data["items"]
+            )
+        )
+
+    def test_mark_all_read_hides_friend_request_notification(self):
+        friendship = self._create_pending_friendship_request()
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(self.notifications_mark_all_read_url, {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated"], 2)
+        self.assertEqual(response.data["updated_notifications"], 1)
+        self.assertEqual(response.data["updated_private_messages"], 1)
+
+        notifications_response = self.client.get(self.notifications_url)
+        self.assertEqual(notifications_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            any(item["id"] == f"friend-request-{friendship.id}" for item in notifications_response.data["items"])
+        )
+
+    def test_non_pending_friend_requests_do_not_appear_as_notifications(self):
+        friendship = self._create_pending_friendship_request()
+        self.client.force_authenticate(self.owner)
+
+        for friendship_status in [
+            Friendship.STATUS_ACCEPTED,
+            Friendship.STATUS_REJECTED,
+            Friendship.STATUS_CANCELLED,
+        ]:
+            friendship.status = friendship_status
+            friendship.save()
+            response = self.client.get(self.notifications_url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertFalse(
+                any(
+                    item["type"] == UserNotification.TYPE_FRIEND_REQUEST_RECEIVED
+                    for item in response.data["items"]
+                )
+            )
+            friendship.status = Friendship.STATUS_PENDING
+            friendship.save()
+
     def test_notifications_expose_current_reaction_value_after_switch_to_dislike(self):
         self.client.force_authenticate(self.actor)
         self.client.put(
