@@ -5876,7 +5876,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertIn("dennys", usernames)
         self.assertNotIn(self.owner.username, usernames)
         self.assertNotIn("Dennisse", usernames)
-        self.assertEqual(set(response.data[0].keys()), {"id", "username"})
+        self.assertEqual(set(response.data[0].keys()), {"id", "username", "first_name", "last_name"})
 
     def test_user_search_endpoint_is_case_insensitive(self):
         get_user_model().objects.create_user(
