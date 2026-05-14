@@ -384,6 +384,7 @@ class Movie(models.Model):
     cast_members_search = models.TextField(default="", blank=True)
     search_vector = SearchVectorField(null=True)
     synopsis = models.TextField(blank=True, default="")
+    synopsis_es = models.TextField(blank=True, null=True)
     external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
     external_votes = models.PositiveIntegerField(default=0)
     imdb_id = models.CharField(max_length=20, null=True, blank=True, db_index=True)

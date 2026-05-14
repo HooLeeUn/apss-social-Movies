@@ -585,6 +585,125 @@ class ImportMovieSynopsisCsvCommandTests(TestCase):
         self.assertIn("Actualizadas: 1", out.getvalue())
 
 
+class ImportMovieSynopsisEsCsvCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="synopsis_es_admin", email="synopsis-es@example.com", password="test1234"
+        )
+
+    def _write_csv(self, csv_content):
+        temp_dir = TemporaryDirectory()
+        csv_path = Path(temp_dir.name) / "synopsis_es.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+        self.addCleanup(temp_dir.cleanup)
+        return csv_path
+
+    def _create_movie(self, imdb_id, synopsis="English synopsis.", synopsis_es=None):
+        return Movie.objects.create(
+            author=self.author,
+            title_english=f"Movie {imdb_id}",
+            title_spanish=f"Película {imdb_id}",
+            type=Movie.MOVIE,
+            genre="Drama",
+            release_year=2024,
+            director="Director",
+            cast_members="Cast",
+            imdb_id=imdb_id,
+            synopsis=synopsis,
+            synopsis_es=synopsis_es,
+        )
+
+    def test_import_movie_synopsis_es_csv_updates_only_empty_synopsis_es(self):
+        empty_movie = self._create_movie("tt1630029")
+        existing_synopsis_es = "Sinopsis ya importada."
+        movie_with_synopsis_es = self._create_movie("tt1375666", synopsis_es=existing_synopsis_es)
+        csv_path = self._write_csv(
+            "imdb_id;synopsis_es\n"
+            "tt1630029;Jake Sully vive con su nueva familia...\n"
+            "tt1375666;Esto no debería reemplazar la sinopsis actual.\n"
+            "tt0000000;Sinopsis de película inexistente.\n"
+            "tt1111111;\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_synopsis_es_csv", str(csv_path), stdout=out, batch_size=2)
+
+        empty_movie.refresh_from_db()
+        movie_with_synopsis_es.refresh_from_db()
+        self.assertEqual(empty_movie.synopsis_es, "Jake Sully vive con su nueva familia...")
+        self.assertEqual(empty_movie.synopsis, "English synopsis.")
+        self.assertEqual(movie_with_synopsis_es.synopsis_es, existing_synopsis_es)
+        self.assertEqual(Movie.objects.count(), 2)
+
+        output = out.getvalue()
+        self.assertIn("Total filas leídas: 4", output)
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas porque ya tenían synopsis_es: 1", output)
+        self.assertIn("No encontradas por imdb_id: 1", output)
+        self.assertIn("Saltadas por synopsis_es vacía: 1", output)
+        self.assertIn("Errores de lectura: 0", output)
+
+    def test_import_movie_synopsis_es_csv_dry_run_does_not_save(self):
+        movie = self._create_movie("tt1630029")
+        csv_path = self._write_csv(
+            "imdb_id;synopsis_es\n"
+            "tt1630029;Sinopsis de dry-run.\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_synopsis_es_csv", str(csv_path), stdout=out, dry_run=True)
+
+        movie.refresh_from_db()
+        self.assertIsNone(movie.synopsis_es)
+        self.assertEqual(movie.synopsis, "English synopsis.")
+        output = out.getvalue()
+        self.assertIn("Dry-run activo: no se guardaron cambios.", output)
+        self.assertIn("Actualizadas: 1", output)
+
+    def test_import_movie_synopsis_es_csv_limit_and_start_row(self):
+        skipped_movie = self._create_movie("tt0000001")
+        first_processed_movie = self._create_movie("tt0000002")
+        second_processed_movie = self._create_movie("tt0000003")
+        csv_path = self._write_csv(
+            "imdb_id;synopsis_es\n"
+            "tt0000001;Uno.\n"
+            "tt0000002;Dos.\n"
+            "tt0000003;Tres.\n"
+        )
+        out = io.StringIO()
+
+        call_command(
+            "import_movie_synopsis_es_csv",
+            str(csv_path),
+            stdout=out,
+            start_row=2,
+            limit=1,
+        )
+
+        skipped_movie.refresh_from_db()
+        first_processed_movie.refresh_from_db()
+        second_processed_movie.refresh_from_db()
+        self.assertIsNone(skipped_movie.synopsis_es)
+        self.assertEqual(first_processed_movie.synopsis_es, "Dos.")
+        self.assertIsNone(second_processed_movie.synopsis_es)
+        self.assertIn("Total filas leídas: 1", out.getvalue())
+
+    def test_import_movie_synopsis_es_csv_overwrite_replaces_existing_synopsis_es(self):
+        movie = self._create_movie("tt1630029", synopsis_es="Sinopsis anterior.")
+        csv_path = self._write_csv(
+            "imdb_id;synopsis_es\n"
+            "tt1630029;Sinopsis nueva.\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_synopsis_es_csv", str(csv_path), stdout=out, overwrite=True)
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.synopsis_es, "Sinopsis nueva.")
+        self.assertEqual(movie.synopsis, "English synopsis.")
+        self.assertIn("Actualizadas: 1", out.getvalue())
+
+
 class MovieGenreKeyTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(
