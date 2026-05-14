@@ -800,13 +800,36 @@ class UserSearchView(APIView):
             owner=request.user,
         ).values_list("blocked_user_id", flat=True)
 
+        friendship_with_request_user = Friendship.objects.filter(
+            Q(user1=request.user, user2=OuterRef("pk"))
+            | Q(user1=OuterRef("pk"), user2=request.user)
+        )
+        accepted_friendship = friendship_with_request_user.filter(status=Friendship.STATUS_ACCEPTED)
+        pending_friend_request_sent = friendship_with_request_user.filter(
+            status=Friendship.STATUS_PENDING,
+            requester=request.user,
+        )
+        pending_friend_request_received = friendship_with_request_user.filter(
+            status=Friendship.STATUS_PENDING,
+            requester=OuterRef("pk"),
+        )
+        following = Follow.objects.filter(follower=request.user, following=OuterRef("pk"))
+
         queryset = (
             User.objects.filter(username__icontains=query)
+            .select_related("profile")
             .exclude(id=request.user.id)
             .exclude(id__in=blocked_user_ids)
+            .annotate(
+                followers_count=Count("followers", distinct=True),
+                is_following=Exists(following),
+                is_friend=Exists(accepted_friendship),
+                pending_friend_request_sent=Exists(pending_friend_request_sent),
+                pending_friend_request_received=Exists(pending_friend_request_received),
+            )
             .order_by("username")[: self.RESULTS_LIMIT]
         )
-        serializer = UserSearchSerializer(queryset, many=True)
+        serializer = UserSearchSerializer(queryset, many=True, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @staticmethod

@@ -27,6 +27,7 @@ from .models import (
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
 # porque los stats vienen por annotate() desde la vista.
 from .models import Follow, Profile
+from .visibility import can_view_user_profile
 
 
 def calculate_age_from_birth_date(birth_date):
@@ -514,10 +515,110 @@ class UserMiniWithFollowersCountSerializer(UserMiniSerializer):
 
 
 class UserSearchSerializer(serializers.ModelSerializer):
+    first_name = serializers.SerializerMethodField()
+    last_name = serializers.SerializerMethodField()
+    followers_count = serializers.SerializerMethodField()
+    is_following = serializers.SerializerMethodField()
+    is_friend = serializers.SerializerMethodField()
+    pending_friend_request_sent = serializers.SerializerMethodField()
+    pending_friend_request_received = serializers.SerializerMethodField()
+    friendship_status = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "username"]
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "followers_count",
+            "is_following",
+            "is_friend",
+            "pending_friend_request_sent",
+            "pending_friend_request_received",
+            "friendship_status",
+        ]
 
+    def _can_show_personal_names(self, obj):
+        request = self.context.get("request")
+        viewer = getattr(request, "user", None) if request else None
+        return can_view_user_profile(obj, viewer)
+
+    def get_first_name(self, obj):
+        if not self._can_show_personal_names(obj):
+            return None
+        return obj.first_name
+
+    def get_last_name(self, obj):
+        if not self._can_show_personal_names(obj):
+            return None
+        return obj.last_name
+
+    def get_followers_count(self, obj):
+        annotated_value = getattr(obj, "followers_count", None)
+        if annotated_value is not None:
+            return annotated_value
+        return obj.followers.count()
+
+    def get_is_following(self, obj):
+        annotated_value = getattr(obj, "is_following", None)
+        if annotated_value is not None:
+            return annotated_value
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.followers.filter(follower=request.user).exists()
+
+    def get_is_friend(self, obj):
+        annotated_value = getattr(obj, "is_friend", None)
+        if annotated_value is not None:
+            return annotated_value
+        return self._friendship_status(obj) == Friendship.STATUS_ACCEPTED
+
+    def get_pending_friend_request_sent(self, obj):
+        annotated_value = getattr(obj, "pending_friend_request_sent", None)
+        if annotated_value is not None:
+            return annotated_value
+        friendship = self._friendship(obj)
+        request = self.context.get("request")
+        return bool(
+            friendship
+            and request
+            and friendship.status == Friendship.STATUS_PENDING
+            and friendship.requester_id == request.user.id
+        )
+
+    def get_pending_friend_request_received(self, obj):
+        annotated_value = getattr(obj, "pending_friend_request_received", None)
+        if annotated_value is not None:
+            return annotated_value
+        friendship = self._friendship(obj)
+        request = self.context.get("request")
+        return bool(
+            friendship
+            and request
+            and friendship.status == Friendship.STATUS_PENDING
+            and friendship.requester_id == obj.id
+        )
+
+    def get_friendship_status(self, obj):
+        if self.get_is_friend(obj):
+            return "friends"
+        if self.get_pending_friend_request_sent(obj):
+            return "sent_pending"
+        if self.get_pending_friend_request_received(obj):
+            return "received_pending"
+        return "none"
+
+    def _friendship(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        return Friendship.between(request.user, obj).first()
+
+    def _friendship_status(self, obj):
+        friendship = self._friendship(obj)
+        return friendship.status if friendship else None
 
 
 
