@@ -60,6 +60,104 @@ from core.weekly_recommendations import (
     get_weekly_recommendation_candidates,
 )
 
+class FixAmazonMovieImagesCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="poster-admin", email="poster-admin@example.com", password="test1234"
+        )
+
+    def _create_movie(self, title, image):
+        return Movie.objects.create(
+            author=self.author,
+            title_english=title,
+            title_spanish=title,
+            type=Movie.MOVIE,
+            image=image,
+        )
+
+    def test_updates_only_amazon_urls_with_size_suffix(self):
+        amazon = self._create_movie(
+            "Amazon sized",
+            "https://m.media-amazon.com/images/M/MV5Babc._V1_UY98_CR0,0,67,98_AL_.jpg",
+        )
+        wikimedia = self._create_movie(
+            "Wikimedia",
+            "https://upload.wikimedia.org/wikipedia/en/example._V1_UY98_.jpg",
+        )
+        fanart = self._create_movie(
+            "Fanart",
+            "https://assets.fanart.tv/fanart/movies/1/movieposter/example.jpg",
+        )
+        amazon_base = self._create_movie(
+            "Amazon base",
+            "https://m.media-amazon.com/images/M/MV5Bbase.jpg",
+        )
+        out = io.StringIO()
+
+        call_command("fix_amazon_movie_images", stdout=out)
+
+        amazon.refresh_from_db()
+        wikimedia.refresh_from_db()
+        fanart.refresh_from_db()
+        amazon_base.refresh_from_db()
+
+        self.assertEqual(
+            amazon.image,
+            "https://m.media-amazon.com/images/M/MV5Babc._V1_UY600_.jpg",
+        )
+        self.assertEqual(wikimedia.image, "https://upload.wikimedia.org/wikipedia/en/example._V1_UY98_.jpg")
+        self.assertEqual(fanart.image, "https://assets.fanart.tv/fanart/movies/1/movieposter/example.jpg")
+        self.assertEqual(amazon_base.image, "https://m.media-amazon.com/images/M/MV5Bbase.jpg")
+
+        output = out.getvalue()
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas: 3", output)
+
+    def test_dry_run_does_not_save_changes(self):
+        movie = self._create_movie(
+            "Dry run",
+            "https://m.media-amazon.com/images/M/MV5Bdry._V1_UX182_.jpg",
+        )
+        out = io.StringIO()
+
+        call_command("fix_amazon_movie_images", "--dry-run", stdout=out)
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://m.media-amazon.com/images/M/MV5Bdry._V1_UX182_.jpg")
+        output = out.getvalue()
+        self.assertIn("Dry-run activo: no se guardaron cambios.", output)
+        self.assertIn("Actualizadas: 1", output)
+
+    def test_limit_restricts_processed_movies(self):
+        first = self._create_movie(
+            "First",
+            "https://m.media-amazon.com/images/M/MV5Bone._V1_UY98_.jpg",
+        )
+        second = self._create_movie(
+            "Second",
+            "https://m.media-amazon.com/images/M/MV5Btwo._V1_UY98_.jpg",
+        )
+        out = io.StringIO()
+
+        call_command("fix_amazon_movie_images", "--limit", "1", stdout=out)
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.image, "https://m.media-amazon.com/images/M/MV5Bone._V1_UY600_.jpg")
+        self.assertEqual(second.image, "https://m.media-amazon.com/images/M/MV5Btwo._V1_UY98_.jpg")
+        self.assertIn("Procesadas: 1", out.getvalue())
+
+    def test_clean_removes_size_suffix_instead_of_resizing(self):
+        movie = self._create_movie(
+            "Clean",
+            "https://m.media-amazon.com/images/M/MV5Bclean._V1_UY98_CR0,0,67,98_AL_.jpg?ref_=test",
+        )
+
+        call_command("fix_amazon_movie_images", "--clean", stdout=io.StringIO())
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://m.media-amazon.com/images/M/MV5Bclean.jpg")
+
 
 class ImportMoviesCommandTests(TestCase):
     def setUp(self):
