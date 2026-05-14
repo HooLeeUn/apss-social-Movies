@@ -270,6 +270,108 @@ Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
             call_command("import_movies", str(csv_path), author="missing_user")
 
 
+class ImportMoviePostersCsvCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="poster_admin", email="poster@example.com", password="test1234"
+        )
+
+    def _write_csv(self, csv_content):
+        temp_dir = TemporaryDirectory()
+        csv_path = Path(temp_dir.name) / "Poster.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+        self.addCleanup(temp_dir.cleanup)
+        return csv_path
+
+    def _create_movie(self, imdb_id, image=None):
+        return Movie.objects.create(
+            author=self.author,
+            title_english=f"Movie {imdb_id}",
+            title_spanish=f"Película {imdb_id}",
+            type=Movie.MOVIE,
+            genre="Drama",
+            release_year=2024,
+            director="Director",
+            cast_members="Cast",
+            imdb_id=imdb_id,
+            image=image,
+        )
+
+    def test_import_movie_posters_csv_updates_only_empty_images(self):
+        empty_movie = self._create_movie("tt1630029")
+        existing_image = "https://example.com/existing.jpg"
+        movie_with_image = self._create_movie("tt1375666", image=existing_image)
+        csv_path = self._write_csv(
+            "imdb_id;link\n"
+            "tt1630029;https://m.media-amazon.com/images/avatar.jpg\n"
+            "tt1375666;https://m.media-amazon.com/images/inception.jpg\n"
+            "tt0000000;https://m.media-amazon.com/images/missing.jpg\n"
+            "tt1111111;\n"
+            "tt2222222;not-a-url\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_posters_csv", str(csv_path), stdout=out, batch_size=2)
+
+        empty_movie.refresh_from_db()
+        movie_with_image.refresh_from_db()
+        self.assertEqual(empty_movie.image, "https://m.media-amazon.com/images/avatar.jpg")
+        self.assertEqual(movie_with_image.image, existing_image)
+        self.assertEqual(Movie.objects.count(), 2)
+
+        output = out.getvalue()
+        self.assertIn("Total filas leídas: 5", output)
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas porque ya tenían image: 1", output)
+        self.assertIn("No encontradas por imdb_id: 1", output)
+        self.assertIn("Saltadas por link vacío/inválido: 2", output)
+        self.assertIn("Errores de lectura: 0", output)
+
+    def test_import_movie_posters_csv_dry_run_does_not_save(self):
+        movie = self._create_movie("tt1630029")
+        csv_path = self._write_csv(
+            "imdb_id;link\n"
+            "tt1630029;https://m.media-amazon.com/images/avatar.jpg\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_posters_csv", str(csv_path), stdout=out, dry_run=True)
+
+        movie.refresh_from_db()
+        self.assertIsNone(movie.image)
+        output = out.getvalue()
+        self.assertIn("Dry-run activo: no se guardaron cambios.", output)
+        self.assertIn("Actualizadas: 1", output)
+
+    def test_import_movie_posters_csv_limit_and_start_row(self):
+        skipped_movie = self._create_movie("tt0000001")
+        first_processed_movie = self._create_movie("tt0000002")
+        second_processed_movie = self._create_movie("tt0000003")
+        csv_path = self._write_csv(
+            "imdb_id;link\n"
+            "tt0000001;https://example.com/one.jpg\n"
+            "tt0000002;https://example.com/two.jpg\n"
+            "tt0000003;https://example.com/three.jpg\n"
+        )
+        out = io.StringIO()
+
+        call_command(
+            "import_movie_posters_csv",
+            str(csv_path),
+            stdout=out,
+            start_row=2,
+            limit=1,
+        )
+
+        skipped_movie.refresh_from_db()
+        first_processed_movie.refresh_from_db()
+        second_processed_movie.refresh_from_db()
+        self.assertIsNone(skipped_movie.image)
+        self.assertEqual(first_processed_movie.image, "https://example.com/two.jpg")
+        self.assertIsNone(second_processed_movie.image)
+        self.assertIn("Total filas leídas: 1", out.getvalue())
+
+
 class MovieGenreKeyTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(
