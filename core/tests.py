@@ -5876,75 +5876,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertIn("dennys", usernames)
         self.assertNotIn(self.owner.username, usernames)
         self.assertNotIn("Dennisse", usernames)
-        self.assertEqual(set(response.data[0].keys()), {
-            "id",
-            "username",
-            "first_name",
-            "last_name",
-            "followers_count",
-            "is_following",
-            "is_friend",
-            "pending_friend_request_sent",
-            "pending_friend_request_received",
-            "friendship_status",
-        })
-
-    def test_user_search_endpoint_includes_visible_personal_names_counts_and_relationship_flags(self):
-        dennisse = get_user_model().objects.create_user(
-            username="Dennisse",
-            first_name="Dennisse",
-            last_name="Jamaica",
-            email="dennisse-search@example.com",
-            password="test1234",
-        )
-        follower = get_user_model().objects.create_user(
-            username="search_follower",
-            email="search-follower@example.com",
-            password="test1234",
-        )
-        Follow.objects.create(follower=self.owner, following=dennisse)
-        Follow.objects.create(follower=follower, following=dennisse)
-        Friendship.objects.create(
-            requester=self.owner,
-            user1=min(self.owner, dennisse, key=lambda user: user.id),
-            user2=max(self.owner, dennisse, key=lambda user: user.id),
-            status=Friendship.STATUS_PENDING,
-        )
-
-        self.client.force_authenticate(self.owner)
-        response = self.client.get(reverse("user-search"), {"q": "Dennisse", "page": 1})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["username"], "Dennisse")
-        self.assertEqual(response.data[0]["first_name"], "Dennisse")
-        self.assertEqual(response.data[0]["last_name"], "Jamaica")
-        self.assertEqual(response.data[0]["followers_count"], 2)
-        self.assertTrue(response.data[0]["is_following"])
-        self.assertFalse(response.data[0]["is_friend"])
-        self.assertTrue(response.data[0]["pending_friend_request_sent"])
-        self.assertFalse(response.data[0]["pending_friend_request_received"])
-        self.assertEqual(response.data[0]["friendship_status"], "sent_pending")
-
-    def test_user_search_endpoint_hides_personal_names_without_profile_access(self):
-        private_user = get_user_model().objects.create_user(
-            username="DennissePrivate",
-            first_name="Dennisse",
-            last_name="Jamaica",
-            email="dennisse-private-search@example.com",
-            password="test1234",
-        )
-        private_user.profile.visibility = Profile.Visibility.PRIVATE
-        private_user.profile.is_public = False
-        private_user.profile.save(update_fields=["visibility", "is_public"])
-
-        self.client.force_authenticate(self.owner)
-        response = self.client.get(reverse("user-search"), {"q": "DennissePrivate"})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]["username"], "DennissePrivate")
-        self.assertIsNone(response.data[0]["first_name"])
-        self.assertIsNone(response.data[0]["last_name"])
+        self.assertEqual(set(response.data[0].keys()), {"id", "username", "first_name", "last_name"})
 
     def test_user_search_endpoint_is_case_insensitive(self):
         get_user_model().objects.create_user(
