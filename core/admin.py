@@ -95,6 +95,7 @@ class MovieAdmin(admin.ModelAdmin):
                     "director",
                     "cast_members",
                     "synopsis",
+                    "synopsis_es",
                 )
             },
         ),
