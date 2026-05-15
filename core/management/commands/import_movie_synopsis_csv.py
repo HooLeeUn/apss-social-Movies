@@ -142,17 +142,21 @@ class Command(BaseCommand):
                 continue
 
             already_queued = movie.id in queued_movie_ids or movie.id in dry_run_updated_movie_ids
-            if already_queued or (movie.synopsis and not overwrite):
+            if already_queued:
+                if overwrite:
+                    movie.synopsis = row["synopsis"]
+                continue
+            if not overwrite and self._clean_text(movie.synopsis):
                 stats["already_had_synopsis"] += 1
                 continue
 
             movie.synopsis = row["synopsis"]
             movies_to_update.append(movie)
             queued_movie_ids.add(movie.id)
+            stats["updated"] += 1
             if dry_run:
                 dry_run_updated_movie_ids.add(movie.id)
 
-        stats["updated"] += len(movies_to_update)
         if dry_run or not movies_to_update:
             return
 
