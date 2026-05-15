@@ -581,8 +581,49 @@ class ImportMovieSynopsisCsvCommandTests(TestCase):
         call_command("import_movie_synopsis_csv", str(csv_path), stdout=out, overwrite=True)
 
         movie.refresh_from_db()
+        output = out.getvalue()
         self.assertEqual(movie.synopsis, "New synopsis.")
-        self.assertIn("Actualizadas: 1", out.getvalue())
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas porque ya tenían synopsis: 0", output)
+
+    def test_import_movie_synopsis_csv_overwrite_does_not_count_duplicates_as_existing(self):
+        movie = self._create_movie("tt1630029", synopsis="Old synopsis.")
+        csv_path = self._write_csv(
+            "imdb_id;synopsis\n"
+            "tt1630029;First new synopsis.\n"
+            "tt1630029;Second new synopsis.\n"
+        )
+        out = io.StringIO()
+
+        call_command(
+            "import_movie_synopsis_csv",
+            str(csv_path),
+            stdout=out,
+            overwrite=True,
+            batch_size=10,
+        )
+
+        movie.refresh_from_db()
+        output = out.getvalue()
+        self.assertEqual(movie.synopsis, "Second new synopsis.")
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas porque ya tenían synopsis: 0", output)
+
+    def test_import_movie_synopsis_csv_whitespace_synopsis_is_empty_without_overwrite(self):
+        movie = self._create_movie("tt1630029", synopsis="   ")
+        csv_path = self._write_csv(
+            "imdb_id;synopsis\n"
+            "tt1630029;Synopsis for whitespace-only existing value.\n"
+        )
+        out = io.StringIO()
+
+        call_command("import_movie_synopsis_csv", str(csv_path), stdout=out)
+
+        movie.refresh_from_db()
+        output = out.getvalue()
+        self.assertEqual(movie.synopsis, "Synopsis for whitespace-only existing value.")
+        self.assertIn("Actualizadas: 1", output)
+        self.assertIn("Saltadas porque ya tenían synopsis: 0", output)
 
 
 class ImportMovieSynopsisEsCsvCommandTests(TestCase):
