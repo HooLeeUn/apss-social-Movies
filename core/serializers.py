@@ -1126,7 +1126,7 @@ class MovieListSerializer(serializers.ModelSerializer):
             "id", "author",
             "title_english", "title_spanish",
             "type", "genre", "release_year",
-            "director", "cast_members", "synopsis",
+            "director", "cast_members", "synopsis", "synopsis_es",
             "image", "external_rating", "external_votes",
             "real_ratings_count", "real_ratings_avg",
             "display_rating", "general_rating", "my_rating", "following_avg_rating", "following_ratings_count", "comments_count",
@@ -1178,7 +1178,7 @@ class MovieSearchResultSerializer(serializers.ModelSerializer):
             "id", "author",
             "title_english", "title_spanish",
             "type", "genre", "release_year",
-            "director", "cast_members", "synopsis",
+            "director", "cast_members", "synopsis", "synopsis_es",
             "image", "external_rating", "external_votes", "imdb_id", "created_at", "updated_at",
             "real_ratings_count", "real_ratings_avg",
             "display_rating", "general_rating", "my_rating", "following_avg_rating", "following_ratings_count", "comments_count",
@@ -1294,6 +1294,7 @@ class WeeklyRecommendationMovieSerializer(serializers.ModelSerializer):
             "genre",
             "release_year",
             "director",
+            "synopsis_es",
             "image",
         ]
 

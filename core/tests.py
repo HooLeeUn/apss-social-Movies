@@ -924,6 +924,7 @@ class FeedMoviesEndpointTests(TestCase):
             type=Movie.MOVIE,
             external_rating=8.0,
             release_year=2020,
+            synopsis_es="Sinopsis autenticada.",
         )
 
         self.client.force_authenticate(user=self.user)
@@ -933,6 +934,7 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["external_votes"], 0)
         self.assertEqual(response.data["results"][0]["synopsis"], "")
+        self.assertEqual(response.data["results"][0]["synopsis_es"], "Sinopsis autenticada.")
 
     def test_feed_excludes_rated_movies_by_default(self):
         rated_movie = self._create_movie(
@@ -1754,6 +1756,8 @@ class MovieCommentEndpointTests(TestCase):
             title_english="Arrival",
             type=Movie.MOVIE,
             release_year=2016,
+            synopsis="A linguist works with alien visitors.",
+            synopsis_es="Una lingüista trabaja con visitantes alienígenas.",
         )
         Friendship.objects.create(
             requester=self.user,
@@ -1777,6 +1781,8 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], self.movie.pk)
         self.assertEqual(response.data["title_english"], "Arrival")
+        self.assertEqual(response.data["synopsis"], "A linguist works with alien visitors.")
+        self.assertEqual(response.data["synopsis_es"], "Una lingüista trabaja con visitantes alienígenas.")
         self.assertEqual(response.data["comments_count"], 0)
 
     def test_post_creates_public_comment_for_movie_without_valid_friend_mention(self):
@@ -4375,7 +4381,12 @@ class WeeklyRecommendationsTests(TestCase):
 
     @patch("core.views.get_previous_closed_week_window")
     def test_endpoint_returns_snapshot_for_previous_closed_week_with_user_fields(self, mock_window):
-        movie = self._create_movie("Endpoint Movie", genre="Sci-Fi", external_rating=8.0)
+        movie = self._create_movie(
+            "Endpoint Movie",
+            genre="Sci-Fi",
+            external_rating=8.0,
+            synopsis_es="Recomendación semanal en español.",
+        )
         rating_user = self.user_model.objects.create_user(
             username="endpoint_rater", email="endpoint_rater@example.com", password="test1234"
         )
@@ -4397,6 +4408,7 @@ class WeeklyRecommendationsTests(TestCase):
         self.assertEqual(len(response.data), 1)
         item = response.data[0]
         self.assertEqual(item["movie"]["title_english"], "Endpoint Movie")
+        self.assertEqual(item["movie"]["synopsis_es"], "Recomendación semanal en español.")
         self.assertEqual(item["position"], 1)
         self.assertEqual(float(item["weekly_score"]), float(snapshot.items.get().weekly_score))
         self.assertAlmostEqual(item["display_rating"], item["general_rating"])
@@ -4615,6 +4627,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             "director": overrides.pop("director", "Director"),
             "cast_members": overrides.pop("cast_members", "Actor"),
             "synopsis": overrides.pop("synopsis", ""),
+            "synopsis_es": overrides.pop("synopsis_es", None),
             "external_rating": overrides.pop("external_rating", 7.0),
             "external_votes": overrides.pop("external_votes", 1000),
         }
