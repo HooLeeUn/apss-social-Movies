@@ -9,6 +9,7 @@ from .views import (
     ReceivedFriendshipRequestsView, SentFriendshipRequestsView,
     FeedFollowingView, DiscoverView, PublicCommentsFeedView, ProfileFeedActivityView, UserProfileActivityView, PostListCreateView, PostDetailView, PostRatingView,
     UserPostsListView, MovieCommentsListCreateView, PostCommentsListCreateView, CommentDetailView, CommentReactionView, RegisterView,
+    RegisterConfirmEmailView, RegisterUsernameAvailabilityView,
     DirectedCommentsListView, ReceivedDirectedCommentsView, SentDirectedCommentsView, MeMessagesView, MeMessagesSummaryView, MeMessagesMarkAsReadView,
     MeNotificationsView, MeNotificationsMarkReadView, MeNotificationsMarkAllReadView, MeNotificationsMarkReadBatchView,
     MeNotificationsMarkContextReadView,
@@ -21,6 +22,8 @@ from .views import (
 urlpatterns = [
     path("branding/", AppBrandingView.as_view(), name="app-branding"),
     path("register/", RegisterView.as_view(), name="register"),
+    path("register/check-username/", RegisterUsernameAvailabilityView.as_view(), name="register-check-username"),
+    path("register/confirm-email/<str:token>/", RegisterConfirmEmailView.as_view(), name="register-confirm-email"),
     path("users/search/", UserSearchView.as_view(), name="user-search"),
     path("users/search", UserSearchView.as_view(), name="user-search-no-slash"),
     path("users/<str:username>/", UserProfileView.as_view(), name="user-profile"),

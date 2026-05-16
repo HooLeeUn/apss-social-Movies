@@ -1,5 +1,7 @@
 import re
+import secrets
 import unicodedata
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
@@ -13,6 +15,7 @@ from django.db.models import Q
 from django.db.models.functions import Coalesce
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.contrib.postgres.search import SearchVectorField
+from django.utils import timezone
 
 
 def normalize_movie_search_text(value):
@@ -945,6 +948,43 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"Profile({self.user.username})"
+
+
+class PendingUserRegistration(models.Model):
+    username = models.CharField(max_length=150)
+    email = models.EmailField()
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    birth_date = models.DateField()
+    password = models.CharField(max_length=128)
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["username", "expires_at"]),
+            models.Index(fields=["email", "expires_at"]),
+        ]
+        ordering = ["-created_at", "-id"]
+
+    @property
+    def is_confirmed(self):
+        return self.confirmed_at is not None
+
+    def is_expired(self):
+        return self.expires_at <= timezone.now()
+
+    def save(self, *args, **kwargs):
+        if not self.token:
+            self.token = secrets.token_urlsafe(32)
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=24)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"PendingUserRegistration({self.username}, {self.email})"
 
 
 class UserVisibilityBlock(models.Model):

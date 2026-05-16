@@ -4,15 +4,16 @@ import random
 from datetime import datetime, time
 from time import perf_counter
 from django.contrib.auth import get_user_model
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.conf import settings
 from django.core.cache import cache
+from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Cast, Coalesce
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
-from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -24,6 +25,7 @@ from .serializers import (
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
     PostListSerializer, PostCreateSerializer, PostDetailSerializer, SocialActivitySerializer,
     PostWriteSerializer, CommentReactionSerializer, CommentSerializer, MeMessageSerializer, PublicCommentFeedSerializer, RegisterSerializer, MovieListSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer,
+    cleanup_expired_pending_registrations, username_is_available,
     MyMovieListItemSerializer,
     MyMovieRecommendationItemSerializer,
     UserMovieRecommendationItemSerializer,
@@ -42,6 +44,7 @@ from .models import (
     Movie,
     MovieListItem,
     MovieRecommendationItem,
+    PendingUserRegistration,
     normalize_movie_search_text,
     MovieRating,
     ProfileFavoriteMovie,
@@ -70,7 +73,7 @@ from .visibility import (
     filter_out_authors_who_blocked_viewer,
 )
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
 
 User = get_user_model()
@@ -766,25 +769,151 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
 
+    def _build_confirmation_url(self, request, pending_registration):
+        backend_base_url = getattr(settings, "BACKEND_BASE_URL", "").rstrip("/")
+        path = f"/api/register/confirm-email/{pending_registration.token}/"
+        if backend_base_url:
+            return f"{backend_base_url}{path}"
+        return request.build_absolute_uri(path)
+
+    def _send_confirmation_email(self, request, pending_registration):
+        confirmation_url = self._build_confirmation_url(request, pending_registration)
+        email_backend = getattr(settings, "EMAIL_BACKEND", "")
+        masked_token = (
+            f"{pending_registration.token[:8]}…{pending_registration.token[-6:]}"
+            if pending_registration.token
+            else "—"
+        )
+
+        try:
+            sent_count = send_mail(
+                subject="Confirma tu email en Social Movies",
+                message=(
+                    "Hola,\n\n"
+                    "Para terminar tu registro en Social Movies, confirma tu email desde este enlace:\n"
+                    f"{confirmation_url}\n\n"
+                    "El enlace vence en 24 horas."
+                ),
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                recipient_list=[pending_registration.email],
+                fail_silently=False,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send signup confirmation email for pending_registration_id=%s "
+                "email=%s backend=%s token_preview=%s",
+                pending_registration.pk,
+                pending_registration.email,
+                email_backend,
+                masked_token,
+            )
+            raise
+
+        if email_backend == "django.core.mail.backends.console.EmailBackend":
+            logger.info(
+                "Signup confirmation email rendered to console backend for "
+                "pending_registration_id=%s email=%s token_preview=%s. "
+                "Open the Django runserver terminal to copy the confirmation link.",
+                pending_registration.pk,
+                pending_registration.email,
+                masked_token,
+            )
+        else:
+            logger.info(
+                "Signup confirmation email send requested for pending_registration_id=%s "
+                "email=%s backend=%s sent_count=%s token_preview=%s",
+                pending_registration.pk,
+                pending_registration.email,
+                email_backend,
+                sent_count,
+                masked_token,
+            )
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        token, created = Token.objects.get_or_create(user=user)
+        pending_registration = serializer.save()
+        self._send_confirmation_email(request, pending_registration)
 
         return Response(
             {
-                "user": {
-                    "id": user.id,
-                    "username": user.username,
-                    "first_name": user.first_name,
-                    "last_name": user.last_name,
-                    "email": user.email,
-                },
-                "token": token.key,
+                "detail": "Registro pendiente. Revisa tu correo para confirmar tu email.",
+                "email": pending_registration.email,
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class RegisterUsernameAvailabilityView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        username = (request.query_params.get("username") or "").strip()
+        if not username:
+            return Response(
+                {"available": False, "detail": "Username is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(username) < 8:
+            return Response(
+                {"available": False, "detail": "Username must be at least 8 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            UnicodeUsernameValidator()(username)
+        except DjangoValidationError as exc:
+            return Response(
+                {"available": False, "detail": exc.messages[0] if exc.messages else "Invalid username."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"available": username_is_available(username)})
+
+
+class RegisterConfirmEmailView(APIView):
+    permission_classes = [AllowAny]
+
+    def _frontend_redirect(self, value):
+        frontend_base_url = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+        return redirect(f"{frontend_base_url}/login?verified={value}")
+
+    def get(self, request, token):
+        cleanup_expired_pending_registrations()
+        pending_registration = PendingUserRegistration.objects.filter(
+            token=token,
+            confirmed_at__isnull=True,
+        ).first()
+        if not pending_registration:
+            return self._frontend_redirect("expired")
+        if pending_registration.expires_at <= timezone.now():
+            pending_registration.delete()
+            return self._frontend_redirect("expired")
+
+        with transaction.atomic():
+            username_exists = User.objects.filter(
+                username__iexact=pending_registration.username
+            ).exists()
+            email_exists = User.objects.filter(
+                email__iexact=pending_registration.email
+            ).exists()
+            if username_exists or email_exists:
+                pending_registration.delete()
+                return self._frontend_redirect("expired")
+
+            user = User(
+                username=pending_registration.username,
+                email=pending_registration.email,
+                first_name=pending_registration.first_name,
+                last_name=pending_registration.last_name,
+                password=pending_registration.password,
+            )
+            user.save()
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.birth_date = pending_registration.birth_date
+            profile.birth_date_locked = True
+            profile.save(update_fields=["birth_date", "birth_date_locked"])
+            pending_registration.delete()
+
+        return self._frontend_redirect("1")
 
 
 class UserSearchView(APIView):
