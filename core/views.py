@@ -778,18 +778,56 @@ class RegisterView(generics.CreateAPIView):
 
     def _send_confirmation_email(self, request, pending_registration):
         confirmation_url = self._build_confirmation_url(request, pending_registration)
-        send_mail(
-            subject="Confirma tu email en Social Movies",
-            message=(
-                "Hola,\n\n"
-                "Para terminar tu registro en Social Movies, confirma tu email desde este enlace:\n"
-                f"{confirmation_url}\n\n"
-                "El enlace vence en 24 horas."
-            ),
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-            recipient_list=[pending_registration.email],
-            fail_silently=False,
+        email_backend = getattr(settings, "EMAIL_BACKEND", "")
+        masked_token = (
+            f"{pending_registration.token[:8]}…{pending_registration.token[-6:]}"
+            if pending_registration.token
+            else "—"
         )
+
+        try:
+            sent_count = send_mail(
+                subject="Confirma tu email en Social Movies",
+                message=(
+                    "Hola,\n\n"
+                    "Para terminar tu registro en Social Movies, confirma tu email desde este enlace:\n"
+                    f"{confirmation_url}\n\n"
+                    "El enlace vence en 24 horas."
+                ),
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                recipient_list=[pending_registration.email],
+                fail_silently=False,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send signup confirmation email for pending_registration_id=%s "
+                "email=%s backend=%s token_preview=%s",
+                pending_registration.pk,
+                pending_registration.email,
+                email_backend,
+                masked_token,
+            )
+            raise
+
+        if email_backend == "django.core.mail.backends.console.EmailBackend":
+            logger.info(
+                "Signup confirmation email rendered to console backend for "
+                "pending_registration_id=%s email=%s token_preview=%s. "
+                "Open the Django runserver terminal to copy the confirmation link.",
+                pending_registration.pk,
+                pending_registration.email,
+                masked_token,
+            )
+        else:
+            logger.info(
+                "Signup confirmation email send requested for pending_registration_id=%s "
+                "email=%s backend=%s sent_count=%s token_preview=%s",
+                pending_registration.pk,
+                pending_registration.email,
+                email_backend,
+                sent_count,
+                masked_token,
+            )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
