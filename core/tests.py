@@ -6,14 +6,16 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core import mail
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError, connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
@@ -32,6 +34,7 @@ from core.models import (
     Profile,
     ProfileFavoriteMovie,
     MovieRating,
+    PendingUserRegistration,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
@@ -44,6 +47,119 @@ from core.models import (
     UserDailyFeedPool,
     UserNotification,
 )
+
+
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    BACKEND_BASE_URL="http://testserver",
+    FRONTEND_BASE_URL="http://localhost:3000",
+)
+class PendingUserRegistrationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.register_url = reverse("register")
+        self.check_username_url = reverse("register-check-username")
+
+    def _registration_payload(self, username="availableuser", email="available@example.com"):
+        return {
+            "username": username,
+            "email": email,
+            "first_name": "Test",
+            "last_name": "User",
+            "password": "strongpass123",
+            "password_confirmation": "strongpass123",
+            "birth_date": "2000-01-01",
+        }
+
+    def _create_pending(self, username="pendinguser", email="pending@example.com", expires_at=None):
+        return PendingUserRegistration.objects.create(
+            username=username,
+            email=email,
+            first_name="Pending",
+            last_name="User",
+            birth_date="2000-01-01",
+            password=make_password("strongpass123"),
+            expires_at=expires_at or timezone.now() + timedelta(hours=1),
+        )
+
+    def test_username_available(self):
+        response = self.client.get(self.check_username_url, {"username": "newuser123"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+
+    def test_username_occupied_by_existing_user(self):
+        get_user_model().objects.create_user(
+            username="existinguser",
+            email="existing@example.com",
+            password="strongpass123",
+        )
+
+        response = self.client.get(self.check_username_url, {"username": "existinguser"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["available"])
+
+    def test_username_occupied_by_active_pending_registration(self):
+        self._create_pending(username="pendinguser")
+
+        response = self.client.get(self.check_username_url, {"username": "pendinguser"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["available"])
+
+    def test_username_released_when_pending_registration_expired(self):
+        self._create_pending(
+            username="expireduser",
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.get(self.check_username_url, {"username": "expireduser"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+        self.assertFalse(PendingUserRegistration.objects.filter(username="expireduser").exists())
+
+    def test_register_creates_pending_registration_but_not_user(self):
+        response = self.client.post(self.register_url, self._registration_payload(), format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(get_user_model().objects.filter(username="availableuser").exists())
+        self.assertTrue(PendingUserRegistration.objects.filter(username="availableuser").exists())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("/api/register/confirm-email/", mail.outbox[0].body)
+
+    def test_valid_confirmation_creates_user(self):
+        pending_registration = self._create_pending(username="confirmuser", email="confirm@example.com")
+
+        response = self.client.get(
+            reverse("register-confirm-email", kwargs={"token": pending_registration.token})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "http://localhost:3000/login?verified=1")
+        user = get_user_model().objects.get(username="confirmuser")
+        self.assertEqual(user.email, "confirm@example.com")
+        self.assertTrue(user.check_password("strongpass123"))
+        self.assertEqual(user.profile.birth_date.isoformat(), "2000-01-01")
+        self.assertFalse(PendingUserRegistration.objects.filter(pk=pending_registration.pk).exists())
+
+    def test_expired_confirmation_does_not_create_user(self):
+        pending_registration = self._create_pending(
+            username="expiredconfirm",
+            email="expired-confirm@example.com",
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.get(
+            reverse("register-confirm-email", kwargs={"token": pending_registration.token})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "http://localhost:3000/login?verified=expired")
+        self.assertFalse(get_user_model().objects.filter(username="expiredconfirm").exists())
+        self.assertFalse(PendingUserRegistration.objects.filter(pk=pending_registration.pk).exists())
+
 from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer
 from core.services import (
     remove_user_preferences_for_movie_rating,

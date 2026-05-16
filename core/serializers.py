@@ -2,8 +2,10 @@ from datetime import date
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.auth.hashers import make_password
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from .models import (
@@ -14,6 +16,7 @@ from .models import (
     Movie,
     MovieListItem,
     MovieRecommendationItem,
+    PendingUserRegistration,
     Post,
     UserVisibilityBlock,
     UserDirectorPreference,
@@ -38,6 +41,21 @@ def calculate_age_from_birth_date(birth_date):
     if (today.month, today.day) < (birth_date.month, birth_date.day):
         years -= 1
     return years
+
+
+def cleanup_expired_pending_registrations():
+    return PendingUserRegistration.objects.filter(expires_at__lte=timezone.now()).delete()
+
+
+def active_pending_registrations():
+    return PendingUserRegistration.objects.filter(expires_at__gt=timezone.now(), confirmed_at__isnull=True)
+
+
+def username_is_available(username):
+    cleanup_expired_pending_registrations()
+    if User.objects.filter(username__iexact=username).exists():
+        return False
+    return not active_pending_registrations().filter(username__iexact=username).exists()
 
 
 class AppBrandingSerializer(serializers.ModelSerializer):
@@ -776,6 +794,33 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
     def validate(self, attrs):
+        cleanup_expired_pending_registrations()
+
+        username = attrs.get("username")
+        email = attrs.get("email")
+
+        if User.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError(
+                {"username": "A user with that username already exists."}
+            )
+
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError(
+                {"email": "A user with that email already exists."}
+            )
+
+        conflicting_pending = active_pending_registrations().filter(
+            Q(username__iexact=username) | Q(email__iexact=email)
+        )
+        for pending in conflicting_pending:
+            if pending.username.lower() != username.lower() or pending.email.lower() != email.lower():
+                errors = {}
+                if pending.username.lower() == username.lower():
+                    errors["username"] = "A pending registration is already using that username."
+                if pending.email.lower() == email.lower():
+                    errors["email"] = "A pending registration is already using that email."
+                raise serializers.ValidationError(errors)
+
         birth_date = attrs.get("birth_date")
         if birth_date > date.today():
             raise serializers.ValidationError(
@@ -793,14 +838,21 @@ class RegisterSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        birth_date = validated_data.pop("birth_date")
         validated_data.pop("password_confirmation", None)
-        user = User.objects.create_user(**validated_data)
-        profile, _ = Profile.objects.get_or_create(user=user)
-        profile.birth_date = birth_date
-        profile.birth_date_locked = True
-        profile.save(update_fields=["birth_date", "birth_date_locked"])
-        return user
+        password = validated_data.pop("password")
+        username = validated_data["username"]
+        email = validated_data["email"]
+
+        PendingUserRegistration.objects.filter(
+            username__iexact=username,
+            email__iexact=email,
+            confirmed_at__isnull=True,
+        ).delete()
+
+        return PendingUserRegistration.objects.create(
+            **validated_data,
+            password=make_password(password),
+        )
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)

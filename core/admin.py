@@ -11,6 +11,7 @@ from .models import (
     Comment,
     Movie,
     MovieRating,
+    PendingUserRegistration,
     Profile,
     UserVisibilityBlock,
     UserTasteProfile,
@@ -192,6 +193,14 @@ class ProfileAdmin(admin.ModelAdmin):
     search_fields = ("user__username",)
     list_filter = ("is_public", "visibility", "friend_requests_restricted")
     autocomplete_fields = ("user",)
+
+
+@admin.register(PendingUserRegistration)
+class PendingUserRegistrationAdmin(admin.ModelAdmin):
+    list_display = ("id", "username", "email", "created_at", "expires_at", "confirmed_at")
+    search_fields = ("username", "email", "token")
+    list_filter = ("created_at", "expires_at", "confirmed_at")
+    readonly_fields = ("token", "created_at", "expires_at", "confirmed_at")
 
 
 @admin.register(UserVisibilityBlock)
