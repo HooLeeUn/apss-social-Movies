@@ -301,6 +301,11 @@ class MeSerializer(serializers.ModelSerializer):
     bio = serializers.CharField(source="profile.bio", required=False, allow_blank=True)
     avatar = serializers.ImageField(source="profile.avatar", required=False)
     is_public = serializers.BooleanField(source="profile.is_public", required=False)
+    streaming_country = serializers.ChoiceField(
+        source="profile.streaming_country",
+        choices=Profile.StreamingCountry.choices,
+        required=False,
+    )
     
     # read-only stats (vienen anotados en la vista)
     followers_count = serializers.IntegerField(read_only=True)
@@ -312,7 +317,7 @@ class MeSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username","email",
-            "bio", "avatar", "is_public",
+            "bio", "avatar", "is_public", "streaming_country",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
         ]
@@ -333,6 +338,9 @@ class MeSerializer(serializers.ModelSerializer):
         if "is_public" in profile_data:
             profile.is_public = profile_data["is_public"]
             profile.visibility = Profile.Visibility.PUBLIC if profile.is_public else Profile.Visibility.PRIVATE
+
+        if "streaming_country" in profile_data:
+            profile.streaming_country = profile_data["streaming_country"]
 
         profile.save()
         return instance

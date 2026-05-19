@@ -921,6 +921,10 @@ class Profile(models.Model):
         PUBLIC = "public", "Public"
         PRIVATE = "private", "Private"
 
+    class StreamingCountry(models.TextChoices):
+        CO = "CO", "Colombia"
+        US = "US", "Estados Unidos"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -945,6 +949,11 @@ class Profile(models.Model):
         default=Visibility.PUBLIC,
     )
     friend_requests_restricted = models.BooleanField(default=False)
+    streaming_country = models.CharField(
+        max_length=2,
+        choices=StreamingCountry.choices,
+        default=StreamingCountry.CO,
+    )
 
     def __str__(self):
         return f"Profile({self.user.username})"

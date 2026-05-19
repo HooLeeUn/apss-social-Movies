@@ -6943,3 +6943,35 @@ class PersonalDataEndpointTests(TestCase):
         user.refresh_from_db()
         self.assertEqual(str(user.profile.birth_date), "1991-05-20")
         self.assertTrue(user.profile.birth_date_locked)
+
+
+class MeProfileStreamingCountryTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="streamuser",
+            email="streamuser@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(user=self.user)
+        self.url = reverse("me")
+
+    def test_me_returns_default_streaming_country(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.CO)
+
+    def test_me_patch_updates_streaming_country(self):
+        response = self.client.patch(self.url, {"streaming_country": Profile.StreamingCountry.US}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.profile.streaming_country, Profile.StreamingCountry.US)
+        self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.US)
+
+    def test_me_patch_rejects_invalid_streaming_country(self):
+        response = self.client.patch(self.url, {"streaming_country": "AR"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("streaming_country", response.data)
