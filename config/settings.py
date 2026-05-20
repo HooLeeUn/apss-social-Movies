@@ -15,6 +15,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 def env_bool(name, default=False):
     value = os.environ.get(name)
     if value is None:
@@ -28,9 +32,6 @@ def env_int(name, default):
         return default
     return int(value)
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
