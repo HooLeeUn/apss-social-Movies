@@ -7098,3 +7098,28 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/new.jpg")
         self.assertEqual(movie.synopsis, "New EN")
         self.assertEqual(movie.synopsis_es, "Nuevo ES")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_tmdb_id_filters_null_tmdb_id(self, mock_tmdb, _mock_sleep):
+        missing_tmdb = self._create_movie(imdb_id="tt0468569", tmdb_id=None)
+        with_tmdb = self._create_movie(imdb_id="tt1375666", tmdb_id=27205)
+        mock_tmdb.return_value = {"movie_results": [{"id": 155}]}
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--only-missing-tmdb-id",
+            "--start-id",
+            str(min(missing_tmdb.id, with_tmdb.id)),
+            "--limit",
+            "10",
+            "--sleep",
+            "0",
+            "--quiet-warnings",
+        )
+
+        missing_tmdb.refresh_from_db()
+        with_tmdb.refresh_from_db()
+        self.assertEqual(missing_tmdb.tmdb_id, 155)
+        self.assertEqual(with_tmdb.tmdb_id, 27205)
+        mock_tmdb.assert_called_once()

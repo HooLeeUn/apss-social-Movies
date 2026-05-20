@@ -53,7 +53,7 @@ class Command(BaseCommand):
                 | Q(synopsis_es="")
             )
         if only_missing_tmdb_id:
-            qs = qs.filter(Q(tmdb_id__isnull=True) | Q(tmdb_id=""))
+            qs = qs.filter(tmdb_id__isnull=True)
         if limit:
             qs = qs[:limit]
 
