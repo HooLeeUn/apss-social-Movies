@@ -7012,3 +7012,89 @@ class TMDbServiceTests(TestCase):
 
         with self.assertRaises(TMDbServiceError):
             get_tmdb_json("movie/123")
+
+
+class EnrichMoviesTmdbCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="tmdb-admin", email="tmdb-admin@example.com", password="test1234"
+        )
+
+    def _create_movie(self, **kwargs):
+        defaults = {
+            "author": self.author,
+            "title_english": "Sample",
+            "title_spanish": "Sample",
+            "type": Movie.MOVIE,
+            "imdb_id": "tt1877830",
+            "image": "",
+            "synopsis": "",
+            "synopsis_es": "",
+        }
+        defaults.update(kwargs)
+        return Movie.objects.create(**defaults)
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_enriches_tmdb_image_and_synopsis(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie()
+        mock_tmdb.side_effect = [
+            {"movie_results": [{"id": 414906, "poster_path": "/batman.jpg"}]},
+            {"overview": "Batman in English"},
+            {"overview": "Batman en Español"},
+        ]
+
+        call_command("enrich_movies_tmdb", "--movie-id", str(movie.id), "--sleep", "0")
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 414906)
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/batman.jpg")
+        self.assertEqual(movie.synopsis, "Batman in English")
+        self.assertEqual(movie.synopsis_es, "Batman en Español")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_does_not_overwrite_without_flags(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            tmdb_id=1,
+            image="https://existing/image.jpg",
+            synopsis="Existing EN",
+            synopsis_es="Existente ES",
+        )
+
+        call_command("enrich_movies_tmdb", "--movie-id", str(movie.id), "--sleep", "0")
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://existing/image.jpg")
+        self.assertEqual(movie.synopsis, "Existing EN")
+        self.assertEqual(movie.synopsis_es, "Existente ES")
+        mock_tmdb.assert_not_called()
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_overwrite_flags_apply(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            tmdb_id=414906,
+            image="https://existing/image.jpg",
+            synopsis="Existing EN",
+            synopsis_es="Existente ES",
+        )
+        mock_tmdb.side_effect = [
+            {"poster_path": "/new.jpg", "overview": "New EN"},
+            {"overview": "Nuevo ES"},
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--overwrite-image",
+            "--overwrite-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/new.jpg")
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Nuevo ES")
