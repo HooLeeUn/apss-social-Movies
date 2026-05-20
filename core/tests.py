@@ -6975,3 +6975,40 @@ class MeProfileStreamingCountryTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("streaming_country", response.data)
+
+
+class TMDbServiceTests(TestCase):
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_get_tmdb_json_success(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"id": 123, "title": "Movie"},
+        )
+
+        from core.tmdb import get_tmdb_json
+
+        data = get_tmdb_json("movie/123", params={"language": "es-CO"})
+
+        self.assertEqual(data["id"], 123)
+        mock_get.assert_called_once()
+        _, kwargs = mock_get.call_args
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-token")
+        self.assertEqual(kwargs["timeout"], 10)
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="")
+    def test_get_tmdb_json_requires_token(self):
+        from core.tmdb import TMDbServiceError, get_tmdb_json
+
+        with self.assertRaises(TMDbServiceError):
+            get_tmdb_json("movie/123")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token")
+    @patch("core.tmdb.requests.get")
+    def test_get_tmdb_json_raises_on_non_200(self, mock_get):
+        mock_get.return_value = SimpleNamespace(status_code=401, text="Unauthorized")
+
+        from core.tmdb import TMDbServiceError, get_tmdb_json
+
+        with self.assertRaises(TMDbServiceError):
+            get_tmdb_json("movie/123")
