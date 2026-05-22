@@ -80,6 +80,115 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 BRANDING_CACHE_KEY = "app_branding_active_v1"
 
+LEGAL_POLICIES_PAYLOAD = {
+    "title": "Políticas y Términos",
+    "last_updated": "2026-05-22",
+    "sections": [
+        {
+            "subtitle": "Información general de QNext",
+            "content": [
+                "QNext es una plataforma social de películas y series.",
+                "Permite descubrir, calificar, comentar, recomendar, guardar películas, seguir usuarios y crear amistades.",
+                "Las recomendaciones pueden personalizarse a partir de calificaciones, preferencias, interacciones y actividad social del usuario.",
+                "QNext es una plataforma independiente.",
+            ],
+        },
+        {
+            "subtitle": "Sistema de calificaciones de QNext",
+            "content": [
+                "Las calificaciones externas se usan como referencia inicial mientras QNext construye su propia base de calificaciones.",
+                "Cuando una película o serie tiene menos de 5000 votos en IMDb, QNext puede aplicar un ajuste interno o reducción de peso estadístico porque esos ratings pueden ser volátiles o manipulables.",
+                "Cuando QNext supera 100 calificaciones propias en una película o serie, la calificación general pasa a priorizar el promedio propio de QNext.",
+                "Mientras QNext tenga menos de 100 calificaciones propias, la calificación general puede combinar IMDb + QNext con mayor peso inicial de IMDb.",
+                "Las calificaciones del usuario pueden ser visibles según su configuración de privacidad, seguidores y amigos.",
+                "QNext puede ajustar fórmulas de ranking, recomendación o ponderación para mejorar precisión, seguridad y experiencia.",
+            ],
+        },
+        {
+            "subtitle": "Privacidad básica de perfiles",
+            "content": [
+                "Al crear cuenta, el usuario reconoce que su perfil se crea inicialmente como público.",
+                "Los datos personales visibles y la actividad pública pueden mostrarse según la configuración activa del usuario.",
+                "El usuario puede cambiar su perfil a privado desde “Privacidad y Seguridad”.",
+                "La visibilidad de calificaciones, comentarios, recomendaciones, seguidores, amigos y datos personales depende de la configuración del perfil y permisos definidos por el usuario.",
+            ],
+        },
+        {
+            "subtitle": "Conducta y contenido",
+            "content": [
+                "Los usuarios son responsables de sus comentarios, calificaciones, recomendaciones, mensajes y demás contenido publicado.",
+                "No se permite contenido ofensivo, ilegal, discriminatorio, amenazante, fraudulento, difamatorio, que vulnere derechos de terceros o exponga información privada de otras personas.",
+                "QNext podrá moderar, limitar, ocultar, suspender o eliminar contenido o cuentas que incumplan estas políticas o afecten la seguridad de la comunidad.",
+            ],
+        },
+        {
+            "subtitle": "Exactitud de datos externos",
+            "content": [
+                "QNext no garantiza la exactitud absoluta, disponibilidad permanente o actualización inmediata de información proveniente de IMDb, TMDB u otras fuentes externas.",
+                "Los títulos, sinopsis, posters, directores, casting, géneros, años, votos y calificaciones externas pueden contener errores, cambios o diferencias respecto a sus fuentes originales.",
+                "QNext podrá corregir, actualizar, ocultar o ajustar información cuando sea necesario.",
+            ],
+        },
+        {
+            "subtitle": "Eliminación de contenido y cuentas",
+            "content": [
+                "QNext podrá retirar contenido que infrinja derechos de terceros, privacidad, seguridad, propiedad intelectual o normas de convivencia.",
+                "El usuario podrá solicitar eliminación o modificación de información personal cuando sea legalmente procedente.",
+                "Algunas interacciones pueden conservarse de forma agregada, anonimizada o seudonimizada para seguridad, auditoría, estadísticas o funcionamiento técnico.",
+            ],
+        },
+    ],
+    "data_protection_sections": [
+        {
+            "subtitle": "Tratamiento de Datos Personales",
+            "content": [
+                "En Colombia, QNext aplica la Ley 1581 de 2012 como marco de protección de datos personales.",
+                "Resumen del Artículo 8 de la Ley 1581 de 2012: el titular puede conocer, actualizar y rectificar sus datos, solicitar prueba de autorización, ser informado del uso de sus datos, presentar quejas y revocar autorización o solicitar supresión cuando proceda.",
+                "Resumen del Artículo 9 de la Ley 1581 de 2012: el tratamiento requiere autorización previa, expresa e informada del titular, salvo excepciones legales.",
+                "Resumen de los Artículos 17 y 18 de la Ley 1581 de 2012: responsable y encargado deben proteger la seguridad y confidencialidad, conservar adecuadamente la información y atender consultas y reclamos.",
+                "En Estados Unidos, QNext observará la normativa aplicable cuando corresponda, incluyendo CCPA/CPRA para residentes de California si aplica.",
+                "Derechos generales: conocer, actualizar, rectificar, solicitar eliminación, limitar tratamiento y consultar uso de datos cuando sea legalmente procedente.",
+                "Finalidades del tratamiento: autenticación, funcionamiento de la plataforma, personalización de recomendaciones, interacción social, seguridad, prevención de abuso, soporte, análisis, mejora del servicio y comunicaciones de cuenta.",
+                "QNext podrá utilizar información agregada, anonimizada o seudonimizada con fines estadísticos, analíticos, académicos, de mejora del servicio, entrenamiento de sistemas de recomendación y optimización de experiencia de usuario, sin identificar individualmente a los usuarios ni comprometer información personal sensible.",
+                "QNext está dirigido únicamente a usuarios mayores de 13 años.",
+            ],
+        }
+    ],
+    "intellectual_property_sections": [
+        {
+            "subtitle": "Propiedad Intelectual de QNext",
+            "content": [
+                "QNext conserva derechos sobre marca, nombre, logotipo, identidad visual, diseño de interfaz, experiencia de usuario, estructura de navegación, textos propios, componentes visuales, organización de información, lógica de presentación, rankings, sistemas de recomendación, combinaciones, curaduría, compilaciones de datos, código fuente, arquitectura técnica y funcionalidades propias.",
+                "Se prohíbe copiar, reproducir, distribuir, modificar, extraer masivamente, hacer scraping, ingeniería inversa, plagiar, clonar diseño, reutilizar elementos distintivos o usar comercialmente elementos de QNext sin autorización.",
+                "Los datos externos de IMDb y TMDB pertenecen a sus respectivos titulares.",
+                "El contenido generado por usuarios pertenece o queda bajo responsabilidad del usuario que lo publica; al publicarlo, concede a QNext licencia no exclusiva para mostrarlo, almacenarlo, procesarlo y distribuirlo dentro de la plataforma.",
+                "QNext podrá retirar contenido que infrinja propiedad intelectual, privacidad, seguridad, convivencia o derechos de terceros.",
+                "QNext no autoriza el uso de su marca ni elementos visuales para crear productos confundibles o competidores.",
+            ],
+        }
+    ],
+    "credits": {
+        "imdb": {
+            "description": "IMDb es fuente de referencia para títulos, año, tipo, casting, director, géneros, número de votos y calificaciones promedio.",
+            "rights_notice": "IMDb conserva sus derechos sobre sus bases de datos, marcas, activos y contenidos.",
+            "logo_usage_notice": "No se usa el logo de IMDb.",
+        },
+        "tmdb": {
+            "description": "TMDB es fuente de posters y sinopsis.",
+            "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+            "rights_notice": "TMDB conserva sus derechos sobre sus bases de datos, marcas, activos y contenidos.",
+        },
+        "independence_notice": "QNext es una plataforma independiente y no está afiliada oficialmente, respaldada, certificada ni patrocinada por IMDb o TMDB.",
+    },
+}
+
+
+class LegalPoliciesView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response(LEGAL_POLICIES_PAYLOAD, status=status.HTTP_200_OK)
+
 
 def is_restricted_by_visited_user(visited_user, authenticated_user):
     if not authenticated_user or not getattr(authenticated_user, "is_authenticated", False):

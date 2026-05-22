@@ -16,10 +16,11 @@ from .views import (
     MovieListView, MovieSearchView, MovieDetailView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
     MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, UserMovieRecommendationsView, MovieRecommendationToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
-    ProfilePrivacyBlockedUserDetailView,
+    ProfilePrivacyBlockedUserDetailView, LegalPoliciesView,
 )
 
 urlpatterns = [
+    path("legal/policies/", LegalPoliciesView.as_view(), name="legal-policies"),
     path("branding/", AppBrandingView.as_view(), name="app-branding"),
     path("register/", RegisterView.as_view(), name="register"),
     path("register/check-username/", RegisterUsernameAvailabilityView.as_view(), name="register-check-username"),
