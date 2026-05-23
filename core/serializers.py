@@ -1354,6 +1354,7 @@ class WeeklyRecommendationMovieSerializer(serializers.ModelSerializer):
             "genre",
             "release_year",
             "director",
+            "synopsis",
             "synopsis_es",
             "image",
         ]
