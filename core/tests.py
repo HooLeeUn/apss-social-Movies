@@ -7250,3 +7250,58 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         call_command("enrich_movies_tmdb", "--movie-id", str(movie.id), "--sleep", "0", "--quiet-warnings")
         movie.refresh_from_db()
         self.assertEqual(movie.tmdb_lookup_status, "not_found")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_use_existing_tmdb_id_only_skips_find_and_updates_metadata(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(tmdb_id=414906, image="", synopsis="", synopsis_es="")
+        mock_tmdb.side_effect = [
+            {"poster_path": "/new.jpg"},
+            {"overview": "New EN"},
+            {"overview": "Nuevo ES"},
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--use-existing-tmdb-id-only",
+            "--overwrite-image",
+            "--overwrite-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/new.jpg")
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Nuevo ES")
+        self.assertEqual(mock_tmdb.call_count, 3)
+        for call in mock_tmdb.call_args_list:
+            self.assertNotIn("/find/", call.args[0])
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_use_existing_tmdb_id_only_filters_queryset(self, mock_tmdb, _mock_sleep):
+        missing_tmdb = self._create_movie(imdb_id="tt0468569", tmdb_id=None)
+        with_tmdb = self._create_movie(imdb_id="tt1375666", tmdb_id=27205, image="")
+        mock_tmdb.return_value = {"poster_path": "/poster.jpg"}
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--use-existing-tmdb-id-only",
+            "--only-missing-image",
+            "--start-id",
+            str(min(missing_tmdb.id, with_tmdb.id)),
+            "--limit",
+            "10",
+            "--sleep",
+            "0",
+        )
+
+        missing_tmdb.refresh_from_db()
+        with_tmdb.refresh_from_db()
+        self.assertEqual(missing_tmdb.image, "")
+        self.assertEqual(with_tmdb.image, "https://image.tmdb.org/t/p/w500/poster.jpg")
+        self.assertEqual(mock_tmdb.call_count, 1)
+        self.assertNotIn("/find/", mock_tmdb.call_args.args[0])

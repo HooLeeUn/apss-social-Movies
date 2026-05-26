@@ -31,6 +31,7 @@ class Command(BaseCommand):
         parser.add_argument("--only-missing-image", action="store_true")
         parser.add_argument("--only-missing-synopsis", action="store_true")
         parser.add_argument("--only-missing-tmdb-id", action="store_true")
+        parser.add_argument("--use-existing-tmdb-id-only", action="store_true")
         parser.add_argument("--retry-not-found", action="store_true")
         parser.add_argument("--retry-errors", action="store_true")
         parser.add_argument("--quiet-warnings", action="store_true")
@@ -49,6 +50,7 @@ class Command(BaseCommand):
         only_missing_image = options["only_missing_image"]
         only_missing_synopsis = options["only_missing_synopsis"]
         only_missing_tmdb_id = options["only_missing_tmdb_id"]
+        use_existing_tmdb_id_only = options["use_existing_tmdb_id_only"]
         retry_not_found = options["retry_not_found"]
         retry_errors = options["retry_errors"]
         quiet_warnings = options["quiet_warnings"]
@@ -112,6 +114,8 @@ class Command(BaseCommand):
             "not_found": 0,
             "skipped_not_found": 0,
             "requests_realizadas": 0,
+            "details_requests_realizadas": 0,
+            "skipped_missing_tmdb_id": 0,
             "local_candidates_found": 0,
             "local_matches_saved": 0,
             "local_only_skipped": 0,
@@ -141,7 +145,7 @@ class Command(BaseCommand):
                     )
                     continue
 
-                needs_tmdb_id = not movie.tmdb_id
+                needs_tmdb_id = (not use_existing_tmdb_id_only) and (not movie.tmdb_id)
                 needs_image = (not only_missing_tmdb_id) and (overwrite_image or not movie.image)
                 needs_synopsis = (not only_missing_tmdb_id) and (overwrite_synopsis or not movie.synopsis)
                 needs_synopsis_es = (not only_missing_tmdb_id) and (overwrite_synopsis or not movie.synopsis_es)
@@ -159,6 +163,10 @@ class Command(BaseCommand):
                 tmdb_id = movie.tmdb_id
                 find_result = None
                 if not tmdb_id:
+                    if use_existing_tmdb_id_only:
+                        stats["skipped_missing_tmdb_id"] += 1
+                        stats["skipped"] += 1
+                        continue
                     # Flujo optimizado: primero usar exports locales para estimar candidatos por título/año.
                     local_candidate = self._get_local_candidate(local_index, movie, content_kind)
                     if local_candidate:
@@ -225,6 +233,7 @@ class Command(BaseCommand):
                         detail = self._get_tmdb_json_with_retries(
                             stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
                         )
+                        stats["details_requests_realizadas"] += 1
                         time.sleep(sleep_seconds)
                         poster_path = detail.get("poster_path")
                     if poster_path:
@@ -238,6 +247,7 @@ class Command(BaseCommand):
                         detail_en = self._get_tmdb_json_with_retries(
                             stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
                         )
+                        stats["details_requests_realizadas"] += 1
                         time.sleep(sleep_seconds)
                         overview_en = (detail_en.get("overview") or "").strip()
                         if overview_en:
@@ -249,6 +259,7 @@ class Command(BaseCommand):
                         detail_es = self._get_tmdb_json_with_retries(
                             stats, f"/{content_kind}/{tmdb_id}", params={"language": "es-ES"}
                         )
+                        stats["details_requests_realizadas"] += 1
                         time.sleep(sleep_seconds)
                         overview_es = (detail_es.get("overview") or "").strip()
                         if overview_es:
@@ -285,8 +296,11 @@ class Command(BaseCommand):
         self.stdout.write(f"Procesadas: {stats['processed']}")
         self.stdout.write(f"tmdb_id actualizados: {stats['tmdb_id_updated']}")
         self.stdout.write(f"Imágenes actualizadas: {stats['image_updated']}")
+        self.stdout.write(f"images_updated: {stats['image_updated']}")
         self.stdout.write(f"Synopsis actualizadas: {stats['synopsis_updated']}")
+        self.stdout.write(f"synopsis_updated: {stats['synopsis_updated']}")
         self.stdout.write(f"Synopsis_es actualizadas: {stats['synopsis_es_updated']}")
+        self.stdout.write(f"synopsis_es_updated: {stats['synopsis_es_updated']}")
         self.stdout.write(f"Omitidas: {stats['skipped']}")
         self.stdout.write(f"Warnings: {stats['warnings']}")
         self.stdout.write(f"Errores: {stats['errors']}")
@@ -299,6 +313,8 @@ class Command(BaseCommand):
         self.stdout.write(f"local_only_skipped: {stats['local_only_skipped']}")
         self.stdout.write(f"api_requests_avoided: {stats['api_requests_avoided']}")
         self.stdout.write(f"requests_realizadas: {stats['requests_realizadas']}")
+        self.stdout.write(f"details_requests_realizadas: {stats['details_requests_realizadas']}")
+        self.stdout.write(f"skipped_missing_tmdb_id: {stats['skipped_missing_tmdb_id']}")
         self.stdout.write(f"tiempo_total: {elapsed_seconds:.2f}s")
         self.stdout.write(f"registros_por_minuto: {avg_per_minute:.2f}")
         self.stdout.write(f"promedio registros/minuto: {avg_per_minute:.2f}")
@@ -388,3 +404,5 @@ class Command(BaseCommand):
         normalized = self._normalize_title(title)
         candidates = local_index[content_kind].get(normalized) or []
         return candidates[0] if candidates else None
+        if use_existing_tmdb_id_only:
+            qs = qs.filter(tmdb_id__isnull=False)
