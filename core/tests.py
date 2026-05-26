@@ -1,4 +1,6 @@
 import io
+import gzip
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,6 +240,7 @@ class FixAmazonMovieImagesCommandTests(TestCase):
 
         call_command("fix_amazon_movie_images", "--dry-run", stdout=out)
 
+
         movie.refresh_from_db()
         self.assertEqual(movie.image, "https://m.media-amazon.com/images/M/MV5Bdry._V1_UX182_.jpg")
         output = out.getvalue()
@@ -273,6 +276,73 @@ class FixAmazonMovieImagesCommandTests(TestCase):
 
         movie.refresh_from_db()
         self.assertEqual(movie.image, "https://m.media-amazon.com/images/M/MV5Bclean.jpg")
+
+
+class EnrichMoviesTmdbLocalExportTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="tmdb-local", email="tmdb-local@example.com", password="test1234"
+        )
+
+    def _create_movie(self, **kwargs):
+        defaults = {
+            "author": self.author,
+            "title_english": "Inception",
+            "title_spanish": "El origen",
+            "type": Movie.MOVIE,
+            "imdb_id": "tt1375666",
+            "release_year": 2010,
+        }
+        defaults.update(kwargs)
+        return Movie.objects.create(**defaults)
+
+    def _write_export(self, directory, filename, rows):
+        file_path = Path(directory) / filename
+        with gzip.open(file_path, "wt", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_uses_local_export_candidate_and_avoids_find_lookup(self, mock_tmdb_json):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                "movie_ids_05_25_2026.json.gz",
+                [{"id": 27205, "original_title": "Inception", "popularity": 90.5}],
+            )
+            mock_tmdb_json.return_value = {"poster_path": "/abc.jpg", "overview": "Overview EN"}
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb", "--use-local-exports", "--exports-dir", tmp_dir, "--limit", "1", "--sleep", "0", "--overwrite-synopsis", "--overwrite-image", stdout=out
+            )
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 27205)
+        self.assertIn("local_candidates_found: 1", out.getvalue())
+        self.assertIn("api_requests_avoided: 1", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_fallbacks_to_find_when_no_local_candidate(self, mock_tmdb_json):
+        movie = self._create_movie(title_english="Unknown Title")
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                "movie_ids_05_25_2026.json.gz",
+                [{"id": 27205, "original_title": "Inception", "popularity": 90.5}],
+            )
+            mock_tmdb_json.side_effect = [
+                {"movie_results": [{"id": 11, "poster_path": "/from-find.jpg"}]},
+                {"poster_path": "/from-detail.jpg"},
+                {"overview": "EN"},
+                {"overview": "ES"},
+            ]
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb", "--use-local-exports", "--exports-dir", tmp_dir, "--limit", "1", "--sleep", "0", "--overwrite-synopsis", "--overwrite-image", stdout=out
+            )
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 11)
+        self.assertIn("requests_realizadas: 4", out.getvalue())
 
 
 class ImportMoviesCommandTests(TestCase):

@@ -1,4 +1,10 @@
 import time
+import gzip
+import json
+import re
+import unicodedata
+from collections import defaultdict
+from pathlib import Path
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
@@ -12,6 +18,7 @@ class Command(BaseCommand):
     help = "Enriquece Movie con tmdb_id, image y sinopsis (EN/ES) usando imdb_id y TMDb."
 
     IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
+    EXPORT_FILENAME_PATTERN = re.compile(r"^(movie_ids|tv_series_ids)_\d{2}_\d{2}_\d{4}\.json\.gz$")
 
     def add_arguments(self, parser):
         parser.add_argument("--limit", type=int, default=None)
@@ -27,6 +34,8 @@ class Command(BaseCommand):
         parser.add_argument("--retry-not-found", action="store_true")
         parser.add_argument("--retry-errors", action="store_true")
         parser.add_argument("--quiet-warnings", action="store_true")
+        parser.add_argument("--use-local-exports", action="store_true")
+        parser.add_argument("--exports-dir", type=str, default="tmdb_exports")
 
     def handle(self, *args, **options):
         limit = options["limit"]
@@ -42,9 +51,30 @@ class Command(BaseCommand):
         retry_not_found = options["retry_not_found"]
         retry_errors = options["retry_errors"]
         quiet_warnings = options["quiet_warnings"]
+        use_local_exports = options["use_local_exports"]
+        exports_dir = options["exports_dir"]
         started_at = timezone.now()
 
-        qs = Movie.objects.filter(imdb_id__isnull=False).exclude(imdb_id="").order_by("id")
+        qs = (
+            Movie.objects.filter(imdb_id__isnull=False)
+            .exclude(imdb_id="")
+            .only(
+                "id",
+                "imdb_id",
+                "tmdb_id",
+                "title_english",
+                "title_spanish",
+                "release_year",
+                "type",
+                "image",
+                "synopsis",
+                "synopsis_es",
+                "tmdb_lookup_status",
+                "tmdb_lookup_error",
+                "tmdb_lookup_checked_at",
+            )
+            .order_by("id")
+        )
         if start_id is not None:
             qs = qs.filter(id__gte=start_id)
         if movie_id is not None:
@@ -80,9 +110,14 @@ class Command(BaseCommand):
             "not_found": 0,
             "skipped_not_found": 0,
             "requests_realizadas": 0,
+            "local_candidates_found": 0,
+            "api_requests_avoided": 0,
             "first_processed_id": None,
             "last_processed_id": None,
         }
+        local_index = None
+        if use_local_exports:
+            local_index = self._build_local_export_index(exports_dir)
 
         for movie in qs.iterator(chunk_size=500):
             stats["processed"] += 1
@@ -120,28 +155,39 @@ class Command(BaseCommand):
                 tmdb_id = movie.tmdb_id
                 find_result = None
                 if not tmdb_id:
-                    find_result = self._get_tmdb_json_with_retries(
-                        stats,
-                        f"/find/{movie.imdb_id}",
-                        params={"external_source": "imdb_id"},
-                    )
-                    time.sleep(sleep_seconds)
-                    match = self._extract_match(find_result, content_kind)
-                    if not match:
-                        movie.tmdb_lookup_status = "not_found"
-                        movie.tmdb_lookup_checked_at = timezone.now()
-                        updates.extend(["tmdb_lookup_status", "tmdb_lookup_checked_at"])
-                        stats["not_found"] += 1
-                        if only_missing_tmdb_id:
-                            stats["skipped_not_found"] += 1
-                        stats["skipped"] += 1
-                        self._warn(
-                            quiet_warnings,
+                    # Flujo optimizado: primero usar exports locales para estimar candidatos por título/año.
+                    local_candidate = self._get_local_candidate(local_index, movie, content_kind)
+                    if local_candidate:
+                        stats["local_candidates_found"] += 1
+                        tmdb_id = local_candidate["tmdb_id"]
+                        stats["api_requests_avoided"] += 1
+                        # Validación final: se consulta detalle real del candidato para confirmar y extraer metadata.
+                    else:
+                        # Fallback API tradicional (lógica existente): lookup por imdb_id en /find.
+                        find_result = self._get_tmdb_json_with_retries(
                             stats,
-                            f"Movie(id={movie.id}) sin resultado TMDb compatible para imdb_id={movie.imdb_id}",
+                            f"/find/{movie.imdb_id}",
+                            params={"external_source": "imdb_id"},
                         )
-                        continue
-                    tmdb_id = match.get("id")
+                        time.sleep(sleep_seconds)
+                        match = self._extract_match(find_result, content_kind)
+                        if not match:
+                            movie.tmdb_lookup_status = "not_found"
+                            movie.tmdb_lookup_checked_at = timezone.now()
+                            updates.extend(["tmdb_lookup_status", "tmdb_lookup_checked_at"])
+                            stats["not_found"] += 1
+                            if only_missing_tmdb_id:
+                                stats["skipped_not_found"] += 1
+                            stats["skipped"] += 1
+                            self._warn(
+                                quiet_warnings,
+                                stats,
+                                f"Movie(id={movie.id}) sin resultado TMDb compatible para imdb_id={movie.imdb_id}",
+                            )
+                            continue
+                        tmdb_id = match.get("id")
+                        if tmdb_id:
+                            stats["found"] += 1
                     if tmdb_id and not movie.tmdb_id:
                         movie.tmdb_id = tmdb_id
                         movie.tmdb_lookup_status = "found"
@@ -232,7 +278,11 @@ class Command(BaseCommand):
         self.stdout.write(f"not_found: {stats['not_found']}")
         self.stdout.write(f"errors: {stats['errors']}")
         self.stdout.write(f"skipped_not_found: {stats['skipped_not_found']}")
+        self.stdout.write(f"local_candidates_found: {stats['local_candidates_found']}")
+        self.stdout.write(f"api_requests_avoided: {stats['api_requests_avoided']}")
         self.stdout.write(f"requests_realizadas: {stats['requests_realizadas']}")
+        self.stdout.write(f"tiempo_total: {elapsed_seconds:.2f}s")
+        self.stdout.write(f"registros_por_minuto: {avg_per_minute:.2f}")
         self.stdout.write(f"promedio registros/minuto: {avg_per_minute:.2f}")
         self.stdout.write(f"first_processed_id: {stats['first_processed_id']}")
         self.stdout.write(f"last_processed_id: {stats['last_processed_id']}")
@@ -275,3 +325,48 @@ class Command(BaseCommand):
                     break
                 time.sleep(backoff_seconds * attempt)
         raise last_error
+
+    def _build_local_export_index(self, exports_dir):
+        export_dir = Path(exports_dir)
+        index = {"movie": defaultdict(list), "tv": defaultdict(list)}
+        files = sorted(export_dir.glob("*.json.gz"))
+        for file_path in files:
+            if not self.EXPORT_FILENAME_PATTERN.match(file_path.name):
+                continue
+            media_type = "movie" if file_path.name.startswith("movie_ids_") else "tv"
+            with gzip.open(file_path, "rt", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    title = (row.get("original_title") or row.get("name") or "").strip()
+                    if not title:
+                        continue
+                    normalized = self._normalize_title(title)
+                    index[media_type][normalized].append(
+                        {
+                            "tmdb_id": row.get("id"),
+                            "title": title,
+                            "popularity": row.get("popularity", 0.0),
+                            "media_type": media_type,
+                        }
+                    )
+        for media_type in ("movie", "tv"):
+            for normalized_title in index[media_type]:
+                index[media_type][normalized_title].sort(key=lambda item: item.get("popularity") or 0.0, reverse=True)
+        return index
+
+    def _normalize_title(self, title):
+        value = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    def _get_local_candidate(self, local_index, movie, content_kind):
+        if not local_index:
+            return None
+        title = (movie.title_english or movie.title_spanish or "").strip()
+        if not title:
+            return None
+        normalized = self._normalize_title(title)
+        candidates = local_index[content_kind].get(normalized) or []
+        return candidates[0] if candidates else None
