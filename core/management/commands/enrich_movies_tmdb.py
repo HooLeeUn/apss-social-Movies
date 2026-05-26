@@ -2,6 +2,7 @@ import time
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
+from django.utils import timezone
 
 from core.models import Movie
 from core.tmdb import TMDbServiceError, get_tmdb_json
@@ -23,6 +24,8 @@ class Command(BaseCommand):
         parser.add_argument("--only-missing-image", action="store_true")
         parser.add_argument("--only-missing-synopsis", action="store_true")
         parser.add_argument("--only-missing-tmdb-id", action="store_true")
+        parser.add_argument("--retry-not-found", action="store_true")
+        parser.add_argument("--retry-errors", action="store_true")
         parser.add_argument("--quiet-warnings", action="store_true")
 
     def handle(self, *args, **options):
@@ -36,7 +39,10 @@ class Command(BaseCommand):
         only_missing_image = options["only_missing_image"]
         only_missing_synopsis = options["only_missing_synopsis"]
         only_missing_tmdb_id = options["only_missing_tmdb_id"]
+        retry_not_found = options["retry_not_found"]
+        retry_errors = options["retry_errors"]
         quiet_warnings = options["quiet_warnings"]
+        started_at = timezone.now()
 
         qs = Movie.objects.filter(imdb_id__isnull=False).exclude(imdb_id="").order_by("id")
         if start_id is not None:
@@ -54,6 +60,10 @@ class Command(BaseCommand):
             )
         if only_missing_tmdb_id:
             qs = qs.filter(tmdb_id__isnull=True)
+            if not retry_not_found:
+                qs = qs.exclude(tmdb_lookup_status="not_found")
+            if not retry_errors:
+                qs = qs.exclude(tmdb_lookup_status="error")
         if limit:
             qs = qs[:limit]
 
@@ -66,6 +76,10 @@ class Command(BaseCommand):
             "skipped": 0,
             "errors": 0,
             "warnings": 0,
+            "found": 0,
+            "not_found": 0,
+            "skipped_not_found": 0,
+            "requests_realizadas": 0,
             "first_processed_id": None,
             "last_processed_id": None,
         }
@@ -106,13 +120,20 @@ class Command(BaseCommand):
                 tmdb_id = movie.tmdb_id
                 find_result = None
                 if not tmdb_id:
-                    find_result = get_tmdb_json(
+                    find_result = self._get_tmdb_json_with_retries(
+                        stats,
                         f"/find/{movie.imdb_id}",
                         params={"external_source": "imdb_id"},
                     )
                     time.sleep(sleep_seconds)
                     match = self._extract_match(find_result, content_kind)
                     if not match:
+                        movie.tmdb_lookup_status = "not_found"
+                        movie.tmdb_lookup_checked_at = timezone.now()
+                        updates.extend(["tmdb_lookup_status", "tmdb_lookup_checked_at"])
+                        stats["not_found"] += 1
+                        if only_missing_tmdb_id:
+                            stats["skipped_not_found"] += 1
                         stats["skipped"] += 1
                         self._warn(
                             quiet_warnings,
@@ -123,8 +144,13 @@ class Command(BaseCommand):
                     tmdb_id = match.get("id")
                     if tmdb_id and not movie.tmdb_id:
                         movie.tmdb_id = tmdb_id
+                        movie.tmdb_lookup_status = "found"
+                        movie.tmdb_lookup_error = ""
+                        movie.tmdb_lookup_checked_at = timezone.now()
                         updates.append("tmdb_id")
+                        updates.extend(["tmdb_lookup_status", "tmdb_lookup_error", "tmdb_lookup_checked_at"])
                         stats["tmdb_id_updated"] += 1
+                        stats["found"] += 1
 
                 if not tmdb_id:
                     stats["skipped"] += 1
@@ -134,7 +160,9 @@ class Command(BaseCommand):
                     source = self._extract_match(find_result, content_kind) if find_result else None
                     poster_path = source.get("poster_path") if source else None
                     if not poster_path:
-                        detail = get_tmdb_json(f"/{content_kind}/{tmdb_id}", params={"language": "en-US"})
+                        detail = self._get_tmdb_json_with_retries(
+                            stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
+                        )
                         time.sleep(sleep_seconds)
                         poster_path = detail.get("poster_path")
                     if poster_path:
@@ -145,7 +173,9 @@ class Command(BaseCommand):
 
                 if needs_synopsis or needs_synopsis_es:
                     if needs_synopsis:
-                        detail_en = get_tmdb_json(f"/{content_kind}/{tmdb_id}", params={"language": "en-US"})
+                        detail_en = self._get_tmdb_json_with_retries(
+                            stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
+                        )
                         time.sleep(sleep_seconds)
                         overview_en = (detail_en.get("overview") or "").strip()
                         if overview_en:
@@ -154,7 +184,9 @@ class Command(BaseCommand):
                             stats["synopsis_updated"] += 1
 
                     if needs_synopsis_es:
-                        detail_es = get_tmdb_json(f"/{content_kind}/{tmdb_id}", params={"language": "es-ES"})
+                        detail_es = self._get_tmdb_json_with_retries(
+                            stats, f"/{content_kind}/{tmdb_id}", params={"language": "es-ES"}
+                        )
                         time.sleep(sleep_seconds)
                         overview_es = (detail_es.get("overview") or "").strip()
                         if overview_es:
@@ -170,11 +202,23 @@ class Command(BaseCommand):
                     movie.save(update_fields=sorted(set(updates)))
             except TMDbServiceError as exc:
                 stats["errors"] += 1
+                if not dry_run:
+                    movie.tmdb_lookup_status = "error"
+                    movie.tmdb_lookup_error = str(exc)[:255]
+                    movie.tmdb_lookup_checked_at = timezone.now()
+                    movie.save(update_fields=["tmdb_lookup_status", "tmdb_lookup_error", "tmdb_lookup_checked_at"])
                 self.stdout.write(self.style.ERROR(f"Movie(id={movie.id}) error TMDb: {exc}"))
             except Exception as exc:  # noqa: BLE001
                 stats["errors"] += 1
+                if not dry_run:
+                    movie.tmdb_lookup_status = "error"
+                    movie.tmdb_lookup_error = str(exc)[:255]
+                    movie.tmdb_lookup_checked_at = timezone.now()
+                    movie.save(update_fields=["tmdb_lookup_status", "tmdb_lookup_error", "tmdb_lookup_checked_at"])
                 self.stdout.write(self.style.ERROR(f"Movie(id={movie.id}) error inesperado: {exc}"))
 
+        elapsed_seconds = max(1e-6, (timezone.now() - started_at).total_seconds())
+        avg_per_minute = stats["processed"] * 60 / elapsed_seconds
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Procesadas: {stats['processed']}")
         self.stdout.write(f"tmdb_id actualizados: {stats['tmdb_id_updated']}")
@@ -184,6 +228,12 @@ class Command(BaseCommand):
         self.stdout.write(f"Omitidas: {stats['skipped']}")
         self.stdout.write(f"Warnings: {stats['warnings']}")
         self.stdout.write(f"Errores: {stats['errors']}")
+        self.stdout.write(f"found: {stats['found']}")
+        self.stdout.write(f"not_found: {stats['not_found']}")
+        self.stdout.write(f"errors: {stats['errors']}")
+        self.stdout.write(f"skipped_not_found: {stats['skipped_not_found']}")
+        self.stdout.write(f"requests_realizadas: {stats['requests_realizadas']}")
+        self.stdout.write(f"promedio registros/minuto: {avg_per_minute:.2f}")
         self.stdout.write(f"first_processed_id: {stats['first_processed_id']}")
         self.stdout.write(f"last_processed_id: {stats['last_processed_id']}")
         next_start_id = (stats["last_processed_id"] + 1) if stats["last_processed_id"] is not None else None
@@ -212,3 +262,16 @@ class Command(BaseCommand):
         if not results:
             return None
         return results[0]
+
+    def _get_tmdb_json_with_retries(self, stats, path, params=None, retries=3, backoff_seconds=0.4):
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                stats["requests_realizadas"] += 1
+                return get_tmdb_json(path, params=params)
+            except TMDbServiceError as exc:
+                last_error = exc
+                if attempt >= retries:
+                    break
+                time.sleep(backoff_seconds * attempt)
+        raise last_error

@@ -7048,6 +7048,8 @@ class EnrichMoviesTmdbCommandTests(TestCase):
 
         movie.refresh_from_db()
         self.assertEqual(movie.tmdb_id, 414906)
+        self.assertEqual(movie.tmdb_lookup_status, "found")
+        self.assertEqual(movie.tmdb_lookup_error, "")
         self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/batman.jpg")
         self.assertEqual(movie.synopsis, "Batman in English")
         self.assertEqual(movie.synopsis_es, "Batman en Español")
@@ -7123,3 +7125,28 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(missing_tmdb.tmdb_id, 155)
         self.assertEqual(with_tmdb.tmdb_id, 27205)
         mock_tmdb.assert_called_once()
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_tmdb_id_skips_not_found_by_default(self, mock_tmdb, _mock_sleep):
+        self._create_movie(imdb_id="tt1234567", tmdb_id=None, tmdb_lookup_status="not_found")
+        call_command("enrich_movies_tmdb", "--only-missing-tmdb-id", "--sleep", "0")
+        mock_tmdb.assert_not_called()
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_retry_not_found_enables_lookup(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(imdb_id="tt1234567", tmdb_id=None, tmdb_lookup_status="not_found")
+        mock_tmdb.return_value = {"movie_results": [{"id": 777}]}
+        call_command("enrich_movies_tmdb", "--only-missing-tmdb-id", "--retry-not-found", "--sleep", "0")
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 777)
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_not_found_is_persisted(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(imdb_id="tt7777777", tmdb_id=None)
+        mock_tmdb.return_value = {"movie_results": []}
+        call_command("enrich_movies_tmdb", "--movie-id", str(movie.id), "--sleep", "0", "--quiet-warnings")
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_lookup_status, "not_found")
