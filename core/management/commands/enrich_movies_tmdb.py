@@ -36,6 +36,7 @@ class Command(BaseCommand):
         parser.add_argument("--quiet-warnings", action="store_true")
         parser.add_argument("--use-local-exports", action="store_true")
         parser.add_argument("--exports-dir", type=str, default="tmdb_exports")
+        parser.add_argument("--local-only", action="store_true")
 
     def handle(self, *args, **options):
         limit = options["limit"]
@@ -53,6 +54,7 @@ class Command(BaseCommand):
         quiet_warnings = options["quiet_warnings"]
         use_local_exports = options["use_local_exports"]
         exports_dir = options["exports_dir"]
+        local_only = options["local_only"]
         started_at = timezone.now()
 
         qs = (
@@ -111,6 +113,8 @@ class Command(BaseCommand):
             "skipped_not_found": 0,
             "requests_realizadas": 0,
             "local_candidates_found": 0,
+            "local_matches_saved": 0,
+            "local_only_skipped": 0,
             "api_requests_avoided": 0,
             "first_processed_id": None,
             "last_processed_id": None,
@@ -163,6 +167,16 @@ class Command(BaseCommand):
                         stats["api_requests_avoided"] += 1
                         # Validación final: se consulta detalle real del candidato para confirmar y extraer metadata.
                     else:
+                        if local_only and use_local_exports:
+                            stats["local_only_skipped"] += 1
+                            stats["api_requests_avoided"] += 1
+                            stats["skipped"] += 1
+                            self._warn(
+                                quiet_warnings,
+                                stats,
+                                f"Movie(id={movie.id}) sin candidato local confiable (modo local-only).",
+                            )
+                            continue
                         # Fallback API tradicional (lógica existente): lookup por imdb_id en /find.
                         find_result = self._get_tmdb_json_with_retries(
                             stats,
@@ -196,6 +210,8 @@ class Command(BaseCommand):
                         updates.append("tmdb_id")
                         updates.extend(["tmdb_lookup_status", "tmdb_lookup_error", "tmdb_lookup_checked_at"])
                         stats["tmdb_id_updated"] += 1
+                        if use_local_exports and local_candidate:
+                            stats["local_matches_saved"] += 1
                         stats["found"] += 1
 
                 if not tmdb_id:
@@ -279,6 +295,8 @@ class Command(BaseCommand):
         self.stdout.write(f"errors: {stats['errors']}")
         self.stdout.write(f"skipped_not_found: {stats['skipped_not_found']}")
         self.stdout.write(f"local_candidates_found: {stats['local_candidates_found']}")
+        self.stdout.write(f"local_matches_saved: {stats['local_matches_saved']}")
+        self.stdout.write(f"local_only_skipped: {stats['local_only_skipped']}")
         self.stdout.write(f"api_requests_avoided: {stats['api_requests_avoided']}")
         self.stdout.write(f"requests_realizadas: {stats['requests_realizadas']}")
         self.stdout.write(f"tiempo_total: {elapsed_seconds:.2f}s")
