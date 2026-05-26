@@ -68,6 +68,9 @@ class Command(BaseCommand):
         stats = defaultdict(int)
         stats["eligible_with_tmdb_id"] = len([m for m in movies if m.tmdb_id])
         updates = []
+        updated_images = 0
+        updated_synopsis = 0
+        updated_synopsis_es = 0
 
         def process(movie):
             result = {"movie": movie, "updates": {}, "stats": defaultdict(int), "error": None, "warning": None}
@@ -141,6 +144,12 @@ class Command(BaseCommand):
                 updates.append(movie)
                 continue
             if r["updates"]:
+                if "image" in r["updates"]:
+                    updated_images += 1
+                if "synopsis" in r["updates"]:
+                    updated_synopsis += 1
+                if "synopsis_es" in r["updates"]:
+                    updated_synopsis_es += 1
                 for f, val in r["updates"].items():
                     setattr(movie, f, val)
                 updates.append(movie)
@@ -150,15 +159,29 @@ class Command(BaseCommand):
 
         elapsed_seconds = max(1e-6, (timezone.now() - started_at).total_seconds())
         total_requests = stats["requests_realizadas"]
+        first_processed_id = movies[0].id if movies else None
+        last_processed_id = movies[-1].id if movies else None
+        next_start_id = (last_processed_id + 1) if last_processed_id is not None else None
+
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Procesadas: {len(movies)}")
         self.stdout.write(f"eligible_with_tmdb_id: {stats['eligible_with_tmdb_id']}")
         self.stdout.write(f"skipped_missing_tmdb_id: {stats['skipped_missing_tmdb_id']}")
+        self.stdout.write(f"Imágenes actualizadas: {updated_images}")
+        self.stdout.write(f"images_updated: {updated_images}")
+        self.stdout.write(f"Synopsis actualizadas: {updated_synopsis}")
+        self.stdout.write(f"synopsis_updated: {updated_synopsis}")
+        self.stdout.write(f"Synopsis_es actualizadas: {updated_synopsis_es}")
+        self.stdout.write(f"synopsis_es_updated: {updated_synopsis_es}")
         self.stdout.write(f"detail_requests_en: {stats['detail_requests_en']}")
         self.stdout.write(f"detail_requests_es: {stats['detail_requests_es']}")
         self.stdout.write(f"total_requests: {total_requests}")
         self.stdout.write(f"registros_por_minuto: {len(movies)*60/elapsed_seconds:.2f}")
         self.stdout.write(f"requests_por_minuto: {total_requests*60/elapsed_seconds:.2f}")
+        self.stdout.write(f"first_processed_id: {first_processed_id}")
+        self.stdout.write(f"last_processed_id: {last_processed_id}")
+        self.stdout.write(f"next_start_id sugerido: {next_start_id}")
+        self.stdout.write(f"errores: {stats['errors']}")
 
     def _resolve_content_kind(self, movie_type):
         if movie_type == Movie.MOVIE:
