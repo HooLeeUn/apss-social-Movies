@@ -7282,6 +7282,52 @@ class EnrichMoviesTmdbCommandTests(TestCase):
 
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_overwrite_synopsis_does_not_clear_synopsis_es_when_tmdb_es_overview_is_empty(
+        self, mock_tmdb, _mock_sleep
+    ):
+        movie = self._create_movie(
+            tmdb_id=414906,
+            synopsis="Existing EN",
+            synopsis_es="Sinopsis ES existente",
+        )
+        mock_tmdb.side_effect = [
+            {"overview": "New EN"},
+            {"overview": "   "},
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--overwrite-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Sinopsis ES existente")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_overwrite_image_does_not_clear_image_when_tmdb_poster_path_is_empty(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(tmdb_id=414906, image="https://existing/image.jpg")
+        mock_tmdb.return_value = {"poster_path": ""}
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--overwrite-image",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://existing/image.jpg")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_use_existing_tmdb_id_only_filters_queryset(self, mock_tmdb, _mock_sleep):
         missing_tmdb = self._create_movie(imdb_id="tt0468569", tmdb_id=None)
         with_tmdb = self._create_movie(imdb_id="tt1375666", tmdb_id=27205, image="")
