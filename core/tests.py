@@ -344,6 +344,36 @@ class EnrichMoviesTmdbLocalExportTests(TestCase):
         self.assertEqual(movie.tmdb_id, 11)
         self.assertIn("requests_realizadas: 4", out.getvalue())
 
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_local_only_skips_api_when_no_local_candidate(self, mock_tmdb_json):
+        movie = self._create_movie(title_english="Unknown Title")
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                "movie_ids_05_25_2026.json.gz",
+                [{"id": 27205, "original_title": "Inception", "popularity": 90.5}],
+            )
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb",
+                "--use-local-exports",
+                "--local-only",
+                "--only-missing-tmdb-id",
+                "--exports-dir",
+                tmp_dir,
+                "--limit",
+                "1",
+                "--sleep",
+                "0",
+                stdout=out,
+            )
+        movie.refresh_from_db()
+        self.assertIsNone(movie.tmdb_id)
+        self.assertNotEqual(movie.tmdb_lookup_status, "not_found")
+        self.assertIn("local_only_skipped: 1", out.getvalue())
+        self.assertIn("api_requests_avoided: 1", out.getvalue())
+        mock_tmdb_json.assert_not_called()
+
 
 class ImportMoviesCommandTests(TestCase):
     def setUp(self):
