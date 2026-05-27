@@ -7351,3 +7351,45 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(with_tmdb.image, "https://image.tmdb.org/t/p/w500/poster.jpg")
         self.assertEqual(mock_tmdb.call_count, 1)
         self.assertNotIn("/find/", mock_tmdb.call_args.args[0])
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_flags_skip_requests_when_movie_is_complete(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            tmdb_id=414906,
+            image="https://image.tmdb.org/t/p/w500/existing.jpg",
+            synopsis="Existing EN",
+            synopsis_es="Sinopsis ES existente",
+        )
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--only-missing-image",
+            "--only-missing-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        self.assertEqual(mock_tmdb.call_count, 0)
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_synopsis_skips_es_request_when_synopsis_es_exists(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(tmdb_id=414906, synopsis="", synopsis_es="Sinopsis ES existente")
+        mock_tmdb.return_value = {"overview": "New EN"}
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--only-missing-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Sinopsis ES existente")
+        self.assertEqual(mock_tmdb.call_count, 1)
