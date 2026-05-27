@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
-from django.db.models import Q
 from django.utils import timezone
 
 from core.models import Movie
@@ -55,10 +54,6 @@ class Command(BaseCommand):
             qs = qs.filter(id=options["movie_id"])
         if options["use_existing_tmdb_id_only"]:
             qs = qs.filter(tmdb_id__isnull=False)
-        if options["only_missing_image"]:
-            qs = qs.filter(Q(image__isnull=True) | Q(image=""))
-        if options["only_missing_synopsis"]:
-            qs = qs.filter(Q(synopsis__isnull=True) | Q(synopsis="") | Q(synopsis_es__isnull=True) | Q(synopsis_es=""))
         if options["only_missing_tmdb_id"]:
             qs = qs.filter(tmdb_id__isnull=True)
         if options["limit"]:
@@ -73,7 +68,7 @@ class Command(BaseCommand):
         updated_synopsis_es = 0
 
         def process(movie):
-            result = {"movie": movie, "updates": {}, "stats": defaultdict(int), "error": None, "warning": None}
+            result = {"movie": movie, "updates": {}, "stats": defaultdict(int), "error": None, "warning": None, "missing_fields": []}
             try:
                 content_kind = self._resolve_content_kind(movie.type)
                 if not content_kind:
@@ -94,6 +89,16 @@ class Command(BaseCommand):
                 needs_image = wants_image and (options["overwrite_image"] or not has_image)
                 needs_synopsis = wants_synopsis and (options["overwrite_synopsis"] or not has_synopsis_en)
                 needs_synopsis_es = wants_synopsis and (options["overwrite_synopsis"] or not has_synopsis_es)
+                missing_fields = []
+                if not has_image:
+                    missing_fields.append("image")
+                if not has_synopsis_en:
+                    missing_fields.append("synopsis")
+                if not has_synopsis_es:
+                    missing_fields.append("synopsis_es")
+                result["missing_fields"] = missing_fields
+                if missing_fields and (options["only_missing_image"] or options["only_missing_synopsis"]):
+                    result["stats"]["missing_candidates_detected"] += 1
 
                 if options["only_missing_image"] and has_image and not options["overwrite_image"]:
                     needs_image = False
@@ -159,6 +164,9 @@ class Command(BaseCommand):
                 results = [f.result() for f in as_completed(futures)]
 
         for r in results:
+            if not options["quiet_warnings"] and r.get("missing_fields"):
+                missing_csv = ",".join(r["missing_fields"])
+                self.stdout.write(f"movie_id={r['movie'].id} missing={missing_csv}")
             for k, v in r["stats"].items():
                 stats[k] += v
             movie = r["movie"]
@@ -202,6 +210,7 @@ class Command(BaseCommand):
         self.stdout.write(f"detail_requests_es: {stats['detail_requests_es']}")
         self.stdout.write(f"skipped_already_complete: {stats['skipped_already_complete']}")
         self.stdout.write(f"requests_saved: {stats['requests_saved']}")
+        self.stdout.write(f"missing_candidates_detected: {stats['missing_candidates_detected']}")
         self.stdout.write(f"requests_skipped_image: {stats['requests_skipped_image']}")
         self.stdout.write(f"requests_skipped_synopsis_en: {stats['requests_skipped_synopsis_en']}")
         self.stdout.write(f"requests_skipped_synopsis_es: {stats['requests_skipped_synopsis_es']}")

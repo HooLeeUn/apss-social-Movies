@@ -7393,3 +7393,37 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(movie.synopsis, "New EN")
         self.assertEqual(movie.synopsis_es, "Sinopsis ES existente")
         self.assertEqual(mock_tmdb.call_count, 1)
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_flags_detect_whitespace_fields(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            tmdb_id=414906,
+            image="   ",
+            synopsis="",
+            synopsis_es="   ",
+        )
+        mock_tmdb.side_effect = [
+            {"poster_path": "/poster.jpg", "overview": "New EN"},
+            {"overview": "Nueva ES"},
+        ]
+        out = io.StringIO()
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--only-missing-image",
+            "--only-missing-synopsis",
+            "--sleep",
+            "0",
+            stdout=out,
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/poster.jpg")
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Nueva ES")
+        self.assertEqual(mock_tmdb.call_count, 2)
+        self.assertIn("missing_candidates_detected: 1", out.getvalue())
+        self.assertIn("missing=image,synopsis,synopsis_es", out.getvalue())
