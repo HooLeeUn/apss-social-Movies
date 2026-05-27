@@ -81,9 +81,11 @@ class Command(BaseCommand):
                 wants_image = not options["only_missing_tmdb_id"]
                 wants_synopsis = not options["only_missing_tmdb_id"]
 
-                if options["only_missing_image"]:
+                # Si ambos flags están activos, ambos tipos de enriquecimiento siguen habilitados;
+                # solo deben escribirse campos actualmente vacíos (salvo overwrite explícito).
+                if options["only_missing_image"] and not options["only_missing_synopsis"]:
                     wants_synopsis = False
-                if options["only_missing_synopsis"]:
+                if options["only_missing_synopsis"] and not options["only_missing_image"]:
                     wants_image = False
 
                 needs_image = wants_image and (options["overwrite_image"] or not has_image)

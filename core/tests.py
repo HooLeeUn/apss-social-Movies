@@ -7394,6 +7394,40 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(movie.synopsis_es, "Sinopsis ES existente")
         self.assertEqual(mock_tmdb.call_count, 1)
 
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_use_existing_tmdb_with_only_missing_image_and_synopsis_requests_en_and_es(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            tmdb_id=414906,
+            image="",
+            synopsis="",
+            synopsis_es="",
+        )
+        mock_tmdb.side_effect = [
+            {"poster_path": "/poster.jpg", "overview": "New EN"},
+            {"overview": "Nueva ES"},
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--use-existing-tmdb-id-only",
+            "--only-missing-image",
+            "--only-missing-synopsis",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/poster.jpg")
+        self.assertEqual(movie.synopsis, "New EN")
+        self.assertEqual(movie.synopsis_es, "Nueva ES")
+        self.assertEqual(mock_tmdb.call_count, 2)
+        self.assertEqual(mock_tmdb.call_args_list[0].kwargs.get("params", {}).get("language"), "en-US")
+        self.assertEqual(mock_tmdb.call_args_list[1].kwargs.get("params", {}).get("language"), "es-ES")
+
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_only_missing_flags_detect_whitespace_fields(self, mock_tmdb, _mock_sleep):
