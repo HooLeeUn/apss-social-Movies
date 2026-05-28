@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 from django.utils import timezone
 
 from core.models import Movie
@@ -54,6 +55,10 @@ class Command(BaseCommand):
             qs = qs.filter(id=options["movie_id"])
         if options["use_existing_tmdb_id_only"]:
             qs = qs.filter(tmdb_id__isnull=False)
+        if options["only_missing_image"]:
+            qs = qs.filter(Q(image__isnull=True) | Q(image=""))
+        if options["only_missing_synopsis"]:
+            qs = qs.filter(Q(synopsis__isnull=True) | Q(synopsis="") | Q(synopsis_es__isnull=True) | Q(synopsis_es=""))
         if options["only_missing_tmdb_id"]:
             qs = qs.filter(tmdb_id__isnull=True)
         if options["limit"]:
@@ -68,55 +73,22 @@ class Command(BaseCommand):
         updated_synopsis_es = 0
 
         def process(movie):
-            result = {"movie": movie, "updates": {}, "stats": defaultdict(int), "error": None, "warning": None, "missing_fields": []}
+            result = {"movie": movie, "updates": {}, "stats": defaultdict(int), "error": None, "warning": None}
             try:
                 content_kind = self._resolve_content_kind(movie.type)
                 if not content_kind:
                     result["stats"]["skipped"] += 1
                     return result
-                has_image = self._has_value(movie.image)
-                has_synopsis_en = self._has_value(movie.synopsis)
-                has_synopsis_es = self._has_value(movie.synopsis_es)
-
-                wants_image = not options["only_missing_tmdb_id"]
-                wants_synopsis = not options["only_missing_tmdb_id"]
-
-                # Si ambos flags están activos, ambos tipos de enriquecimiento siguen habilitados;
-                # solo deben escribirse campos actualmente vacíos (salvo overwrite explícito).
-                if options["only_missing_image"] and not options["only_missing_synopsis"]:
-                    wants_synopsis = False
-                if options["only_missing_synopsis"] and not options["only_missing_image"]:
-                    wants_image = False
-
-                needs_image = wants_image and (options["overwrite_image"] or not has_image)
-                needs_synopsis = wants_synopsis and (options["overwrite_synopsis"] or not has_synopsis_en)
-                needs_synopsis_es = wants_synopsis and (options["overwrite_synopsis"] or not has_synopsis_es)
-                missing_fields = []
-                if not has_image:
-                    missing_fields.append("image")
-                if not has_synopsis_en:
-                    missing_fields.append("synopsis")
-                if not has_synopsis_es:
-                    missing_fields.append("synopsis_es")
-                result["missing_fields"] = missing_fields
-                if missing_fields and (options["only_missing_image"] or options["only_missing_synopsis"]):
-                    result["stats"]["missing_candidates_detected"] += 1
-
-                if options["only_missing_image"] and has_image and not options["overwrite_image"]:
+                needs_image = (not options["only_missing_tmdb_id"]) and (options["overwrite_image"] or not movie.image)
+                needs_synopsis = (not options["only_missing_tmdb_id"]) and (options["overwrite_synopsis"] or not movie.synopsis)
+                needs_synopsis_es = (not options["only_missing_tmdb_id"]) and (options["overwrite_synopsis"] or not movie.synopsis_es)
+                if options["only_missing_image"] and movie.image:
                     needs_image = False
-                    result["stats"]["requests_skipped_image"] += 1
-                if options["only_missing_synopsis"] and has_synopsis_en and not options["overwrite_synopsis"]:
+                if options["only_missing_synopsis"] and movie.synopsis and movie.synopsis_es:
                     needs_synopsis = False
-                    result["stats"]["requests_skipped_synopsis_en"] += 1
-                if options["only_missing_synopsis"] and has_synopsis_es and not options["overwrite_synopsis"]:
                     needs_synopsis_es = False
-                    result["stats"]["requests_skipped_synopsis_es"] += 1
-
                 if not (needs_image or needs_synopsis or needs_synopsis_es):
-                    if has_image and has_synopsis_en and has_synopsis_es:
-                        result["stats"]["skipped_already_complete"] += 1
                     result["stats"]["skipped"] += 1
-                    result["stats"]["requests_saved"] += 2
                     return result
                 tmdb_id = movie.tmdb_id
                 if not tmdb_id:
@@ -135,8 +107,6 @@ class Command(BaseCommand):
                     result["stats"]["detail_requests_es"] += 1
                     if sleep_seconds:
                         time.sleep(sleep_seconds)
-                else:
-                    result["stats"]["requests_saved"] += 1
                 if needs_image and detail_en:
                     poster_path = detail_en.get("poster_path")
                     if poster_path:
@@ -149,8 +119,6 @@ class Command(BaseCommand):
                     ov = (detail_es.get("overview") or "").strip()
                     if ov:
                         result["updates"]["synopsis_es"] = ov
-                if not (needs_image or needs_synopsis):
-                    result["stats"]["requests_saved"] += 1
                 if not result["updates"]:
                     result["stats"]["skipped"] += 1
             except Exception as exc:
@@ -166,9 +134,6 @@ class Command(BaseCommand):
                 results = [f.result() for f in as_completed(futures)]
 
         for r in results:
-            if not options["quiet_warnings"] and r.get("missing_fields"):
-                missing_csv = ",".join(r["missing_fields"])
-                self.stdout.write(f"movie_id={r['movie'].id} missing={missing_csv}")
             for k, v in r["stats"].items():
                 stats[k] += v
             movie = r["movie"]
@@ -210,12 +175,6 @@ class Command(BaseCommand):
         self.stdout.write(f"synopsis_es_updated: {updated_synopsis_es}")
         self.stdout.write(f"detail_requests_en: {stats['detail_requests_en']}")
         self.stdout.write(f"detail_requests_es: {stats['detail_requests_es']}")
-        self.stdout.write(f"skipped_already_complete: {stats['skipped_already_complete']}")
-        self.stdout.write(f"requests_saved: {stats['requests_saved']}")
-        self.stdout.write(f"missing_candidates_detected: {stats['missing_candidates_detected']}")
-        self.stdout.write(f"requests_skipped_image: {stats['requests_skipped_image']}")
-        self.stdout.write(f"requests_skipped_synopsis_en: {stats['requests_skipped_synopsis_en']}")
-        self.stdout.write(f"requests_skipped_synopsis_es: {stats['requests_skipped_synopsis_es']}")
         self.stdout.write(f"total_requests: {total_requests}")
         self.stdout.write(f"registros_por_minuto: {len(movies)*60/elapsed_seconds:.2f}")
         self.stdout.write(f"requests_por_minuto: {total_requests*60/elapsed_seconds:.2f}")
@@ -273,6 +232,3 @@ class Command(BaseCommand):
     def _normalize_title(self, title):
         value = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii")
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-
-    def _has_value(self, value):
-        return bool((value or "").strip())
