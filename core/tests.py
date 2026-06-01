@@ -7351,3 +7351,57 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         self.assertEqual(with_tmdb.image, "https://image.tmdb.org/t/p/w500/poster.jpg")
         self.assertEqual(mock_tmdb.call_count, 1)
         self.assertNotIn("/find/", mock_tmdb.call_args.args[0])
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_batch_use_existing_tmdb_id_only_only_missing_image_uses_movie_id_logic(
+        self, mock_tmdb, _mock_sleep
+    ):
+        movie = self._create_movie(tmdb_id=96721, image="", synopsis="Existing EN", synopsis_es="Existente ES")
+        mock_tmdb.return_value = {"poster_path": "/rush.jpg", "overview": "Unused overview"}
+
+        out = io.StringIO()
+        call_command(
+            "enrich_movies_tmdb",
+            "--use-existing-tmdb-id-only",
+            "--only-missing-image",
+            "--start-id",
+            str(movie.id),
+            "--limit",
+            "1",
+            "--workers",
+            "4",
+            "--sleep",
+            "0",
+            "--quiet-warnings",
+            stdout=out,
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/rush.jpg")
+        self.assertIn("images_updated: 1", out.getvalue())
+        self.assertIn("workers_forced_to_main_thread: 1", out.getvalue())
+        mock_tmdb.assert_called_once_with("/movie/96721", params={"language": "en-US"})
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_verify_persistence_reports_no_mismatch_after_batch_image_save(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(tmdb_id=96721, image="")
+        mock_tmdb.return_value = {"poster_path": "/persisted.jpg"}
+
+        out = io.StringIO()
+        call_command(
+            "enrich_movies_tmdb",
+            "--use-existing-tmdb-id-only",
+            "--only-missing-image",
+            "--movie-id",
+            str(movie.id),
+            "--verify-persistence",
+            "--sleep",
+            "0",
+            stdout=out,
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/persisted.jpg")
+        self.assertIn("persistence_mismatches: 0", out.getvalue())
