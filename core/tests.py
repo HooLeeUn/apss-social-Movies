@@ -7385,6 +7385,37 @@ class EnrichMoviesTmdbCommandTests(TestCase):
 
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_only_missing_image_does_not_request_es_or_update_synopsis(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(tmdb_id=96721, image="", synopsis="", synopsis_es="")
+        mock_tmdb.side_effect = [
+            {"poster_path": "/rush.jpg", "overview": "Should not update EN"},
+            {"overview": "No debe usarse ES"},
+        ]
+
+        out = io.StringIO()
+        call_command(
+            "enrich_movies_tmdb",
+            "--use-existing-tmdb-id-only",
+            "--only-missing-image",
+            "--movie-id",
+            str(movie.id),
+            "--sleep",
+            "0",
+            stdout=out,
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/rush.jpg")
+        self.assertEqual(movie.synopsis, "")
+        self.assertEqual(movie.synopsis_es, "")
+        mock_tmdb.assert_called_once_with("/movie/96721", params={"language": "en-US"})
+        self.assertNotIn("es-ES", str(mock_tmdb.call_args_list))
+        self.assertIn("detail_requests_en: 1", out.getvalue())
+        self.assertIn("detail_requests_es: 0", out.getvalue())
+        self.assertIn("requests_realizadas: 1", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_verify_persistence_reports_no_mismatch_after_batch_image_save(self, mock_tmdb, _mock_sleep):
         movie = self._create_movie(tmdb_id=96721, image="")
         mock_tmdb.return_value = {"poster_path": "/persisted.jpg"}

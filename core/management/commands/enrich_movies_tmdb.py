@@ -195,9 +195,15 @@ class Command(BaseCommand):
                 stats["skipped"] += 1
                 return result
 
-            needs_image = (not options["only_missing_tmdb_id"]) and (options["overwrite_image"] or not movie.image)
-            needs_synopsis = (not options["only_missing_tmdb_id"]) and (options["overwrite_synopsis"] or not movie.synopsis)
-            needs_synopsis_es = (not options["only_missing_tmdb_id"]) and (options["overwrite_synopsis"] or not movie.synopsis_es)
+            wants_metadata = not options["only_missing_tmdb_id"]
+            wants_synopsis = wants_metadata and (
+                options["overwrite_synopsis"]
+                or options["only_missing_synopsis"]
+                or not options["only_missing_image"]
+            )
+            needs_image = wants_metadata and (options["overwrite_image"] or not movie.image)
+            needs_synopsis = wants_synopsis and (options["overwrite_synopsis"] or not movie.synopsis)
+            needs_synopsis_es = wants_synopsis and (options["overwrite_synopsis"] or not movie.synopsis_es)
             if options["only_missing_image"]:
                 needs_image = not movie.image
             if options["only_missing_synopsis"]:
