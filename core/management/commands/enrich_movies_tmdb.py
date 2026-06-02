@@ -40,6 +40,9 @@ class Command(BaseCommand):
         parser.add_argument("--exports-dir", type=str, default="tmdb_exports")
         parser.add_argument("--local-only", action="store_true")
         parser.add_argument("--verify-persistence", action="store_true")
+        parser.add_argument("--second-pass-relaxed-match", action="store_true")
+        parser.add_argument("--year-tolerance", type=int, default=0)
+        parser.add_argument("--min-match-score", type=int, default=80)
 
     def handle(self, *args, **options):
         sleep_seconds = max(0.0, options["sleep"])
@@ -56,7 +59,7 @@ class Command(BaseCommand):
                 )
 
         local_index = None
-        if options["use_local_exports"]:
+        if options["use_local_exports"] or options["second_pass_relaxed_match"]:
             local_index = self._build_local_export_index(options["exports_dir"])
 
         movies = list(self._get_movies_queryset(options))
@@ -134,6 +137,10 @@ class Command(BaseCommand):
         self.stdout.write(f"last_processed_id: {last_processed_id}")
         self.stdout.write(f"next_start_id sugerido: {next_start_id}")
         self.stdout.write(f"local_candidates_found: {stats['local_candidates_found']}")
+        self.stdout.write(f"second_pass_candidates: {stats['second_pass_candidates']}")
+        self.stdout.write(f"second_pass_matched: {stats['second_pass_matched']}")
+        self.stdout.write(f"second_pass_rejected: {stats['second_pass_rejected']}")
+        self.stdout.write(f"second_pass_ambiguous: {stats['second_pass_ambiguous']}")
         self.stdout.write(f"api_requests_avoided: {stats['api_requests_avoided']}")
         self.stdout.write(f"local_only_skipped: {stats['local_only_skipped']}")
         self.stdout.write(f"persistence_mismatches: {stats['persistence_mismatches']}")
@@ -148,6 +155,8 @@ class Command(BaseCommand):
             "title_english",
             "title_spanish",
             "release_year",
+            "director",
+            "cast_members",
             "type",
             "image",
             "synopsis",
@@ -162,6 +171,8 @@ class Command(BaseCommand):
             qs = qs.filter(id=options["movie_id"])
         if options["use_existing_tmdb_id_only"]:
             qs = qs.filter(tmdb_id__isnull=False)
+        elif options["second_pass_relaxed_match"]:
+            qs = qs.filter(tmdb_id__isnull=True)
         elif options["only_missing_tmdb_id"]:
             qs = qs.filter(tmdb_id__isnull=True).exclude(imdb_id__isnull=True).exclude(imdb_id="")
             if not options["retry_not_found"]:
@@ -191,7 +202,11 @@ class Command(BaseCommand):
                 return result
 
             needs_tmdb_id = not movie.tmdb_id and not options["use_existing_tmdb_id_only"]
-            if needs_tmdb_id and not self._can_retry_lookup(movie, options):
+            if (
+                needs_tmdb_id
+                and not options["second_pass_relaxed_match"]
+                and not self._can_retry_lookup(movie, options)
+            ):
                 stats["skipped"] += 1
                 return result
 
@@ -210,13 +225,17 @@ class Command(BaseCommand):
                 needs_synopsis = not movie.synopsis
                 needs_synopsis_es = not movie.synopsis_es
 
-            if options["only_missing_tmdb_id"]:
+            if options["only_missing_tmdb_id"] or options["second_pass_relaxed_match"]:
                 needs_image = needs_synopsis = needs_synopsis_es = False
 
             tmdb_id = movie.tmdb_id
             find_candidate = None
             if needs_tmdb_id:
                 find_candidate = self._resolve_tmdb_candidate(movie, content_kind, options, stats, local_index)
+                if not find_candidate and options["second_pass_relaxed_match"]:
+                    find_candidate = self._resolve_second_pass_candidate(
+                        movie, content_kind, options, stats, local_index, sleep_seconds
+                    )
                 if not find_candidate:
                     if not options["local_only"]:
                         result["updates"].update(
@@ -230,7 +249,7 @@ class Command(BaseCommand):
                     stats["skipped"] += 1
                     return result
                 tmdb_id = find_candidate.get("tmdb_id") or find_candidate.get("id")
-                if tmdb_id:
+                if tmdb_id and not movie.tmdb_id:
                     result["updates"].update(
                         {
                             "tmdb_id": tmdb_id,
@@ -239,6 +258,12 @@ class Command(BaseCommand):
                             "tmdb_lookup_checked_at": timezone.now(),
                         }
                     )
+                    if options["dry_run"] and find_candidate.get("second_pass"):
+                        self.stdout.write(
+                            "DRY-RUN second pass asignaría "
+                            f"Movie(id={movie.id}) -> tmdb_id={tmdb_id} "
+                            f"score={find_candidate.get('score')} title={find_candidate.get('title')}"
+                        )
 
             if not tmdb_id:
                 stats["skipped_missing_tmdb_id"] += 1
@@ -293,7 +318,11 @@ class Command(BaseCommand):
         return True
 
     def _resolve_tmdb_candidate(self, movie, content_kind, options, stats, local_index):
-        local_candidate = self._find_local_candidate(movie, content_kind, local_index) if local_index is not None else None
+        local_candidate = (
+            self._find_local_candidate(movie, content_kind, local_index)
+            if options["use_local_exports"] and local_index is not None
+            else None
+        )
         if local_candidate:
             stats["local_candidates_found"] += 1
             stats["api_requests_avoided"] += 1
@@ -328,6 +357,200 @@ class Command(BaseCommand):
             if candidates:
                 return candidates[0]
         return None
+
+    def _resolve_second_pass_candidate(self, movie, content_kind, options, stats, local_index, sleep_seconds):
+        if movie.tmdb_id:
+            return None
+
+        candidates = self._collect_second_pass_candidates(movie, content_kind, options, stats, local_index)
+        if not candidates:
+            stats["second_pass_rejected"] += 1
+            return None
+
+        scored_candidates = []
+        seen_ids = set()
+        for candidate in candidates:
+            tmdb_id = candidate.get("tmdb_id") or candidate.get("id")
+            if not tmdb_id or tmdb_id in seen_ids:
+                continue
+            seen_ids.add(tmdb_id)
+            stats["second_pass_candidates"] += 1
+            scored = self._score_second_pass_candidate(movie, content_kind, tmdb_id, candidate, options, stats)
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+            if scored:
+                scored_candidates.append(scored)
+
+        if not scored_candidates:
+            stats["second_pass_rejected"] += 1
+            return None
+
+        scored_candidates.sort(key=lambda item: item["score"], reverse=True)
+        best = scored_candidates[0]
+        min_score = max(0, options["min_match_score"])
+        if best["score"] < min_score:
+            stats["second_pass_rejected"] += 1
+            return None
+
+        if len(scored_candidates) > 1:
+            runner_up = scored_candidates[1]
+            if runner_up["score"] >= min_score and best["score"] - runner_up["score"] < 10:
+                stats["second_pass_ambiguous"] += 1
+                if not options["quiet_warnings"]:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "Second pass ambiguous: "
+                            f"Movie(id={movie.id}) top={best['tmdb_id']} score={best['score']} "
+                            f"runner_up={runner_up['tmdb_id']} score={runner_up['score']}"
+                        )
+                    )
+                return None
+
+        stats["second_pass_matched"] += 1
+        return {
+            "tmdb_id": best["tmdb_id"],
+            "title": best["title"],
+            "score": best["score"],
+            "second_pass": True,
+        }
+
+    def _collect_second_pass_candidates(self, movie, content_kind, options, stats, local_index):
+        titles = [self._normalize_title(title) for title in (movie.title_english, movie.title_spanish)]
+        titles = [title for title in titles if title]
+        candidates = []
+        if local_index is not None:
+            for title in titles:
+                candidates.extend(local_index.get(content_kind, {}).get(title) or [])
+
+        if not options["local_only"]:
+            search_path = f"/search/{content_kind}"
+            for raw_title in (movie.title_english, movie.title_spanish):
+                query = (raw_title or "").strip()
+                if not query:
+                    continue
+                params = {"query": query, "include_adult": "false", "language": "en-US"}
+                data = self._get_tmdb_json_with_retries(stats, search_path, params=params)
+                for row in data.get("results") or []:
+                    candidates.append(
+                        {
+                            "tmdb_id": row.get("id"),
+                            "title": (
+                                row.get("title")
+                                or row.get("name")
+                                or row.get("original_title")
+                                or row.get("original_name")
+                            ),
+                            "release_date": row.get("release_date") or row.get("first_air_date"),
+                            "media_type": content_kind,
+                        }
+                    )
+        return candidates
+
+    def _score_second_pass_candidate(self, movie, content_kind, tmdb_id, candidate, options, stats):
+        try:
+            detail = self._get_tmdb_json_with_retries(
+                stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
+            )
+            credits = self._get_tmdb_json_with_retries(stats, f"/{content_kind}/{tmdb_id}/credits")
+        except TMDbServiceError:
+            return None
+
+        local_titles = {
+            self._normalize_title(title)
+            for title in (movie.title_english, movie.title_spanish)
+            if self._normalize_title(title)
+        }
+        candidate_titles = {
+            self._normalize_title(title)
+            for title in (
+                candidate.get("title"),
+                detail.get("title"),
+                detail.get("original_title"),
+                detail.get("name"),
+                detail.get("original_name"),
+            )
+            if self._normalize_title(title)
+        }
+
+        score = 0
+        reasons = []
+        if local_titles & candidate_titles:
+            score += 40
+            reasons.append("title_exact=40")
+
+        candidate_year = self._extract_tmdb_year(detail, candidate)
+        year_tolerance = max(0, options["year_tolerance"])
+        if (
+            movie.release_year
+            and candidate_year
+            and abs(movie.release_year - candidate_year) <= year_tolerance
+        ):
+            score += 10
+            reasons.append("year=10")
+
+        local_director = self._normalize_person(movie.director)
+        tmdb_directors = self._extract_tmdb_directors(detail, credits, content_kind)
+        if local_director and local_director in tmdb_directors:
+            score += 30
+            reasons.append("director=30")
+
+        local_cast = self._split_people(movie.cast_members)
+        tmdb_cast = {
+            self._normalize_person(person.get("name"))
+            for person in credits.get("cast") or []
+            if self._normalize_person(person.get("name"))
+        }
+        cast_matches = len(local_cast & tmdb_cast)
+        if cast_matches >= 3:
+            score += 35
+            reasons.append("cast_3_plus=35")
+        elif cast_matches >= 2:
+            score += 25
+            reasons.append("cast_2_plus=25")
+
+        return {
+            "tmdb_id": tmdb_id,
+            "score": score,
+            "title": detail.get("title") or detail.get("name") or candidate.get("title") or "",
+            "reasons": reasons,
+            "cast_matches": cast_matches,
+            "candidate_year": candidate_year,
+        }
+
+    def _extract_tmdb_year(self, detail, candidate):
+        date_value = (
+            detail.get("release_date")
+            or detail.get("first_air_date")
+            or candidate.get("release_date")
+            or candidate.get("first_air_date")
+            or ""
+        )
+        match = re.match(r"^(\d{4})", date_value)
+        return int(match.group(1)) if match else None
+
+    def _extract_tmdb_directors(self, detail, credits, content_kind):
+        directors = {
+            self._normalize_person(person.get("name"))
+            for person in credits.get("crew") or []
+            if person.get("job") == "Director" and self._normalize_person(person.get("name"))
+        }
+        if content_kind == "tv":
+            directors.update(
+                self._normalize_person(person.get("name"))
+                for person in detail.get("created_by") or []
+                if self._normalize_person(person.get("name"))
+            )
+        return directors
+
+    def _split_people(self, people):
+        return {
+            normalized
+            for normalized in (self._normalize_person(person) for person in re.split(r"[,;|\n]+", people or ""))
+            if normalized
+        }
+
+    def _normalize_person(self, value):
+        return self._normalize_title(value)
 
     def _poster_url(self, poster_path):
         return f"{self.IMAGE_BASE_URL}/{poster_path.lstrip('/')}"

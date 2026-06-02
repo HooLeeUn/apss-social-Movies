@@ -7436,3 +7436,103 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         movie.refresh_from_db()
         self.assertEqual(movie.image, "https://image.tmdb.org/t/p/w500/persisted.jpg")
         self.assertIn("persistence_mismatches: 0", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_second_pass_relaxed_match_assigns_only_empty_tmdb_id(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            title_english="City of God",
+            title_spanish="Ciudad de Dios",
+            release_year=2002,
+            director="Fernando Meirelles",
+            cast_members="Alexandre Rodrigues, Leandro Firmino, Phellipe Haagensen",
+            imdb_id="",
+            tmdb_id=None,
+            image="https://existing/image.jpg",
+            synopsis="Existing EN",
+            synopsis_es="Existente ES",
+        )
+        mock_tmdb.side_effect = [
+            {"results": [{"id": 598, "title": "City of God", "release_date": "2003-01-17"}]},
+            {"results": []},
+            {"title": "City of God", "original_title": "Cidade de Deus", "release_date": "2003-01-17"},
+            {
+                "crew": [{"job": "Director", "name": "Fernando Meirelles"}],
+                "cast": [
+                    {"name": "Alexandre Rodrigues"},
+                    {"name": "Leandro Firmino"},
+                    {"name": "Phellipe Haagensen"},
+                ],
+            },
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--second-pass-relaxed-match",
+            "--year-tolerance",
+            "2",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 598)
+        self.assertEqual(movie.image, "https://existing/image.jpg")
+        self.assertEqual(movie.synopsis, "Existing EN")
+        self.assertEqual(movie.synopsis_es, "Existente ES")
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_second_pass_relaxed_match_dry_run_does_not_save_tmdb_id(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            title_english="City of God",
+            title_spanish="Ciudad de Dios",
+            release_year=2002,
+            director="Fernando Meirelles",
+            cast_members="Alexandre Rodrigues, Leandro Firmino",
+            imdb_id="",
+            tmdb_id=None,
+        )
+        mock_tmdb.side_effect = [
+            {"results": [{"id": 598, "title": "City of God", "release_date": "2003-01-17"}]},
+            {"results": []},
+            {"title": "City of God", "release_date": "2003-01-17"},
+            {
+                "crew": [{"job": "Director", "name": "Fernando Meirelles"}],
+                "cast": [{"name": "Alexandre Rodrigues"}, {"name": "Leandro Firmino"}],
+            },
+        ]
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--second-pass-relaxed-match",
+            "--year-tolerance",
+            "2",
+            "--dry-run",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertIsNone(movie.tmdb_id)
+
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_second_pass_relaxed_match_does_not_process_existing_tmdb_id(self, mock_tmdb):
+        movie = self._create_movie(tmdb_id=598)
+
+        call_command(
+            "enrich_movies_tmdb",
+            "--movie-id",
+            str(movie.id),
+            "--second-pass-relaxed-match",
+            "--sleep",
+            "0",
+        )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 598)
+        mock_tmdb.assert_not_called()
