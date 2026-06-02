@@ -138,6 +138,9 @@ class Command(BaseCommand):
         self.stdout.write(f"next_start_id sugerido: {next_start_id}")
         self.stdout.write(f"local_candidates_found: {stats['local_candidates_found']}")
         self.stdout.write(f"second_pass_candidates: {stats['second_pass_candidates']}")
+        self.stdout.write(f"second_pass_local_candidates: {stats['second_pass_local_candidates']}")
+        self.stdout.write(f"second_pass_api_validations: {stats['second_pass_api_validations']}")
+        self.stdout.write(f"second_pass_no_local_candidate: {stats['second_pass_no_local_candidate']}")
         self.stdout.write(f"second_pass_matched: {stats['second_pass_matched']}")
         self.stdout.write(f"second_pass_rejected: {stats['second_pass_rejected']}")
         self.stdout.write(f"second_pass_ambiguous: {stats['second_pass_ambiguous']}")
@@ -231,11 +234,12 @@ class Command(BaseCommand):
             tmdb_id = movie.tmdb_id
             find_candidate = None
             if needs_tmdb_id:
-                find_candidate = self._resolve_tmdb_candidate(movie, content_kind, options, stats, local_index)
-                if not find_candidate and options["second_pass_relaxed_match"]:
+                if options["second_pass_relaxed_match"]:
                     find_candidate = self._resolve_second_pass_candidate(
                         movie, content_kind, options, stats, local_index, sleep_seconds
                     )
+                else:
+                    find_candidate = self._resolve_tmdb_candidate(movie, content_kind, options, stats, local_index)
                 if not find_candidate:
                     if not options["local_only"]:
                         result["updates"].update(
@@ -258,7 +262,11 @@ class Command(BaseCommand):
                             "tmdb_lookup_checked_at": timezone.now(),
                         }
                     )
-                    if options["dry_run"] and find_candidate.get("second_pass"):
+                    if (
+                        options["dry_run"]
+                        and find_candidate.get("second_pass")
+                        and not options["quiet_warnings"]
+                    ):
                         self.stdout.write(
                             "DRY-RUN second pass asignaría "
                             f"Movie(id={movie.id}) -> tmdb_id={tmdb_id} "
@@ -418,9 +426,24 @@ class Command(BaseCommand):
         titles = [self._normalize_title(title) for title in (movie.title_english, movie.title_spanish)]
         titles = [title for title in titles if title]
         candidates = []
+        seen_local_ids = set()
+        if options["use_local_exports"]:
+            if local_index is not None:
+                for title in titles:
+                    source_candidates = local_index.get(content_kind, {}).get(title) or []
+                    self._append_reasonable_second_pass_local_candidates(
+                        movie, source_candidates, options, stats, candidates, seen_local_ids
+                    )
+            if not candidates:
+                stats["second_pass_no_local_candidate"] += 1
+            return candidates
+
         if local_index is not None:
             for title in titles:
-                candidates.extend(local_index.get(content_kind, {}).get(title) or [])
+                source_candidates = local_index.get(content_kind, {}).get(title) or []
+                self._append_reasonable_second_pass_local_candidates(
+                    movie, source_candidates, options, stats, candidates, seen_local_ids
+                )
 
         if not options["local_only"]:
             search_path = f"/search/{content_kind}"
@@ -446,7 +469,26 @@ class Command(BaseCommand):
                     )
         return candidates
 
+    def _append_reasonable_second_pass_local_candidates(
+        self, movie, source_candidates, options, stats, candidates, seen_local_ids
+    ):
+        for candidate in source_candidates:
+            tmdb_id = candidate.get("tmdb_id") or candidate.get("id")
+            if not tmdb_id or tmdb_id in seen_local_ids:
+                continue
+            if self._is_reasonable_second_pass_local_candidate(movie, candidate, options):
+                seen_local_ids.add(tmdb_id)
+                candidates.append(candidate)
+                stats["second_pass_local_candidates"] += 1
+
+    def _is_reasonable_second_pass_local_candidate(self, movie, candidate, options):
+        candidate_year = self._extract_tmdb_year({}, candidate)
+        if movie.release_year and candidate_year:
+            return abs(movie.release_year - candidate_year) <= max(0, options["year_tolerance"])
+        return True
+
     def _score_second_pass_candidate(self, movie, content_kind, tmdb_id, candidate, options, stats):
+        stats["second_pass_api_validations"] += 1
         try:
             detail = self._get_tmdb_json_with_retries(
                 stats, f"/{content_kind}/{tmdb_id}", params={"language": "en-US"}
@@ -464,6 +506,9 @@ class Command(BaseCommand):
             self._normalize_title(title)
             for title in (
                 candidate.get("title"),
+                candidate.get("original_title"),
+                candidate.get("name"),
+                candidate.get("original_name"),
                 detail.get("title"),
                 detail.get("original_title"),
                 detail.get("name"),
@@ -589,18 +634,32 @@ class Command(BaseCommand):
                     if not line:
                         continue
                     row = json.loads(line)
-                    title = (row.get("original_title") or row.get("name") or "").strip()
-                    if not title:
+                    title_values = [
+                        row.get("title"),
+                        row.get("original_title"),
+                        row.get("name"),
+                        row.get("original_name"),
+                    ]
+                    title_values = [title.strip() for title in title_values if title and title.strip()]
+                    if not title_values:
                         continue
-                    normalized = self._normalize_title(title)
-                    index[media_type][normalized].append(
-                        {
-                            "tmdb_id": row.get("id"),
-                            "title": title,
-                            "popularity": row.get("popularity", 0.0),
-                            "media_type": media_type,
-                        }
-                    )
+                    candidate = {
+                        "tmdb_id": row.get("id"),
+                        "title": title_values[0],
+                        "original_title": row.get("original_title"),
+                        "name": row.get("name"),
+                        "original_name": row.get("original_name"),
+                        "release_date": row.get("release_date"),
+                        "first_air_date": row.get("first_air_date"),
+                        "popularity": row.get("popularity", 0.0),
+                        "media_type": media_type,
+                    }
+                    seen_normalized_titles = set()
+                    for title in title_values:
+                        normalized = self._normalize_title(title)
+                        if normalized and normalized not in seen_normalized_titles:
+                            seen_normalized_titles.add(normalized)
+                            index[media_type][normalized].append(candidate)
         for media_type in ("movie", "tv"):
             for normalized_title in index[media_type]:
                 index[media_type][normalized_title].sort(

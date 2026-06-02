@@ -7134,6 +7134,12 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         defaults.update(kwargs)
         return Movie.objects.create(**defaults)
 
+    def _write_export(self, directory, filename, rows):
+        file_path = Path(directory) / filename
+        with gzip.open(file_path, "wt", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_enriches_tmdb_image_and_synopsis(self, mock_tmdb, _mock_sleep):
@@ -7519,6 +7525,120 @@ class EnrichMoviesTmdbCommandTests(TestCase):
 
         movie.refresh_from_db()
         self.assertIsNone(movie.tmdb_id)
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_second_pass_relaxed_match_uses_local_export_city_of_god_with_year_tolerance(self, mock_tmdb, _mock_sleep):
+        movie = self._create_movie(
+            title_english="City of God",
+            title_spanish="Ciudad de Dios",
+            release_year=2002,
+            director="Fernando Meirelles",
+            cast_members="Alexandre Rodrigues, Leandro Firmino, Phellipe Haagensen",
+            imdb_id="",
+            tmdb_id=None,
+            image="https://existing/image.jpg",
+            synopsis="Existing EN",
+            synopsis_es="Existente ES",
+        )
+        mock_tmdb.side_effect = [
+            {"title": "City of God", "original_title": "Cidade de Deus", "release_date": "2003-01-17"},
+            {
+                "crew": [{"job": "Director", "name": "Fernando Meirelles"}],
+                "cast": [
+                    {"name": "Alexandre Rodrigues"},
+                    {"name": "Leandro Firmino"},
+                    {"name": "Phellipe Haagensen"},
+                ],
+            },
+        ]
+
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                "movie_ids_05_25_2026.json.gz",
+                [
+                    {
+                        "id": 598,
+                        "title": "City of God",
+                        "original_title": "Cidade de Deus",
+                        "release_date": "2003-01-17",
+                        "popularity": 25.0,
+                    }
+                ],
+            )
+            self._write_export(tmp_dir, "tv_series_ids_05_25_2026.json.gz", [])
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb",
+                "--movie-id",
+                str(movie.id),
+                "--second-pass-relaxed-match",
+                "--use-local-exports",
+                "--exports-dir",
+                tmp_dir,
+                "--year-tolerance",
+                "2",
+                "--sleep",
+                "0",
+                "--quiet-warnings",
+                stdout=out,
+            )
+
+        movie.refresh_from_db()
+        self.assertEqual(movie.tmdb_id, 598)
+        self.assertEqual(movie.image, "https://existing/image.jpg")
+        self.assertEqual(movie.synopsis, "Existing EN")
+        self.assertEqual(movie.synopsis_es, "Existente ES")
+        self.assertEqual(mock_tmdb.call_count, 2)
+        self.assertEqual(mock_tmdb.call_args_list[0].args[0], "/movie/598")
+        self.assertEqual(mock_tmdb.call_args_list[1].args[0], "/movie/598/credits")
+        self.assertNotIn("/search/", str(mock_tmdb.call_args_list))
+        self.assertIn("second_pass_local_candidates: 1", out.getvalue())
+        self.assertIn("second_pass_api_validations: 1", out.getvalue())
+        self.assertIn("second_pass_no_local_candidate: 0", out.getvalue())
+        self.assertIn("second_pass_matched: 1", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_second_pass_relaxed_match_with_local_exports_skips_api_without_local_candidate(self, mock_tmdb):
+        movie = self._create_movie(
+            title_english="No Local Match",
+            title_spanish="Sin Match Local",
+            release_year=2002,
+            imdb_id="",
+            tmdb_id=None,
+        )
+
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                "movie_ids_05_25_2026.json.gz",
+                [{"id": 598, "title": "City of God", "release_date": "2003-01-17"}],
+            )
+            self._write_export(tmp_dir, "tv_series_ids_05_25_2026.json.gz", [])
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb",
+                "--movie-id",
+                str(movie.id),
+                "--second-pass-relaxed-match",
+                "--use-local-exports",
+                "--exports-dir",
+                tmp_dir,
+                "--year-tolerance",
+                "2",
+                "--sleep",
+                "0",
+                "--quiet-warnings",
+                stdout=out,
+            )
+
+        movie.refresh_from_db()
+        self.assertIsNone(movie.tmdb_id)
+        mock_tmdb.assert_not_called()
+        self.assertIn("second_pass_local_candidates: 0", out.getvalue())
+        self.assertIn("second_pass_api_validations: 0", out.getvalue())
+        self.assertIn("second_pass_no_local_candidate: 1", out.getvalue())
 
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_second_pass_relaxed_match_does_not_process_existing_tmdb_id(self, mock_tmdb):
