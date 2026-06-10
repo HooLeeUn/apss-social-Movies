@@ -34,6 +34,7 @@ from .serializers import (
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
     FriendRequestUserSummarySerializer,
+    MovieWatchProvidersSerializer,
 )
 from .models import (
     AppBranding,
@@ -61,6 +62,8 @@ from .models import (
     WeeklyRecommendationSnapshot,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
+from .tmdb import TMDbServiceError
+from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
 from .weekly_recommendations import (
@@ -3014,6 +3017,23 @@ class MyMovieListView(generics.ListAPIView):
 
     def get_queryset(self):
         return MovieListItem.objects.filter(user=self.request.user).select_related("movie").order_by("-created_at", "-id")
+
+
+class MovieWatchProvidersView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        movie = get_object_or_404(Movie, pk=pk)
+        country = normalize_country_code(request.query_params.get("country"))
+
+        try:
+            payload = get_movie_watch_providers(movie, country)
+        except TMDbServiceError as exc:
+            logger.warning("TMDb watch providers request failed for Movie(id=%s): %s", movie.id, exc)
+            payload = build_empty_watch_provider_payload(movie, country)
+
+        serializer = MovieWatchProvidersSerializer(payload)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class MovieListToggleView(APIView):

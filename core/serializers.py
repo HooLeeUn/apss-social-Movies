@@ -1539,3 +1539,26 @@ class FriendshipSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return None
         return FriendshipUserSerializer(obj.other_user(request.user), context=self.context).data
+
+
+class WatchProviderSerializer(serializers.Serializer):
+    provider_id = serializers.IntegerField(allow_null=True)
+    provider_name = serializers.CharField(allow_blank=True)
+    logo_url = serializers.URLField(allow_blank=True)
+    display_priority = serializers.IntegerField(allow_null=True)
+    link = serializers.URLField(allow_blank=True)
+    monetized_url = serializers.URLField(allow_blank=True)
+    monetization_type = serializers.ChoiceField(
+        choices=["none", "affiliate", "cpa", "cpl", "custom"]
+    )
+
+
+class MovieWatchProvidersSerializer(serializers.Serializer):
+    movie_id = serializers.IntegerField()
+    tmdb_id = serializers.IntegerField(allow_null=True)
+    type = serializers.CharField(allow_blank=True, allow_null=True)
+    country = serializers.CharField()
+    link = serializers.URLField(allow_blank=True)
+    flatrate = WatchProviderSerializer(many=True)
+    rent = WatchProviderSerializer(many=True)
+    buy = WatchProviderSerializer(many=True)

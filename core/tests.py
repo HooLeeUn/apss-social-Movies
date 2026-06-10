@@ -36,6 +36,7 @@ from core.models import (
     Profile,
     ProfileFavoriteMovie,
     MovieRating,
+    StreamingAffiliateLink,
     PendingUserRegistration,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
@@ -7075,6 +7076,167 @@ class MeProfileStreamingCountryTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("streaming_country", response.data)
+
+
+class MovieWatchProvidersEndpointTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.author = get_user_model().objects.create_user(
+            username="watch-provider-admin",
+            email="watch-provider-admin@example.com",
+            password="test1234",
+        )
+        self.movie = Movie.objects.create(
+            author=self.author,
+            title_english="Inception",
+            type=Movie.MOVIE,
+            tmdb_id=27205,
+        )
+        self.url = reverse("movie-watch-providers", kwargs={"pk": self.movie.pk})
+
+    def tearDown(self):
+        cache.clear()
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_returns_country_watch_providers_grouped_by_monetization_type(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "id": 27205,
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {
+                                "provider_id": 8,
+                                "provider_name": "Netflix",
+                                "logo_path": "/netflix.jpg",
+                                "display_priority": 0,
+                            }
+                        ],
+                        "rent": [
+                            {
+                                "provider_id": 2,
+                                "provider_name": "Apple TV",
+                                "logo_path": "/apple.jpg",
+                                "display_priority": 4,
+                            }
+                        ],
+                        "buy": [],
+                    }
+                },
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["movie_id"], self.movie.id)
+        self.assertEqual(response.data["tmdb_id"], self.movie.tmdb_id)
+        self.assertEqual(response.data["country"], "CO")
+        self.assertEqual(response.data["flatrate"][0]["provider_id"], 8)
+        self.assertEqual(response.data["flatrate"][0]["logo_url"], "https://image.tmdb.org/t/p/w92/netflix.jpg")
+        self.assertEqual(response.data["flatrate"][0]["monetized_url"], response.data["link"])
+        self.assertEqual(response.data["flatrate"][0]["monetization_type"], "none")
+        self.assertEqual(response.data["rent"][0]["provider_name"], "Apple TV")
+        self.assertEqual(response.data["buy"], [])
+        mock_get.assert_called_once()
+        args, _kwargs = mock_get.call_args
+        self.assertEqual(args[0], "https://api.themoviedb.org/3/movie/27205/watch/providers")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_uses_tv_watch_provider_endpoint_for_series(self, mock_get):
+        self.movie.type = Movie.SERIES
+        self.movie.save(update_fields=["type"])
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"results": {"US": {"link": "https://example.com", "flatrate": [], "rent": [], "buy": []}}},
+        )
+
+        response = self.client.get(self.url, {"country": "US"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        args, _kwargs = mock_get.call_args
+        self.assertEqual(args[0], "https://api.themoviedb.org/3/tv/27205/watch/providers")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_applies_active_affiliate_url_for_provider_and_country(self, mock_get):
+        StreamingAffiliateLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="co",
+            affiliate_url="https://affiliate.example/netflix-co",
+            monetization_type=StreamingAffiliateLink.MonetizationType.CPA,
+        )
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {"provider_id": 8, "provider_name": "Netflix", "logo_path": "/netflix.jpg", "display_priority": 0}
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertEqual(provider["link"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
+        self.assertEqual(provider["monetized_url"], "https://affiliate.example/netflix-co")
+        self.assertEqual(provider["monetization_type"], "cpa")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_caches_tmdb_response_per_movie_and_country(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"results": {"US": {"link": "https://example.com", "flatrate": [], "rent": [], "buy": []}}},
+        )
+
+        first_response = self.client.get(self.url, {"country": "US"})
+        second_response = self.client.get(self.url, {"country": "US"})
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        mock_get.assert_called_once()
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_returns_empty_arrays_when_movie_has_no_tmdb_id(self, mock_get):
+        self.movie.tmdb_id = None
+        self.movie.save(update_fields=["tmdb_id"])
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["tmdb_id"])
+        self.assertEqual(response.data["flatrate"], [])
+        self.assertEqual(response.data["rent"], [])
+        self.assertEqual(response.data["buy"], [])
+        mock_get.assert_not_called()
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_returns_empty_arrays_when_country_has_no_providers(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"results": {"US": {"link": "https://example.com"}}},
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["flatrate"], [])
+        self.assertEqual(response.data["rent"], [])
+        self.assertEqual(response.data["buy"], [])
 
 
 class TMDbServiceTests(TestCase):
