@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from django.core.cache import cache
+from django.db.models import Q
 
-from .models import Movie, StreamingAffiliateLink
+from .models import Movie, StreamingProviderLink
 from .tmdb import get_tmdb_json
 
 TMDB_LOGO_BASE_URL = "https://image.tmdb.org/t/p/w92"
@@ -23,10 +24,10 @@ def get_movie_watch_providers(movie: Movie, country_code: str) -> dict[str, Any]
     if not raw_payload:
         return empty_payload
 
-    affiliate_links = get_active_affiliate_links(raw_payload, country)
+    provider_links = get_active_provider_links(movie, raw_payload, country)
     providers = {
         group: serialize_provider_group(
-            raw_payload.get(group, []), raw_payload.get("link", ""), affiliate_links
+            raw_payload.get(group, []), raw_payload.get("link", ""), provider_links
         )
         for group in WATCH_PROVIDER_GROUPS
     }
@@ -92,7 +93,7 @@ def get_tmdb_content_kind(movie: Movie) -> str:
     return "movie"
 
 
-def get_active_affiliate_links(raw_payload: dict[str, Any], country: str) -> dict[int, StreamingAffiliateLink]:
+def get_provider_ids(raw_payload: dict[str, Any]) -> set[int]:
     provider_ids = set()
     for group in WATCH_PROVIDER_GROUPS:
         providers = raw_payload.get(group, [])
@@ -103,26 +104,48 @@ def get_active_affiliate_links(raw_payload: dict[str, Any], country: str) -> dic
             for provider in providers
             if isinstance(provider, dict) and provider.get("provider_id") is not None
         )
+    return provider_ids
 
+
+def get_active_provider_links(
+    movie: Movie,
+    raw_payload: dict[str, Any],
+    country: str,
+) -> dict[int, StreamingProviderLink]:
+    provider_ids = get_provider_ids(raw_payload)
     if not provider_ids:
         return {}
 
-    links = StreamingAffiliateLink.objects.filter(
+    content_kind = get_tmdb_content_kind(movie)
+    links = StreamingProviderLink.objects.filter(
         provider_id__in=provider_ids,
         country_code=country,
         is_active=True,
+        content_type=content_kind,
+    ).filter(
+        Q(tmdb_id=movie.tmdb_id)
+        | Q(tmdb_id__isnull=True, movie__isnull=True, imdb_id__isnull=True)
     ).order_by("provider_id", "-updated_at", "-id")
 
-    by_provider = {}
+    specific_links = {}
+    general_links = {}
     for link in links:
-        by_provider.setdefault(link.provider_id, link)
-    return by_provider
+        if link.tmdb_id == movie.tmdb_id:
+            specific_links.setdefault(link.provider_id, link)
+        elif link.tmdb_id is None and link.movie_id is None and link.imdb_id is None:
+            general_links.setdefault(link.provider_id, link)
+
+    return {
+        provider_id: specific_links.get(provider_id) or general_links.get(provider_id)
+        for provider_id in provider_ids
+        if specific_links.get(provider_id) or general_links.get(provider_id)
+    }
 
 
 def serialize_provider_group(
     providers: Any,
-    default_link: str,
-    affiliate_links: dict[int, StreamingAffiliateLink],
+    tmdb_watch_url: str,
+    provider_links: dict[int, StreamingProviderLink],
 ) -> list[dict[str, Any]]:
     if not isinstance(providers, list):
         return []
@@ -133,15 +156,14 @@ def serialize_provider_group(
             continue
 
         provider_id = provider.get("provider_id")
-        affiliate_link = affiliate_links.get(provider_id)
-        tmdb_watch_url = default_link or ""
-        direct_url = get_provider_direct_url(provider)
-        affiliate_url = affiliate_link.affiliate_url if affiliate_link else None
+        provider_link = provider_links.get(provider_id)
+        direct_url = get_link_url(provider_link, "direct_url")
+        affiliate_url = get_link_url(provider_link, "affiliate_url")
         monetized_url = affiliate_url or direct_url
         monetization_type = (
-            affiliate_link.monetization_type
-            if affiliate_link
-            else StreamingAffiliateLink.MonetizationType.NONE
+            provider_link.monetization_type
+            if provider_link
+            else StreamingProviderLink.MonetizationType.NONE
         )
 
         logo_path = provider.get("logo_path") or ""
@@ -151,7 +173,7 @@ def serialize_provider_group(
                 "provider_name": provider.get("provider_name", ""),
                 "logo_url": f"{TMDB_LOGO_BASE_URL}{logo_path}" if logo_path else "",
                 "display_priority": provider.get("display_priority"),
-                "tmdb_watch_url": tmdb_watch_url,
+                "tmdb_watch_url": tmdb_watch_url or "",
                 "direct_url": direct_url,
                 "affiliate_url": affiliate_url,
                 "monetized_url": monetized_url,
@@ -163,16 +185,10 @@ def serialize_provider_group(
     return serialized
 
 
-def get_provider_direct_url(provider: dict[str, Any]) -> str | None:
-    """Return a provider-specific URL only if TMDb supplies one.
-
-    TMDb's current watch-provider payload exposes a country-level ``link`` to
-    TMDb's watch page, not an individual provider destination. This helper keeps
-    the response ready for a future provider-level URL without fabricating links
-    or mapping provider IDs to external domains manually.
-    """
-    for key in ("direct_url", "url", "web_url"):
-        value = provider.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+def get_link_url(provider_link: StreamingProviderLink | None, field_name: str) -> str | None:
+    if provider_link is None:
+        return None
+    value = getattr(provider_link, field_name, "")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None

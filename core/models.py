@@ -452,7 +452,7 @@ class Movie(models.Model):
         return self.title_english
 
 
-class StreamingAffiliateLink(models.Model):
+class StreamingProviderLink(models.Model):
     class MonetizationType(models.TextChoices):
         NONE = "none", "None"
         AFFILIATE = "affiliate", "Affiliate"
@@ -463,7 +463,22 @@ class StreamingAffiliateLink(models.Model):
     provider_id = models.PositiveIntegerField(db_index=True)
     provider_name = models.CharField(max_length=255)
     country_code = models.CharField(max_length=2, db_index=True)
-    affiliate_url = models.URLField(max_length=1000)
+    movie = models.ForeignKey(
+        Movie,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="streaming_provider_links",
+    )
+    tmdb_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    imdb_id = models.CharField(max_length=20, null=True, blank=True, db_index=True)
+    content_type = models.CharField(
+        max_length=10,
+        choices=[("movie", "Movie"), ("tv", "TV")],
+        default="movie",
+    )
+    direct_url = models.URLField(max_length=1000, blank=True, default="")
+    affiliate_url = models.URLField(max_length=1000, blank=True, default="")
     is_active = models.BooleanField(default=True)
     monetization_type = models.CharField(
         max_length=20,
@@ -479,13 +494,19 @@ class StreamingAffiliateLink(models.Model):
         indexes = [
             models.Index(
                 fields=["provider_id", "country_code", "is_active"],
-                name="saff_prov_ctry_idx",
+                name="spl_prov_ctry_idx",
+            ),
+            models.Index(
+                fields=["provider_id", "country_code", "tmdb_id", "is_active"],
+                name="spl_prov_ctry_tmdb_idx",
             ),
         ]
 
     def save(self, *args, **kwargs):
         if self.country_code:
             self.country_code = self.country_code.upper()
+        if self.imdb_id == "":
+            self.imdb_id = None
         super().save(*args, **kwargs)
 
     def __str__(self):

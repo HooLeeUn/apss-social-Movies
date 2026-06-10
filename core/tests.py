@@ -36,7 +36,7 @@ from core.models import (
     Profile,
     ProfileFavoriteMovie,
     MovieRating,
-    StreamingAffiliateLink,
+    StreamingProviderLink,
     PendingUserRegistration,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
@@ -7170,13 +7170,13 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
-    def test_applies_active_affiliate_url_for_provider_and_country(self, mock_get):
-        StreamingAffiliateLink.objects.create(
+    def test_applies_general_provider_link_for_provider_and_country(self, mock_get):
+        StreamingProviderLink.objects.create(
             provider_id=8,
             provider_name="Netflix",
             country_code="co",
             affiliate_url="https://affiliate.example/netflix-co",
-            monetization_type=StreamingAffiliateLink.MonetizationType.CPA,
+            monetization_type=StreamingProviderLink.MonetizationType.CPA,
         )
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7205,7 +7205,83 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
-    def test_uses_provider_direct_url_when_tmdb_supplies_one(self, mock_get):
+    def test_specific_tmdb_provider_link_overrides_general_link(self, mock_get):
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            direct_url="https://provider.example/netflix",
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            tmdb_id=self.movie.tmdb_id,
+            direct_url="https://provider.example/netflix/inception",
+            affiliate_url="https://affiliate.example/netflix/inception",
+            monetization_type=StreamingProviderLink.MonetizationType.AFFILIATE,
+        )
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {"provider_id": 8, "provider_name": "Netflix", "logo_path": "/netflix.jpg", "display_priority": 0}
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertEqual(provider["direct_url"], "https://provider.example/netflix/inception")
+        self.assertEqual(provider["affiliate_url"], "https://affiliate.example/netflix/inception")
+        self.assertEqual(provider["monetized_url"], "https://affiliate.example/netflix/inception")
+        self.assertTrue(provider["is_clickable"])
+        self.assertEqual(provider["monetization_type"], "affiliate")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_uses_direct_url_when_affiliate_url_is_missing(self, mock_get):
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            tmdb_id=self.movie.tmdb_id,
+            direct_url="https://provider.example/netflix/inception",
+            monetization_type=StreamingProviderLink.MonetizationType.NONE,
+        )
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {"provider_id": 8, "provider_name": "Netflix", "logo_path": "/netflix.jpg", "display_priority": 0}
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertEqual(provider["direct_url"], "https://provider.example/netflix/inception")
+        self.assertIsNone(provider["affiliate_url"])
+        self.assertEqual(provider["monetized_url"], "https://provider.example/netflix/inception")
+        self.assertTrue(provider["is_clickable"])
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_does_not_use_provider_direct_url_when_tmdb_supplies_one(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
             json=lambda: {
@@ -7231,10 +7307,10 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         provider = response.data["flatrate"][0]
         self.assertEqual(provider["tmdb_watch_url"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
-        self.assertEqual(provider["direct_url"], "https://provider.example/title/27205")
+        self.assertIsNone(provider["direct_url"])
         self.assertIsNone(provider["affiliate_url"])
-        self.assertEqual(provider["monetized_url"], "https://provider.example/title/27205")
-        self.assertTrue(provider["is_clickable"])
+        self.assertIsNone(provider["monetized_url"])
+        self.assertFalse(provider["is_clickable"])
         self.assertEqual(provider["monetization_type"], "none")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
