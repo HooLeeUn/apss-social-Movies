@@ -18,6 +18,7 @@ from .models import (
     UserGenrePreference,
     UserTypePreference,
     UserDirectorPreference,
+    StreamingAffiliateLink,
 )
 
 
@@ -328,3 +329,11 @@ class AppBrandingAdmin(admin.ModelAdmin):
     @admin.display(description="Preview")
     def privacy_security_logo_preview(self, obj):
         return self._render_image_preview(obj.privacy_security_logo)
+
+
+@admin.register(StreamingAffiliateLink)
+class StreamingAffiliateLinkAdmin(admin.ModelAdmin):
+    list_display = ("id", "provider_name", "provider_id", "country_code", "monetization_type", "is_active", "updated_at")
+    list_filter = ("country_code", "monetization_type", "is_active")
+    search_fields = ("provider_name", "provider_id", "country_code", "affiliate_url")
+    readonly_fields = ("created_at", "updated_at")

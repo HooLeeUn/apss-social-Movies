@@ -451,6 +451,47 @@ class Movie(models.Model):
             return f"{self.title_english} ({self.release_year})"
         return self.title_english
 
+
+class StreamingAffiliateLink(models.Model):
+    class MonetizationType(models.TextChoices):
+        NONE = "none", "None"
+        AFFILIATE = "affiliate", "Affiliate"
+        CPA = "cpa", "CPA"
+        CPL = "cpl", "CPL"
+        CUSTOM = "custom", "Custom"
+
+    provider_id = models.PositiveIntegerField(db_index=True)
+    provider_name = models.CharField(max_length=255)
+    country_code = models.CharField(max_length=2, db_index=True)
+    affiliate_url = models.URLField(max_length=1000)
+    is_active = models.BooleanField(default=True)
+    monetization_type = models.CharField(
+        max_length=20,
+        choices=MonetizationType.choices,
+        default=MonetizationType.AFFILIATE,
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider_name", "country_code", "provider_id"]
+        indexes = [
+            models.Index(
+                fields=["provider_id", "country_code", "is_active"],
+                name="saff_prov_ctry_idx",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.country_code:
+            self.country_code = self.country_code.upper()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.provider_name} ({self.country_code})"
+
+
 class MovieRating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movie_ratings")
     movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="movie_ratings")
