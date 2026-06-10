@@ -1547,6 +1547,8 @@ class WatchProviderSerializer(serializers.Serializer):
     logo_url = serializers.URLField(allow_blank=True)
     display_priority = serializers.IntegerField(allow_null=True)
     link = serializers.URLField(allow_blank=True)
+    direct_url = serializers.URLField(allow_blank=True, allow_null=True)
+    fallback_url = serializers.URLField(allow_blank=True)
     monetized_url = serializers.URLField(allow_blank=True)
     monetization_type = serializers.ChoiceField(
         choices=["none", "affiliate", "cpa", "cpl", "custom"]

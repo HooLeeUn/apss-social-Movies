@@ -134,8 +134,9 @@ def serialize_provider_group(
 
         provider_id = provider.get("provider_id")
         affiliate_link = affiliate_links.get(provider_id)
-        link = default_link or ""
-        monetized_url = link
+        fallback_url = default_link or ""
+        direct_url = get_provider_direct_url(provider)
+        monetized_url = direct_url or fallback_url
         monetization_type = StreamingAffiliateLink.MonetizationType.NONE
 
         if affiliate_link:
@@ -149,10 +150,27 @@ def serialize_provider_group(
                 "provider_name": provider.get("provider_name", ""),
                 "logo_url": f"{TMDB_LOGO_BASE_URL}{logo_path}" if logo_path else "",
                 "display_priority": provider.get("display_priority"),
-                "link": link,
+                "link": fallback_url,
+                "direct_url": direct_url,
+                "fallback_url": fallback_url,
                 "monetized_url": monetized_url,
                 "monetization_type": monetization_type,
             }
         )
 
     return serialized
+
+
+def get_provider_direct_url(provider: dict[str, Any]) -> str | None:
+    """Return a provider-specific URL only if TMDb supplies one.
+
+    TMDb's current watch-provider payload exposes a country-level ``link`` to
+    TMDb's watch page, not an individual provider destination. This helper keeps
+    the response ready for a future provider-level URL without fabricating links
+    or mapping provider IDs to external domains manually.
+    """
+    for key in ("direct_url", "url", "web_url"):
+        value = provider.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None

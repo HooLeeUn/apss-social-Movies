@@ -7137,6 +7137,8 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.data["country"], "CO")
         self.assertEqual(response.data["flatrate"][0]["provider_id"], 8)
         self.assertEqual(response.data["flatrate"][0]["logo_url"], "https://image.tmdb.org/t/p/w92/netflix.jpg")
+        self.assertIsNone(response.data["flatrate"][0]["direct_url"])
+        self.assertEqual(response.data["flatrate"][0]["fallback_url"], response.data["link"])
         self.assertEqual(response.data["flatrate"][0]["monetized_url"], response.data["link"])
         self.assertEqual(response.data["flatrate"][0]["monetization_type"], "none")
         self.assertEqual(response.data["rent"][0]["provider_name"], "Apple TV")
@@ -7190,8 +7192,42 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         provider = response.data["flatrate"][0]
         self.assertEqual(provider["link"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
+        self.assertIsNone(provider["direct_url"])
+        self.assertEqual(provider["fallback_url"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
         self.assertEqual(provider["monetized_url"], "https://affiliate.example/netflix-co")
         self.assertEqual(provider["monetization_type"], "cpa")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_uses_provider_direct_url_when_tmdb_supplies_one(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {
+                                "provider_id": 8,
+                                "provider_name": "Netflix",
+                                "logo_path": "/netflix.jpg",
+                                "display_priority": 0,
+                                "direct_url": "https://provider.example/title/27205",
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertEqual(provider["direct_url"], "https://provider.example/title/27205")
+        self.assertEqual(provider["fallback_url"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
+        self.assertEqual(provider["monetized_url"], "https://provider.example/title/27205")
+        self.assertEqual(provider["monetization_type"], "none")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
