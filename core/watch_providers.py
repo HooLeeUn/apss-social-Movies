@@ -134,14 +134,15 @@ def serialize_provider_group(
 
         provider_id = provider.get("provider_id")
         affiliate_link = affiliate_links.get(provider_id)
-        fallback_url = default_link or ""
+        tmdb_watch_url = default_link or ""
         direct_url = get_provider_direct_url(provider)
-        monetized_url = direct_url or fallback_url
-        monetization_type = StreamingAffiliateLink.MonetizationType.NONE
-
-        if affiliate_link:
-            monetized_url = affiliate_link.affiliate_url
-            monetization_type = affiliate_link.monetization_type
+        affiliate_url = affiliate_link.affiliate_url if affiliate_link else None
+        monetized_url = affiliate_url or direct_url
+        monetization_type = (
+            affiliate_link.monetization_type
+            if affiliate_link
+            else StreamingAffiliateLink.MonetizationType.NONE
+        )
 
         logo_path = provider.get("logo_path") or ""
         serialized.append(
@@ -150,10 +151,11 @@ def serialize_provider_group(
                 "provider_name": provider.get("provider_name", ""),
                 "logo_url": f"{TMDB_LOGO_BASE_URL}{logo_path}" if logo_path else "",
                 "display_priority": provider.get("display_priority"),
-                "link": fallback_url,
+                "tmdb_watch_url": tmdb_watch_url,
                 "direct_url": direct_url,
-                "fallback_url": fallback_url,
+                "affiliate_url": affiliate_url,
                 "monetized_url": monetized_url,
+                "is_clickable": monetized_url is not None,
                 "monetization_type": monetization_type,
             }
         )
