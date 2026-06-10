@@ -479,7 +479,7 @@ class StreamingAffiliateLink(models.Model):
         indexes = [
             models.Index(
                 fields=["provider_id", "country_code", "is_active"],
-                name="stream_aff_provider_country_idx",
+                name="saff_prov_ctry_idx",
             ),
         ]
 
