@@ -18,7 +18,7 @@ from .models import (
     UserGenrePreference,
     UserTypePreference,
     UserDirectorPreference,
-    StreamingAffiliateLink,
+    StreamingProviderLink,
 )
 
 
@@ -331,9 +331,30 @@ class AppBrandingAdmin(admin.ModelAdmin):
         return self._render_image_preview(obj.privacy_security_logo)
 
 
-@admin.register(StreamingAffiliateLink)
-class StreamingAffiliateLinkAdmin(admin.ModelAdmin):
-    list_display = ("id", "provider_name", "provider_id", "country_code", "monetization_type", "is_active", "updated_at")
-    list_filter = ("country_code", "monetization_type", "is_active")
-    search_fields = ("provider_name", "provider_id", "country_code", "affiliate_url")
+@admin.register(StreamingProviderLink)
+class StreamingProviderLinkAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "provider_name",
+        "provider_id",
+        "country_code",
+        "content_type",
+        "tmdb_id",
+        "movie",
+        "monetization_type",
+        "is_active",
+        "updated_at",
+    )
+    list_filter = ("country_code", "content_type", "monetization_type", "is_active")
+    search_fields = (
+        "provider_name",
+        "provider_id",
+        "country_code",
+        "tmdb_id",
+        "imdb_id",
+        "direct_url",
+        "affiliate_url",
+        "movie__title_english",
+        "movie__title_spanish",
+    )
     readonly_fields = ("created_at", "updated_at")
