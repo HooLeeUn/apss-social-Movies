@@ -7350,6 +7350,41 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
+    def test_claro_video_is_clickable_from_global_landing_url_in_supported_country(self, mock_get):
+        call_command("refresh_streaming_provider_links")
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "MX": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=MX",
+                        "flatrate": [
+                            {
+                                "provider_id": 167,
+                                "provider_name": "ClaroVideo",
+                                "logo_path": "/claro.jpg",
+                                "display_priority": 6,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "MX"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertEqual(provider["provider_name"], "ClaroVideo")
+        self.assertIsNone(provider["direct_url"])
+        self.assertIsNone(provider["affiliate_url"])
+        self.assertEqual(provider["landing_url"], "https://www.clarovideo.com/")
+        self.assertEqual(provider["monetized_url"], "https://www.clarovideo.com/")
+        self.assertNotEqual(provider["monetized_url"], provider["tmdb_watch_url"])
+        self.assertTrue(provider["is_clickable"])
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
     def test_specific_tmdb_provider_link_overrides_general_link(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7647,6 +7682,54 @@ class StreamingProviderLinkCommandTests(TestCase):
                     else "Global fallback landing URL by provider name pattern"
                 )
                 self.assertIn(expected_note, link.notes)
+
+    def test_refresh_streaming_provider_links_adds_claro_video_global_fallbacks(self):
+        StreamingProviderLink.objects.create(
+            provider_id=167,
+            provider_name="ClaroVideo",
+            country_code="MX",
+            is_active=False,
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=167,
+            provider_name="Claro Video",
+            country_code="US",
+            landing_url="https://manual.example/claro",
+            affiliate_url="https://affiliate.example/claro",
+        )
+        legacy_link = StreamingProviderLink.objects.create(
+            provider_id=9167,
+            provider_name="Claro video",
+            country_code="PE",
+            landing_url="https://old-rule.example/claro",
+            notes="Global fallback landing URL by provider name pattern",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        claro_mx_links = StreamingProviderLink.objects.filter(provider_id=167, country_code="MX")
+        self.assertEqual(claro_mx_links.count(), 1)
+        claro_mx = claro_mx_links.get()
+        self.assertEqual(claro_mx.landing_url, "https://www.clarovideo.com/")
+        self.assertEqual(claro_mx.affiliate_url, "")
+        self.assertTrue(claro_mx.is_active)
+        self.assertIn("Global fallback landing URL for Claro Video", claro_mx.notes)
+
+        claro_ar = StreamingProviderLink.objects.get(provider_id=167, country_code="AR")
+        self.assertEqual(claro_ar.landing_url, "https://www.clarovideo.com/")
+        self.assertEqual(claro_ar.affiliate_url, "")
+        self.assertTrue(claro_ar.is_active)
+        self.assertIn("Global fallback landing URL for Claro Video", claro_ar.notes)
+
+        claro_us = StreamingProviderLink.objects.get(provider_id=167, country_code="US")
+        self.assertEqual(claro_us.landing_url, "https://manual.example/claro")
+        self.assertEqual(claro_us.affiliate_url, "https://affiliate.example/claro")
+        self.assertTrue(claro_us.is_active)
+
+        legacy_link.refresh_from_db()
+        self.assertEqual(legacy_link.landing_url, "https://www.clarovideo.com/")
+        self.assertEqual(legacy_link.affiliate_url, "")
+        self.assertIn("Global fallback landing URL for Claro Video", legacy_link.notes)
 
     def test_refresh_streaming_provider_links_preserves_manual_amazon_channel_landing_url_without_rule_note(self):
         link = StreamingProviderLink.objects.create(
