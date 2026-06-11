@@ -7639,6 +7639,62 @@ class StreamingProviderLinkCommandTests(TestCase):
                 self.assertEqual(link.direct_url, "")
                 self.assertTrue(link.is_active)
 
+    def test_refresh_streaming_provider_links_expands_static_providers_to_qnext_countries(self):
+        call_command("refresh_streaming_provider_links")
+
+        supported_country_codes = (
+            "AR",
+            "BO",
+            "BZ",
+            "CA",
+            "CL",
+            "CO",
+            "CR",
+            "CU",
+            "DO",
+            "EC",
+            "ES",
+            "GT",
+            "HN",
+            "MX",
+            "NI",
+            "PA",
+            "PE",
+            "PR",
+            "PY",
+            "SV",
+            "UK",
+            "US",
+            "UY",
+            "VE",
+        )
+        expected_provider_urls = {
+            119: "https://www.primevideo.com/",
+            10: "https://www.primevideo.com/",
+            3: "https://play.google.com/store/movies",
+            192: "https://www.youtube.com/movies",
+        }
+
+        for country_code in supported_country_codes:
+            with self.subTest(country_code=country_code):
+                self.assertEqual(
+                    StreamingProviderLink.objects.filter(
+                        provider_id=2,
+                        country_code=country_code,
+                        landing_url=f"https://tv.apple.com/{country_code.lower()}",
+                        is_active=True,
+                    ).count(),
+                    1,
+                )
+                for provider_id, landing_url in expected_provider_urls.items():
+                    link = StreamingProviderLink.objects.get(
+                        provider_id=provider_id,
+                        country_code=country_code,
+                    )
+                    self.assertEqual(link.landing_url, landing_url)
+                    self.assertEqual(link.affiliate_url, "")
+                    self.assertTrue(link.is_active)
+
     def test_refresh_streaming_provider_links_expands_global_pattern_rules_to_supported_countries(self):
         StreamingProviderLink.objects.create(
             provider_id=9001,
