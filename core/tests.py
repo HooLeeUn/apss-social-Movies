@@ -1975,6 +1975,7 @@ class MovieCommentEndpointTests(TestCase):
             release_year=2016,
             synopsis="A linguist works with alien visitors.",
             synopsis_es="Una lingüista trabaja con visitantes alienígenas.",
+            tmdb_id=329865,
         )
         Friendship.objects.create(
             requester=self.user,
@@ -2000,6 +2001,9 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(response.data["title_english"], "Arrival")
         self.assertEqual(response.data["synopsis"], "A linguist works with alien visitors.")
         self.assertEqual(response.data["synopsis_es"], "Una lingüista trabaja con visitantes alienígenas.")
+        self.assertEqual(response.data["tmdb_id"], 329865)
+        self.assertEqual(response.data["type"], Movie.MOVIE)
+        self.assertEqual(response.data["tmdb_url"], "https://www.themoviedb.org/movie/329865")
         self.assertEqual(response.data["comments_count"], 0)
 
     def test_post_creates_public_comment_for_movie_without_valid_friend_mention(self):
@@ -7135,6 +7139,8 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.data["movie_id"], self.movie.id)
         self.assertEqual(response.data["tmdb_id"], self.movie.tmdb_id)
         self.assertEqual(response.data["country"], "CO")
+        self.assertEqual(response.data["type"], Movie.MOVIE)
+        self.assertEqual(response.data["tmdb_url"], "https://www.themoviedb.org/movie/27205")
         self.assertEqual(response.data["flatrate"][0]["provider_id"], 8)
         self.assertEqual(response.data["flatrate"][0]["logo_url"], "https://image.tmdb.org/t/p/w92/netflix.jpg")
         self.assertEqual(
@@ -7202,6 +7208,39 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(provider["monetized_url"], "https://affiliate.example/netflix-co")
         self.assertTrue(provider["is_clickable"])
         self.assertEqual(provider["monetization_type"], "cpa")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_uses_landing_url_when_affiliate_and_direct_urls_are_missing(self, mock_get):
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            landing_url="https://www.netflix.com/co/",
+        )
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {"provider_id": 8, "provider_name": "Netflix", "logo_path": "/netflix.jpg", "display_priority": 0}
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        provider = response.data["flatrate"][0]
+        self.assertIsNone(provider["direct_url"])
+        self.assertIsNone(provider["affiliate_url"])
+        self.assertEqual(provider["landing_url"], "https://www.netflix.com/co/")
+        self.assertEqual(provider["monetized_url"], "https://www.netflix.com/co/")
+        self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
@@ -7309,6 +7348,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(provider["tmdb_watch_url"], "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO")
         self.assertIsNone(provider["direct_url"])
         self.assertIsNone(provider["affiliate_url"])
+        self.assertIsNone(provider["landing_url"])
         self.assertIsNone(provider["monetized_url"])
         self.assertFalse(provider["is_clickable"])
         self.assertEqual(provider["monetization_type"], "none")
@@ -7338,6 +7378,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data["tmdb_id"])
+        self.assertIsNone(response.data["tmdb_url"])
         self.assertEqual(response.data["flatrate"], [])
         self.assertEqual(response.data["rent"], [])
         self.assertEqual(response.data["buy"], [])
@@ -7357,6 +7398,42 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.data["flatrate"], [])
         self.assertEqual(response.data["rent"], [])
         self.assertEqual(response.data["buy"], [])
+
+
+class StreamingProviderLinkCommandTests(TestCase):
+    def test_seed_streaming_provider_links_is_idempotent_and_preserves_affiliates(self):
+        StreamingProviderLink.objects.create(
+            provider_id=337,
+            provider_name="Disney Plus",
+            country_code="CO",
+            affiliate_url="https://affiliate.example/disney-co",
+        )
+
+        call_command("seed_streaming_provider_links")
+        call_command("seed_streaming_provider_links")
+
+        disney_links = StreamingProviderLink.objects.filter(provider_id=337, country_code="CO")
+        self.assertEqual(disney_links.count(), 1)
+        disney_link = disney_links.get()
+        self.assertEqual(disney_link.landing_url, "https://www.disneyplus.com/es-co")
+        self.assertEqual(disney_link.affiliate_url, "https://affiliate.example/disney-co")
+        self.assertTrue(StreamingProviderLink.objects.filter(provider_id=8, country_code="US").exists())
+
+    def test_refresh_streaming_provider_links_updates_landing_url_without_overwriting_affiliate_url(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            landing_url="https://old.example/netflix",
+            affiliate_url="https://affiliate.example/netflix",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://www.netflix.com/co/")
+        self.assertEqual(link.affiliate_url, "https://affiliate.example/netflix")
+        self.assertIsNotNone(link.last_verified_at)
 
 
 class TMDbServiceTests(TestCase):

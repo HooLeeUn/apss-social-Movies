@@ -1169,6 +1169,7 @@ class MovieAutocompleteSerializer(serializers.ModelSerializer):
 
 class MovieListSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
+    tmdb_url = serializers.SerializerMethodField()
     real_ratings_count = serializers.IntegerField(read_only=True)
     real_ratings_avg = serializers.FloatField(read_only=True)
     display_rating = serializers.FloatField(read_only=True)
@@ -1185,7 +1186,7 @@ class MovieListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "author",
             "title_english", "title_spanish",
-            "type", "genre", "release_year",
+            "type", "tmdb_id", "tmdb_url", "genre", "release_year",
             "director", "cast_members", "synopsis", "synopsis_es",
             "image", "external_rating", "external_votes",
             "real_ratings_count", "real_ratings_avg",
@@ -1193,6 +1194,12 @@ class MovieListSerializer(serializers.ModelSerializer):
             "is_in_my_list",
             "is_in_my_recommendations",
         ]
+
+    def get_tmdb_url(self, obj):
+        if not obj.tmdb_id:
+            return None
+        tmdb_kind = "tv" if obj.type == Movie.SERIES else "movie"
+        return f"https://www.themoviedb.org/{tmdb_kind}/{obj.tmdb_id}"
 
 
 class MovieSearchLightSerializer(serializers.ModelSerializer):
@@ -1549,6 +1556,7 @@ class WatchProviderSerializer(serializers.Serializer):
     tmdb_watch_url = serializers.URLField(allow_blank=True)
     direct_url = serializers.URLField(allow_blank=True, allow_null=True)
     affiliate_url = serializers.URLField(allow_blank=True, allow_null=True)
+    landing_url = serializers.URLField(allow_blank=True, allow_null=True)
     monetized_url = serializers.URLField(allow_blank=True, allow_null=True)
     is_clickable = serializers.BooleanField()
     monetization_type = serializers.ChoiceField(
@@ -1562,6 +1570,7 @@ class MovieWatchProvidersSerializer(serializers.Serializer):
     type = serializers.CharField(allow_blank=True, allow_null=True)
     country = serializers.CharField()
     link = serializers.URLField(allow_blank=True)
+    tmdb_url = serializers.URLField(allow_blank=True, allow_null=True)
     flatrate = WatchProviderSerializer(many=True)
     rent = WatchProviderSerializer(many=True)
     buy = WatchProviderSerializer(many=True)

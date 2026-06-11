@@ -38,6 +38,7 @@ def get_movie_watch_providers(movie: Movie, country_code: str) -> dict[str, Any]
         "type": movie.type,
         "country": country,
         "link": raw_payload.get("link", ""),
+        "tmdb_url": build_tmdb_url(movie),
         **providers,
     }
 
@@ -56,6 +57,7 @@ def build_empty_watch_provider_payload(movie: Movie, country: str) -> dict[str, 
         "type": movie.type,
         "country": country,
         "link": "",
+        "tmdb_url": build_tmdb_url(movie),
         "flatrate": [],
         "rent": [],
         "buy": [],
@@ -93,6 +95,12 @@ def get_tmdb_content_kind(movie: Movie) -> str:
     return "movie"
 
 
+def build_tmdb_url(movie: Movie) -> str | None:
+    if not movie.tmdb_id:
+        return None
+    return f"https://www.themoviedb.org/{get_tmdb_content_kind(movie)}/{movie.tmdb_id}"
+
+
 def get_provider_ids(raw_payload: dict[str, Any]) -> set[int]:
     provider_ids = set()
     for group in WATCH_PROVIDER_GROUPS:
@@ -117,28 +125,54 @@ def get_active_provider_links(
         return {}
 
     content_kind = get_tmdb_content_kind(movie)
-    links = StreamingProviderLink.objects.filter(
-        provider_id__in=provider_ids,
-        country_code=country,
-        is_active=True,
-        content_type=content_kind,
-    ).filter(
-        Q(tmdb_id=movie.tmdb_id)
-        | Q(tmdb_id__isnull=True, movie__isnull=True, imdb_id__isnull=True)
-    ).order_by("provider_id", "-updated_at", "-id")
+    specific_filter = Q(movie=movie)
+    if movie.tmdb_id:
+        specific_filter |= Q(tmdb_id=movie.tmdb_id)
+    if movie.imdb_id:
+        specific_filter |= Q(imdb_id=movie.imdb_id)
+
+    general_filter = Q(tmdb_id__isnull=True, movie__isnull=True, imdb_id__isnull=True)
+
+    links = (
+        StreamingProviderLink.objects.filter(
+            provider_id__in=provider_ids,
+            country_code=country,
+            is_active=True,
+        )
+        .filter(specific_filter | general_filter)
+        .order_by("provider_id", "-updated_at", "-id")
+    )
 
     specific_links = {}
-    general_links = {}
+    matching_general_links = {}
+    fallback_general_links = {}
     for link in links:
-        if link.tmdb_id == movie.tmdb_id:
+        content_type_matches = link.content_type == content_kind
+        is_specific_link = (
+            link.movie_id == movie.id
+            or link.tmdb_id == movie.tmdb_id
+            or (movie.imdb_id and link.imdb_id == movie.imdb_id)
+        )
+        if is_specific_link and content_type_matches:
             specific_links.setdefault(link.provider_id, link)
         elif link.tmdb_id is None and link.movie_id is None and link.imdb_id is None:
-            general_links.setdefault(link.provider_id, link)
+            if content_type_matches:
+                matching_general_links.setdefault(link.provider_id, link)
+            else:
+                fallback_general_links.setdefault(link.provider_id, link)
 
     return {
-        provider_id: specific_links.get(provider_id) or general_links.get(provider_id)
+        provider_id: (
+            specific_links.get(provider_id)
+            or matching_general_links.get(provider_id)
+            or fallback_general_links.get(provider_id)
+        )
         for provider_id in provider_ids
-        if specific_links.get(provider_id) or general_links.get(provider_id)
+        if (
+            specific_links.get(provider_id)
+            or matching_general_links.get(provider_id)
+            or fallback_general_links.get(provider_id)
+        )
     }
 
 
@@ -159,7 +193,8 @@ def serialize_provider_group(
         provider_link = provider_links.get(provider_id)
         direct_url = get_link_url(provider_link, "direct_url")
         affiliate_url = get_link_url(provider_link, "affiliate_url")
-        monetized_url = affiliate_url or direct_url
+        landing_url = get_link_url(provider_link, "landing_url")
+        monetized_url = affiliate_url or direct_url or landing_url
         monetization_type = (
             provider_link.monetization_type
             if provider_link
@@ -176,6 +211,7 @@ def serialize_provider_group(
                 "tmdb_watch_url": tmdb_watch_url or "",
                 "direct_url": direct_url,
                 "affiliate_url": affiliate_url,
+                "landing_url": landing_url,
                 "monetized_url": monetized_url,
                 "is_clickable": monetized_url is not None,
                 "monetization_type": monetization_type,

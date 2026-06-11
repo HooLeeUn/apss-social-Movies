@@ -477,6 +477,7 @@ class StreamingProviderLink(models.Model):
         choices=[("movie", "Movie"), ("tv", "TV")],
         default="movie",
     )
+    landing_url = models.URLField(max_length=1000, blank=True, default="")
     direct_url = models.URLField(max_length=1000, blank=True, default="")
     affiliate_url = models.URLField(max_length=1000, blank=True, default="")
     is_active = models.BooleanField(default=True)
@@ -486,6 +487,7 @@ class StreamingProviderLink(models.Model):
         default=MonetizationType.AFFILIATE,
     )
     notes = models.TextField(blank=True)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
