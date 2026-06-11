@@ -477,6 +477,7 @@ class StreamingProviderLink(models.Model):
         choices=[("movie", "Movie"), ("tv", "TV")],
         default="movie",
     )
+    landing_url = models.URLField(max_length=1000, blank=True, default="")
     direct_url = models.URLField(max_length=1000, blank=True, default="")
     affiliate_url = models.URLField(max_length=1000, blank=True, default="")
     is_active = models.BooleanField(default=True)

@@ -352,6 +352,7 @@ class StreamingProviderLinkAdmin(admin.ModelAdmin):
         "country_code",
         "tmdb_id",
         "imdb_id",
+        "landing_url",
         "direct_url",
         "affiliate_url",
         "movie__title_english",
