@@ -4,7 +4,12 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from core.models import StreamingProviderLink
-from core.streaming_provider_links_seed import build_streaming_provider_link_seeds, get_general_provider_link
+from core.streaming_provider_links_seed import (
+    build_streaming_provider_link_seeds,
+    get_general_provider_link,
+    should_add_notes_from_seed,
+    should_update_landing_url_from_seed,
+)
 
 
 class Command(BaseCommand):
@@ -35,8 +40,10 @@ class Command(BaseCommand):
             if link.provider_id != seed.provider_id:
                 link.provider_id = seed.provider_id
                 update_fields.append("provider_id")
-            should_update_landing_url = not link.landing_url or (
-                link.landing_url != seed.landing_url and seed.notes and not link.affiliate_url
+            should_update_landing_url = should_update_landing_url_from_seed(
+                link,
+                seed,
+                update_static_provider=False,
             )
             if should_update_landing_url:
                 link.landing_url = seed.landing_url
@@ -47,7 +54,7 @@ class Command(BaseCommand):
             if not link.is_active:
                 link.is_active = True
                 update_fields.append("is_active")
-            if seed.notes and seed.notes not in link.notes:
+            if should_add_notes_from_seed(link, seed):
                 link.notes = f"{link.notes}\n{seed.notes}".strip()
                 update_fields.append("notes")
 
