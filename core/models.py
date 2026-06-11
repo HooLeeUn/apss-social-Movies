@@ -487,6 +487,7 @@ class StreamingProviderLink(models.Model):
         default=MonetizationType.AFFILIATE,
     )
     notes = models.TextField(blank=True)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

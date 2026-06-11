@@ -343,6 +343,7 @@ class StreamingProviderLinkAdmin(admin.ModelAdmin):
         "movie",
         "monetization_type",
         "is_active",
+        "last_verified_at",
         "updated_at",
     )
     list_filter = ("country_code", "content_type", "monetization_type", "is_active")
