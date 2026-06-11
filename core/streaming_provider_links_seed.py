@@ -15,7 +15,32 @@ CLARO_VIDEO_PROVIDER_PATTERN_NOTE = "Global fallback landing URL for Claro Video
 AMAZON_CHANNEL_LANDING_URL = "https://www.primevideo.com/"
 CLARO_VIDEO_LANDING_URL = "https://www.clarovideo.com/"
 LEGACY_AMAZON_CHANNEL_LANDING_URL = "https://www.amazon.com"
-MINIMUM_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = ("AR", "CA", "CL", "CO", "ES", "MX", "PE", "UK", "US")
+QNEXT_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = (
+    "AR",
+    "BO",
+    "BZ",
+    "CA",
+    "CL",
+    "CO",
+    "CR",
+    "CU",
+    "DO",
+    "EC",
+    "ES",
+    "GT",
+    "HN",
+    "MX",
+    "NI",
+    "PA",
+    "PE",
+    "PR",
+    "PY",
+    "SV",
+    "UK",
+    "US",
+    "UY",
+    "VE",
+)
 
 
 @dataclass(frozen=True)
@@ -195,40 +220,53 @@ def should_add_notes_from_seed(link: StreamingProviderLink, seed: StreamingProvi
 
 def get_global_pattern_landing_url(provider_name: str, country_code: str) -> str:
     normalized_name = normalize_provider_name(provider_name)
+    normalized_key = normalize_provider_name_key(provider_name)
     country = normalize_seed_country_code(country_code).lower()
 
-    # Amazon channel rules must win before plain HBO/HBO Max matching.
+    # Amazon channel rules must win before plain platform name matching.
     if is_amazon_channel_provider(provider_name):
         return AMAZON_CHANNEL_LANDING_URL
     if is_claro_video_provider(provider_name):
         return CLARO_VIDEO_LANDING_URL
-    if normalized_name in {"hbo", "hbo max", "max hbo"}:
-        return "https://www.hbomax.com"
-    if normalized_name == "youtube tv":
-        return "https://tv.youtube.com/welcome/"
+    if "apple tv channel" in normalized_name:
+        return f"https://tv.apple.com/{country}"
     if (
         normalized_name in {"roku", "roku channel", "the roku channel", "paramount+ roku premium channel"}
         or "roku premium channel" in normalized_name
     ):
         return "https://therokuchannel.roku.com/enguard/"
-    if "apple tv channel" in normalized_name:
+
+    global_provider_landing_urls = {
+        "amazonprimevideo": AMAZON_CHANNEL_LANDING_URL,
+        "primevideo": AMAZON_CHANNEL_LANDING_URL,
+        "amazonvideo": AMAZON_CHANNEL_LANDING_URL,
+        "googleplaymovies": "https://play.google.com/store/movies",
+        "youtube": "https://www.youtube.com/movies",
+        "youtubetv": "https://tv.youtube.com/welcome/",
+        "hbo": "https://www.hbomax.com",
+        "hbomax": "https://www.hbomax.com",
+        "maxhbo": "https://www.hbomax.com",
+        "disneyplus": "https://www.disneyplus.com",
+        "max": "https://www.max.com",
+        "paramountplus": "https://www.paramountplus.com/",
+        "fubo": "https://www.fubo.tv/",
+        "starz": "https://www.starz.com/",
+        "fandangoathome": "https://www.vudu.com/",
+        "plex": "https://www.plex.tv/",
+        "flixfling": "https://www.flixfling.com/",
+        "spectrumondemand": "https://ondemand.spectrum.net/",
+        "movistartv": "https://tv.movistar.co/",
+        "movistarplus": "https://tv.movistar.co/",
+    }
+    if normalized_key in {"appletv", "appletvstore", "appleitunes"}:
         return f"https://tv.apple.com/{country}"
-    return ""
+    if normalized_key == "netflix":
+        return f"https://www.netflix.com/{country}/"
+    return global_provider_landing_urls.get(normalized_key, "")
 
 
 def get_supported_country_codes() -> tuple[str, ...]:
-    db_country_codes = (
-        StreamingProviderLink.objects.exclude(country_code="")
-        .values_list("country_code", flat=True)
-        .distinct()
-    )
-    seed_country_codes = (seed.country_code for seed in STREAMING_PROVIDER_LINK_SEEDS)
-    country_codes = {
-        normalize_seed_country_code(country_code)
-        for country_code in (*MINIMUM_SUPPORTED_COUNTRY_CODES, *seed_country_codes, *db_country_codes)
-        if country_code
-    }
-    return tuple(sorted(country_codes))
+    return QNEXT_SUPPORTED_COUNTRY_CODES
 
 
 def iter_global_provider_sources() -> Iterable[tuple[int, str]]:
@@ -271,13 +309,16 @@ def build_streaming_provider_link_seeds() -> tuple[StreamingProviderLinkSeed, ..
                 if is_claro_video_provider(provider_name)
                 else ()
             )
-            seeds_by_provider_country[(provider_id, country_code)] = StreamingProviderLinkSeed(
-                provider_id=provider_id,
-                provider_name=provider_name,
-                country_code=country_code,
-                landing_url=landing_url,
-                provider_name_aliases=provider_name_aliases,
-                notes=get_global_pattern_note(provider_name),
+            seeds_by_provider_country.setdefault(
+                (provider_id, country_code),
+                StreamingProviderLinkSeed(
+                    provider_id=provider_id,
+                    provider_name=provider_name,
+                    country_code=country_code,
+                    landing_url=landing_url,
+                    provider_name_aliases=provider_name_aliases,
+                    notes=get_global_pattern_note(provider_name),
+                ),
             )
 
     return tuple(seeds_by_provider_country.values())
