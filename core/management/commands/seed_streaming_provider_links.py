@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from core.models import StreamingProviderLink
-from core.streaming_provider_links_seed import STREAMING_PROVIDER_LINK_SEEDS
+from core.streaming_provider_links_seed import build_streaming_provider_link_seeds, get_general_provider_link
 
 
 class Command(BaseCommand):
@@ -15,18 +15,8 @@ class Command(BaseCommand):
         created_count = 0
         updated_count = 0
 
-        for seed in STREAMING_PROVIDER_LINK_SEEDS:
-            link = (
-                StreamingProviderLink.objects.filter(
-                    provider_id=seed.provider_id,
-                    country_code=seed.country_code,
-                    movie__isnull=True,
-                    tmdb_id__isnull=True,
-                    imdb_id__isnull=True,
-                )
-                .order_by("id")
-                .first()
-            )
+        for seed in build_streaming_provider_link_seeds():
+            link = get_general_provider_link(seed)
 
             if link is None:
                 StreamingProviderLink.objects.create(
@@ -36,17 +26,30 @@ class Command(BaseCommand):
                     landing_url=seed.landing_url,
                     is_active=True,
                     monetization_type=StreamingProviderLink.MonetizationType.NONE,
+                    notes=seed.notes,
                 )
                 created_count += 1
                 continue
 
             update_fields = []
-            if not link.landing_url:
+            if link.provider_id != seed.provider_id:
+                link.provider_id = seed.provider_id
+                update_fields.append("provider_id")
+            should_update_landing_url = not link.landing_url or (
+                link.landing_url != seed.landing_url and seed.notes and not link.affiliate_url
+            )
+            if should_update_landing_url:
                 link.landing_url = seed.landing_url
                 update_fields.append("landing_url")
             if not link.provider_name:
                 link.provider_name = seed.provider_name
                 update_fields.append("provider_name")
+            if not link.is_active:
+                link.is_active = True
+                update_fields.append("is_active")
+            if seed.notes and seed.notes not in link.notes:
+                link.notes = f"{link.notes}\n{seed.notes}".strip()
+                update_fields.append("notes")
 
             if update_fields:
                 update_fields.append("updated_at")
