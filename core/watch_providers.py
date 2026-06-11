@@ -138,29 +138,41 @@ def get_active_provider_links(
             provider_id__in=provider_ids,
             country_code=country,
             is_active=True,
-            content_type=content_kind,
         )
         .filter(specific_filter | general_filter)
         .order_by("provider_id", "-updated_at", "-id")
     )
 
     specific_links = {}
-    general_links = {}
+    matching_general_links = {}
+    fallback_general_links = {}
     for link in links:
+        content_type_matches = link.content_type == content_kind
         is_specific_link = (
             link.movie_id == movie.id
             or link.tmdb_id == movie.tmdb_id
             or (movie.imdb_id and link.imdb_id == movie.imdb_id)
         )
-        if is_specific_link:
+        if is_specific_link and content_type_matches:
             specific_links.setdefault(link.provider_id, link)
         elif link.tmdb_id is None and link.movie_id is None and link.imdb_id is None:
-            general_links.setdefault(link.provider_id, link)
+            if content_type_matches:
+                matching_general_links.setdefault(link.provider_id, link)
+            else:
+                fallback_general_links.setdefault(link.provider_id, link)
 
     return {
-        provider_id: specific_links.get(provider_id) or general_links.get(provider_id)
+        provider_id: (
+            specific_links.get(provider_id)
+            or matching_general_links.get(provider_id)
+            or fallback_general_links.get(provider_id)
+        )
         for provider_id in provider_ids
-        if specific_links.get(provider_id) or general_links.get(provider_id)
+        if (
+            specific_links.get(provider_id)
+            or matching_general_links.get(provider_id)
+            or fallback_general_links.get(provider_id)
+        )
     }
 
 

@@ -7400,6 +7400,42 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(response.data["buy"], [])
 
 
+class StreamingProviderLinkCommandTests(TestCase):
+    def test_seed_streaming_provider_links_is_idempotent_and_preserves_affiliates(self):
+        StreamingProviderLink.objects.create(
+            provider_id=337,
+            provider_name="Disney Plus",
+            country_code="CO",
+            affiliate_url="https://affiliate.example/disney-co",
+        )
+
+        call_command("seed_streaming_provider_links")
+        call_command("seed_streaming_provider_links")
+
+        disney_links = StreamingProviderLink.objects.filter(provider_id=337, country_code="CO")
+        self.assertEqual(disney_links.count(), 1)
+        disney_link = disney_links.get()
+        self.assertEqual(disney_link.landing_url, "https://www.disneyplus.com/es-co")
+        self.assertEqual(disney_link.affiliate_url, "https://affiliate.example/disney-co")
+        self.assertTrue(StreamingProviderLink.objects.filter(provider_id=8, country_code="US").exists())
+
+    def test_refresh_streaming_provider_links_updates_landing_url_without_overwriting_affiliate_url(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            landing_url="https://old.example/netflix",
+            affiliate_url="https://affiliate.example/netflix",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://www.netflix.com/co/")
+        self.assertEqual(link.affiliate_url, "https://affiliate.example/netflix")
+        self.assertIsNotNone(link.last_verified_at)
+
+
 class TMDbServiceTests(TestCase):
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
