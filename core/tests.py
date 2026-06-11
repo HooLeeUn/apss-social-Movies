@@ -7244,6 +7244,61 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
+    def test_colombia_seeded_channel_providers_are_clickable_from_landing_url(self, mock_get):
+        call_command("refresh_streaming_provider_links")
+        expected_landing_urls = {
+            339: "https://tv.movistar.co/",
+            1855: "https://tv.apple.com/co",
+            582: "https://www.amazon.com",
+            633: "https://therokuchannel.roku.com/enguard/",
+            207: "https://therokuchannel.roku.com/enguard/",
+        }
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "CO": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=CO",
+                        "flatrate": [
+                            {"provider_id": 339, "provider_name": "MovistarTV", "logo_path": "/movistar.jpg", "display_priority": 8},
+                            {
+                                "provider_id": 1855,
+                                "provider_name": "Starz Apple TV Channel",
+                                "logo_path": "/starz-apple.jpg",
+                                "display_priority": 21,
+                            },
+                            {
+                                "provider_id": 582,
+                                "provider_name": "Paramount+ Amazon Channel",
+                                "logo_path": "/paramount-amazon.jpg",
+                                "display_priority": 24,
+                            },
+                            {
+                                "provider_id": 633,
+                                "provider_name": "Paramount+ Roku Premium Channel",
+                                "logo_path": "/paramount-roku.jpg",
+                                "display_priority": 28,
+                            },
+                            {"provider_id": 207, "provider_name": "The Roku Channel", "logo_path": "/roku.jpg", "display_priority": 27},
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for provider in response.data["flatrate"]:
+            with self.subTest(provider_id=provider["provider_id"]):
+                self.assertIsNone(provider["direct_url"])
+                self.assertIsNone(provider["affiliate_url"])
+                self.assertEqual(provider["landing_url"], expected_landing_urls[provider["provider_id"]])
+                self.assertEqual(provider["monetized_url"], expected_landing_urls[provider["provider_id"]])
+                self.assertTrue(provider["is_clickable"])
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
     def test_specific_tmdb_provider_link_overrides_general_link(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7419,7 +7474,7 @@ class StreamingProviderLinkCommandTests(TestCase):
         self.assertEqual(disney_link.affiliate_url, "https://affiliate.example/disney-co")
         self.assertTrue(StreamingProviderLink.objects.filter(provider_id=8, country_code="US").exists())
 
-    def test_refresh_streaming_provider_links_updates_landing_url_without_overwriting_affiliate_url(self):
+    def test_refresh_streaming_provider_links_preserves_landing_url_when_affiliate_exists(self):
         link = StreamingProviderLink.objects.create(
             provider_id=8,
             provider_name="Netflix",
@@ -7431,9 +7486,72 @@ class StreamingProviderLinkCommandTests(TestCase):
         call_command("refresh_streaming_provider_links")
 
         link.refresh_from_db()
-        self.assertEqual(link.landing_url, "https://www.netflix.com/co/")
+        self.assertEqual(link.landing_url, "https://old.example/netflix")
         self.assertEqual(link.affiliate_url, "https://affiliate.example/netflix")
         self.assertIsNotNone(link.last_verified_at)
+
+    def test_refresh_streaming_provider_links_updates_landing_url_when_affiliate_is_missing(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix",
+            country_code="CO",
+            landing_url="https://old.example/netflix",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://www.netflix.com/co/")
+        self.assertEqual(link.affiliate_url, "")
+        self.assertIsNotNone(link.last_verified_at)
+
+    def test_seed_streaming_provider_links_includes_colombia_provider_variants(self):
+        StreamingProviderLink.objects.create(
+            provider_id=9999,
+            provider_name="Roku",
+            country_code="CO",
+            landing_url="",
+            is_active=False,
+        )
+
+        call_command("seed_streaming_provider_links")
+        call_command("seed_streaming_provider_links")
+
+        expected_links = {
+            339: ("MovistarTV", "https://tv.movistar.co/"),
+            1855: ("Starz Apple TV Channel", "https://tv.apple.com/co"),
+            582: ("Paramount+ Amazon Channel", "https://www.amazon.com"),
+            633: ("Paramount+ Roku Premium Channel", "https://therokuchannel.roku.com/enguard/"),
+            207: ("The Roku Channel", "https://therokuchannel.roku.com/enguard/"),
+        }
+        for provider_id, (provider_name, landing_url) in expected_links.items():
+            with self.subTest(provider_id=provider_id):
+                links = StreamingProviderLink.objects.filter(provider_id=provider_id, country_code="CO")
+                self.assertEqual(links.count(), 1)
+                link = links.get()
+                self.assertEqual(link.provider_name, provider_name)
+                self.assertEqual(link.landing_url, landing_url)
+                self.assertTrue(link.is_active)
+
+        self.assertFalse(StreamingProviderLink.objects.filter(provider_id=9999, country_code="CO").exists())
+
+    def test_refresh_streaming_provider_links_keeps_colombia_channel_mappings_clickable(self):
+        call_command("refresh_streaming_provider_links")
+
+        expected_landing_urls = {
+            339: "https://tv.movistar.co/",
+            1855: "https://tv.apple.com/co",
+            582: "https://www.amazon.com",
+            633: "https://therokuchannel.roku.com/enguard/",
+            207: "https://therokuchannel.roku.com/enguard/",
+        }
+        for provider_id, landing_url in expected_landing_urls.items():
+            with self.subTest(provider_id=provider_id):
+                link = StreamingProviderLink.objects.get(provider_id=provider_id, country_code="CO")
+                self.assertEqual(link.landing_url, landing_url)
+                self.assertEqual(link.affiliate_url, "")
+                self.assertEqual(link.direct_url, "")
+                self.assertTrue(link.is_active)
 
 
 class TMDbServiceTests(TestCase):

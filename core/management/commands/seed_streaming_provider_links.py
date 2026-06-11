@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from core.models import StreamingProviderLink
-from core.streaming_provider_links_seed import STREAMING_PROVIDER_LINK_SEEDS
+from core.streaming_provider_links_seed import STREAMING_PROVIDER_LINK_SEEDS, get_general_provider_link
 
 
 class Command(BaseCommand):
@@ -16,17 +16,7 @@ class Command(BaseCommand):
         updated_count = 0
 
         for seed in STREAMING_PROVIDER_LINK_SEEDS:
-            link = (
-                StreamingProviderLink.objects.filter(
-                    provider_id=seed.provider_id,
-                    country_code=seed.country_code,
-                    movie__isnull=True,
-                    tmdb_id__isnull=True,
-                    imdb_id__isnull=True,
-                )
-                .order_by("id")
-                .first()
-            )
+            link = get_general_provider_link(seed)
 
             if link is None:
                 StreamingProviderLink.objects.create(
@@ -41,12 +31,18 @@ class Command(BaseCommand):
                 continue
 
             update_fields = []
+            if link.provider_id != seed.provider_id:
+                link.provider_id = seed.provider_id
+                update_fields.append("provider_id")
             if not link.landing_url:
                 link.landing_url = seed.landing_url
                 update_fields.append("landing_url")
             if not link.provider_name:
                 link.provider_name = seed.provider_name
                 update_fields.append("provider_name")
+            if not link.is_active:
+                link.is_active = True
+                update_fields.append("is_active")
 
             if update_fields:
                 update_fields.append("updated_at")
