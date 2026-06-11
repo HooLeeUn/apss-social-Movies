@@ -7299,6 +7299,57 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
+    def test_global_pattern_providers_are_clickable_for_us_without_tmdb_watch_url_fallback(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "US": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=US",
+                        "flatrate": [
+                            {
+                                "provider_id": 9991,
+                                "provider_name": "HBO Max Amazon Channel",
+                                "logo_path": "/hbo-amazon.jpg",
+                                "display_priority": 1,
+                            },
+                            {
+                                "provider_id": 9992,
+                                "provider_name": "YouTube TV",
+                                "logo_path": "/youtube-tv.jpg",
+                                "display_priority": 2,
+                            },
+                            {
+                                "provider_id": 9993,
+                                "provider_name": "HBO Max",
+                                "logo_path": "/hbo.jpg",
+                                "display_priority": 3,
+                            },
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "US"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_landing_urls = {
+            9991: "https://www.amazon.com",
+            9992: "https://tv.youtube.com/welcome/",
+            9993: "https://www.hbomax.com",
+        }
+        for provider in response.data["flatrate"]:
+            with self.subTest(provider_id=provider["provider_id"]):
+                self.assertIsNone(provider["direct_url"])
+                self.assertIsNone(provider["affiliate_url"])
+                self.assertEqual(provider["landing_url"], expected_landing_urls[provider["provider_id"]])
+                self.assertEqual(provider["monetized_url"], expected_landing_urls[provider["provider_id"]])
+                self.assertNotEqual(provider["monetized_url"], provider["tmdb_watch_url"])
+                self.assertTrue(provider["is_clickable"])
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
     def test_specific_tmdb_provider_link_overrides_general_link(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7552,6 +7603,63 @@ class StreamingProviderLinkCommandTests(TestCase):
                 self.assertEqual(link.affiliate_url, "")
                 self.assertEqual(link.direct_url, "")
                 self.assertTrue(link.is_active)
+
+    def test_refresh_streaming_provider_links_expands_global_pattern_rules_to_supported_countries(self):
+        StreamingProviderLink.objects.create(
+            provider_id=9001,
+            provider_name="MGM+ Amazon Channel",
+            country_code="CO",
+            landing_url="https://old.example/mgm-amazon",
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=9002,
+            provider_name="YouTube TV",
+            country_code="CO",
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=9003,
+            provider_name="HBO Max",
+            country_code="US",
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=9004,
+            provider_name="STUDIOCANAL PRESENTS Apple TV Channel",
+            country_code="CA",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        expected_landing_urls = {
+            9001: "https://www.amazon.com",
+            9002: "https://tv.youtube.com/welcome/",
+            9003: "https://www.hbomax.com",
+            9004: "https://tv.apple.com/us",
+        }
+        for provider_id, landing_url in expected_landing_urls.items():
+            with self.subTest(provider_id=provider_id):
+                link = StreamingProviderLink.objects.get(provider_id=provider_id, country_code="US")
+                self.assertEqual(link.landing_url, landing_url)
+                self.assertEqual(link.affiliate_url, "")
+                self.assertTrue(link.is_active)
+                self.assertIn("Global fallback landing URL by provider name pattern", link.notes)
+
+    def test_seed_streaming_provider_links_does_not_overwrite_affiliate_landing_url_for_global_rules(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=9005,
+            provider_name="Universal+ Amazon Channel",
+            country_code="CO",
+            landing_url="https://manual.example/universal",
+            affiliate_url="https://affiliate.example/universal",
+        )
+
+        call_command("seed_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://manual.example/universal")
+        self.assertEqual(link.affiliate_url, "https://affiliate.example/universal")
+        self.assertTrue(link.is_active)
+        self.assertIn("Global fallback landing URL by provider name pattern", link.notes)
+        self.assertTrue(StreamingProviderLink.objects.filter(provider_id=9005, country_code="US").exists())
 
 
 class TMDbServiceTests(TestCase):

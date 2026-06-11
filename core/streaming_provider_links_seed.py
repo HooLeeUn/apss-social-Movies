@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from django.db.models import Q
 
 from core.models import StreamingProviderLink
+
+
+GLOBAL_PROVIDER_PATTERN_NOTE = "Global fallback landing URL by provider name pattern"
+MINIMUM_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = ("AR", "CA", "CL", "CO", "ES", "MX", "PE", "UK", "US")
 
 
 @dataclass(frozen=True)
@@ -14,6 +19,7 @@ class StreamingProviderLinkSeed:
     country_code: str
     landing_url: str
     provider_name_aliases: tuple[str, ...] = field(default_factory=tuple)
+    notes: str = ""
 
     @property
     def provider_names(self) -> tuple[str, ...]:
@@ -50,6 +56,7 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
         "CO",
         "https://tv.apple.com/co",
         provider_name_aliases=("STARZ Apple TV Channel",),
+        notes=GLOBAL_PROVIDER_PATTERN_NOTE,
     ),
     StreamingProviderLinkSeed(
         582,
@@ -57,6 +64,7 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
         "CO",
         "https://www.amazon.com",
         provider_name_aliases=("Paramount Plus Amazon Channel",),
+        notes=GLOBAL_PROVIDER_PATTERN_NOTE,
     ),
     StreamingProviderLinkSeed(
         633,
@@ -64,6 +72,7 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
         "CO",
         "https://therokuchannel.roku.com/enguard/",
         provider_name_aliases=("Paramount Plus Roku Premium Channel",),
+        notes=GLOBAL_PROVIDER_PATTERN_NOTE,
     ),
     StreamingProviderLinkSeed(
         207,
@@ -71,6 +80,7 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
         "CO",
         "https://therokuchannel.roku.com/enguard/",
         provider_name_aliases=("Roku", "Roku Channel"),
+        notes=GLOBAL_PROVIDER_PATTERN_NOTE,
     ),
     # United States
     StreamingProviderLinkSeed(8, "Netflix", "US", "https://www.netflix.com/"),
@@ -89,6 +99,92 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
     StreamingProviderLinkSeed(331, "FlixFling", "US", "https://www.flixfling.com/"),
     StreamingProviderLinkSeed(486, "Spectrum On Demand", "US", "https://ondemand.spectrum.net/"),
 )
+
+
+def normalize_seed_country_code(country_code: str) -> str:
+    return country_code.strip().upper()
+
+
+def normalize_provider_name(provider_name: str) -> str:
+    return " ".join(provider_name.strip().lower().split())
+
+
+def get_global_pattern_landing_url(provider_name: str, country_code: str) -> str:
+    normalized_name = normalize_provider_name(provider_name)
+    country = normalize_seed_country_code(country_code).lower()
+
+    # Amazon channel rules must win before plain HBO/HBO Max matching.
+    if "amazon channel" in normalized_name:
+        return "https://www.amazon.com"
+    if normalized_name in {"hbo", "hbo max", "max hbo"}:
+        return "https://www.hbomax.com"
+    if normalized_name == "youtube tv":
+        return "https://tv.youtube.com/welcome/"
+    if (
+        normalized_name in {"roku", "roku channel", "the roku channel", "paramount+ roku premium channel"}
+        or "roku premium channel" in normalized_name
+    ):
+        return "https://therokuchannel.roku.com/enguard/"
+    if "apple tv channel" in normalized_name:
+        return f"https://tv.apple.com/{country}"
+    return ""
+
+
+def get_supported_country_codes() -> tuple[str, ...]:
+    db_country_codes = StreamingProviderLink.objects.exclude(country_code="").values_list("country_code", flat=True).distinct()
+    seed_country_codes = (seed.country_code for seed in STREAMING_PROVIDER_LINK_SEEDS)
+    country_codes = {
+        normalize_seed_country_code(country_code)
+        for country_code in (*MINIMUM_SUPPORTED_COUNTRY_CODES, *seed_country_codes, *db_country_codes)
+        if country_code
+    }
+    return tuple(sorted(country_codes))
+
+
+def iter_global_provider_sources() -> Iterable[tuple[int, str]]:
+    seen: set[tuple[int, str]] = set()
+
+    for seed in STREAMING_PROVIDER_LINK_SEEDS:
+        if get_global_pattern_landing_url(seed.provider_name, seed.country_code):
+            key = (seed.provider_id, seed.provider_name)
+            if key not in seen:
+                seen.add(key)
+                yield seed.provider_id, seed.provider_name
+
+    existing_provider_rows = (
+        StreamingProviderLink.objects.exclude(provider_name="")
+        .values_list("provider_id", "provider_name")
+        .distinct()
+        .order_by("provider_id", "provider_name")
+    )
+    for provider_id, provider_name in existing_provider_rows:
+        if get_global_pattern_landing_url(provider_name, "US"):
+            key = (provider_id, provider_name)
+            if key not in seen:
+                seen.add(key)
+                yield provider_id, provider_name
+
+
+def build_streaming_provider_link_seeds() -> tuple[StreamingProviderLinkSeed, ...]:
+    country_codes = get_supported_country_codes()
+    seeds_by_provider_country: dict[tuple[int, str], StreamingProviderLinkSeed] = {
+        (seed.provider_id, seed.country_code): seed for seed in STREAMING_PROVIDER_LINK_SEEDS
+    }
+
+    for provider_id, provider_name in iter_global_provider_sources():
+        for country_code in country_codes:
+            landing_url = get_global_pattern_landing_url(provider_name, country_code)
+            if not landing_url:
+                continue
+            seeds_by_provider_country[(provider_id, country_code)] = StreamingProviderLinkSeed(
+                provider_id=provider_id,
+                provider_name=provider_name,
+                country_code=country_code,
+                landing_url=landing_url,
+                notes=GLOBAL_PROVIDER_PATTERN_NOTE,
+            )
+
+    return tuple(seeds_by_provider_country.values())
 
 
 def get_general_provider_link(seed: StreamingProviderLinkSeed) -> StreamingProviderLink | None:

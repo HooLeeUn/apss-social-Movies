@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from core.models import StreamingProviderLink
-from core.streaming_provider_links_seed import STREAMING_PROVIDER_LINK_SEEDS, get_general_provider_link
+from core.streaming_provider_links_seed import build_streaming_provider_link_seeds, get_general_provider_link
 
 
 class Command(BaseCommand):
@@ -17,7 +17,7 @@ class Command(BaseCommand):
         updated_count = 0
         verified_at = timezone.now()
 
-        for seed in STREAMING_PROVIDER_LINK_SEEDS:
+        for seed in build_streaming_provider_link_seeds():
             link = get_general_provider_link(seed)
 
             if link is None:
@@ -29,6 +29,7 @@ class Command(BaseCommand):
                     is_active=True,
                     last_verified_at=verified_at,
                     monetization_type=StreamingProviderLink.MonetizationType.NONE,
+                    notes=seed.notes,
                 )
                 created_count += 1
                 continue
@@ -49,6 +50,9 @@ class Command(BaseCommand):
             if not link.is_active:
                 link.is_active = True
                 update_fields.append("is_active")
+            if seed.notes and seed.notes not in link.notes:
+                link.notes = f"{link.notes}\n{seed.notes}".strip()
+                update_fields.append("notes")
             if link.last_verified_at != verified_at:
                 link.last_verified_at = verified_at
                 update_fields.append("last_verified_at")
