@@ -7249,7 +7249,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         expected_landing_urls = {
             339: "https://tv.movistar.co/",
             1855: "https://tv.apple.com/co",
-            582: "https://www.amazon.com",
+            582: "https://www.primevideo.com/",
             633: "https://therokuchannel.roku.com/enguard/",
             207: "https://therokuchannel.roku.com/enguard/",
         }
@@ -7335,7 +7335,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         expected_landing_urls = {
-            9991: "https://www.amazon.com",
+            9991: "https://www.primevideo.com/",
             9992: "https://tv.youtube.com/welcome/",
             9993: "https://www.hbomax.com",
         }
@@ -7571,7 +7571,7 @@ class StreamingProviderLinkCommandTests(TestCase):
         expected_links = {
             339: ("MovistarTV", "https://tv.movistar.co/"),
             1855: ("Starz Apple TV Channel", "https://tv.apple.com/co"),
-            582: ("Paramount+ Amazon Channel", "https://www.amazon.com"),
+            582: ("Paramount+ Amazon Channel", "https://www.primevideo.com/"),
             633: ("Paramount+ Roku Premium Channel", "https://therokuchannel.roku.com/enguard/"),
             207: ("The Roku Channel", "https://therokuchannel.roku.com/enguard/"),
         }
@@ -7592,7 +7592,7 @@ class StreamingProviderLinkCommandTests(TestCase):
         expected_landing_urls = {
             339: "https://tv.movistar.co/",
             1855: "https://tv.apple.com/co",
-            582: "https://www.amazon.com",
+            582: "https://www.primevideo.com/",
             633: "https://therokuchannel.roku.com/enguard/",
             207: "https://therokuchannel.roku.com/enguard/",
         }
@@ -7609,7 +7609,7 @@ class StreamingProviderLinkCommandTests(TestCase):
             provider_id=9001,
             provider_name="MGM+ Amazon Channel",
             country_code="CO",
-            landing_url="https://old.example/mgm-amazon",
+            landing_url="https://www.amazon.com",
         )
         StreamingProviderLink.objects.create(
             provider_id=9002,
@@ -7630,7 +7630,7 @@ class StreamingProviderLinkCommandTests(TestCase):
         call_command("refresh_streaming_provider_links")
 
         expected_landing_urls = {
-            9001: "https://www.amazon.com",
+            9001: "https://www.primevideo.com/",
             9002: "https://tv.youtube.com/welcome/",
             9003: "https://www.hbomax.com",
             9004: "https://tv.apple.com/us",
@@ -7641,7 +7641,44 @@ class StreamingProviderLinkCommandTests(TestCase):
                 self.assertEqual(link.landing_url, landing_url)
                 self.assertEqual(link.affiliate_url, "")
                 self.assertTrue(link.is_active)
-                self.assertIn("Global fallback landing URL by provider name pattern", link.notes)
+                expected_note = (
+                    "Global fallback landing URL for Amazon Channel providers"
+                    if "Amazon Channel" in link.provider_name
+                    else "Global fallback landing URL by provider name pattern"
+                )
+                self.assertIn(expected_note, link.notes)
+
+    def test_refresh_streaming_provider_links_preserves_manual_amazon_channel_landing_url_without_rule_note(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=9006,
+            provider_name="Discovery+ Amazon Channel",
+            country_code="CO",
+            landing_url="https://manual.example/discovery",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://manual.example/discovery")
+        self.assertEqual(link.affiliate_url, "")
+        self.assertNotIn("Global fallback landing URL for Amazon Channel providers", link.notes)
+        self.assertTrue(link.is_active)
+
+    def test_refresh_streaming_provider_links_updates_amazon_channel_when_rule_note_exists(self):
+        link = StreamingProviderLink.objects.create(
+            provider_id=9007,
+            provider_name="AMC+ Amazon Channel",
+            country_code="CO",
+            landing_url="https://old-rule.example/amc",
+            notes="Global fallback landing URL for Amazon Channel providers",
+        )
+
+        call_command("refresh_streaming_provider_links")
+
+        link.refresh_from_db()
+        self.assertEqual(link.landing_url, "https://www.primevideo.com/")
+        self.assertEqual(link.affiliate_url, "")
+        self.assertTrue(link.is_active)
 
     def test_seed_streaming_provider_links_does_not_overwrite_affiliate_landing_url_for_global_rules(self):
         link = StreamingProviderLink.objects.create(
@@ -7658,7 +7695,7 @@ class StreamingProviderLinkCommandTests(TestCase):
         self.assertEqual(link.landing_url, "https://manual.example/universal")
         self.assertEqual(link.affiliate_url, "https://affiliate.example/universal")
         self.assertTrue(link.is_active)
-        self.assertIn("Global fallback landing URL by provider name pattern", link.notes)
+        self.assertIn("Global fallback landing URL for Amazon Channel providers", link.notes)
         self.assertTrue(StreamingProviderLink.objects.filter(provider_id=9005, country_code="US").exists())
 
 

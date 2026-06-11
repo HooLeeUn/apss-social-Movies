@@ -9,6 +9,9 @@ from core.models import StreamingProviderLink
 
 
 GLOBAL_PROVIDER_PATTERN_NOTE = "Global fallback landing URL by provider name pattern"
+AMAZON_CHANNEL_PROVIDER_PATTERN_NOTE = "Global fallback landing URL for Amazon Channel providers"
+AMAZON_CHANNEL_LANDING_URL = "https://www.primevideo.com/"
+LEGACY_AMAZON_CHANNEL_LANDING_URL = "https://www.amazon.com"
 MINIMUM_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = ("AR", "CA", "CL", "CO", "ES", "MX", "PE", "UK", "US")
 
 
@@ -62,9 +65,9 @@ STREAMING_PROVIDER_LINK_SEEDS: tuple[StreamingProviderLinkSeed, ...] = (
         582,
         "Paramount+ Amazon Channel",
         "CO",
-        "https://www.amazon.com",
+        AMAZON_CHANNEL_LANDING_URL,
         provider_name_aliases=("Paramount Plus Amazon Channel",),
-        notes=GLOBAL_PROVIDER_PATTERN_NOTE,
+        notes=AMAZON_CHANNEL_PROVIDER_PATTERN_NOTE,
     ),
     StreamingProviderLinkSeed(
         633,
@@ -109,13 +112,59 @@ def normalize_provider_name(provider_name: str) -> str:
     return " ".join(provider_name.strip().lower().split())
 
 
+def is_amazon_channel_provider(provider_name: str) -> bool:
+    return "amazon channel" in normalize_provider_name(provider_name)
+
+
+def get_global_pattern_note(provider_name: str) -> str:
+    if is_amazon_channel_provider(provider_name):
+        return AMAZON_CHANNEL_PROVIDER_PATTERN_NOTE
+    return GLOBAL_PROVIDER_PATTERN_NOTE
+
+
+def seed_uses_amazon_channel_rule(seed: StreamingProviderLinkSeed) -> bool:
+    return seed.notes == AMAZON_CHANNEL_PROVIDER_PATTERN_NOTE or is_amazon_channel_provider(seed.provider_name)
+
+
+def should_update_landing_url_from_seed(
+    link: StreamingProviderLink,
+    seed: StreamingProviderLinkSeed,
+    *,
+    update_static_provider: bool = True,
+) -> bool:
+    if not link.landing_url:
+        return True
+    if link.affiliate_url:
+        return False
+    if link.landing_url == seed.landing_url:
+        return False
+    if seed_uses_amazon_channel_rule(seed):
+        return (
+            link.landing_url == LEGACY_AMAZON_CHANNEL_LANDING_URL
+            or AMAZON_CHANNEL_PROVIDER_PATTERN_NOTE in link.notes
+        )
+    return update_static_provider or bool(seed.notes)
+
+
+def should_add_notes_from_seed(link: StreamingProviderLink, seed: StreamingProviderLinkSeed) -> bool:
+    if not seed.notes or seed.notes in link.notes:
+        return False
+    if (
+        seed_uses_amazon_channel_rule(seed)
+        and not link.affiliate_url
+        and link.landing_url != seed.landing_url
+    ):
+        return False
+    return True
+
+
 def get_global_pattern_landing_url(provider_name: str, country_code: str) -> str:
     normalized_name = normalize_provider_name(provider_name)
     country = normalize_seed_country_code(country_code).lower()
 
     # Amazon channel rules must win before plain HBO/HBO Max matching.
-    if "amazon channel" in normalized_name:
-        return "https://www.amazon.com"
+    if is_amazon_channel_provider(provider_name):
+        return AMAZON_CHANNEL_LANDING_URL
     if normalized_name in {"hbo", "hbo max", "max hbo"}:
         return "https://www.hbomax.com"
     if normalized_name == "youtube tv":
@@ -131,7 +180,11 @@ def get_global_pattern_landing_url(provider_name: str, country_code: str) -> str
 
 
 def get_supported_country_codes() -> tuple[str, ...]:
-    db_country_codes = StreamingProviderLink.objects.exclude(country_code="").values_list("country_code", flat=True).distinct()
+    db_country_codes = (
+        StreamingProviderLink.objects.exclude(country_code="")
+        .values_list("country_code", flat=True)
+        .distinct()
+    )
     seed_country_codes = (seed.country_code for seed in STREAMING_PROVIDER_LINK_SEEDS)
     country_codes = {
         normalize_seed_country_code(country_code)
@@ -181,7 +234,7 @@ def build_streaming_provider_link_seeds() -> tuple[StreamingProviderLinkSeed, ..
                 provider_name=provider_name,
                 country_code=country_code,
                 landing_url=landing_url,
-                notes=GLOBAL_PROVIDER_PATTERN_NOTE,
+                notes=get_global_pattern_note(provider_name),
             )
 
     return tuple(seeds_by_provider_country.values())
