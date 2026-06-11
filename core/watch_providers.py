@@ -6,6 +6,7 @@ from django.core.cache import cache
 from django.db.models import Q
 
 from .models import Movie, StreamingProviderLink
+from .streaming_provider_links_seed import get_global_pattern_landing_url
 from .tmdb import get_tmdb_json
 
 TMDB_LOGO_BASE_URL = "https://image.tmdb.org/t/p/w92"
@@ -27,7 +28,7 @@ def get_movie_watch_providers(movie: Movie, country_code: str) -> dict[str, Any]
     provider_links = get_active_provider_links(movie, raw_payload, country)
     providers = {
         group: serialize_provider_group(
-            raw_payload.get(group, []), raw_payload.get("link", ""), provider_links
+            raw_payload.get(group, []), raw_payload.get("link", ""), provider_links, country
         )
         for group in WATCH_PROVIDER_GROUPS
     }
@@ -180,6 +181,7 @@ def serialize_provider_group(
     providers: Any,
     tmdb_watch_url: str,
     provider_links: dict[int, StreamingProviderLink],
+    country: str,
 ) -> list[dict[str, Any]]:
     if not isinstance(providers, list):
         return []
@@ -194,6 +196,9 @@ def serialize_provider_group(
         direct_url = get_link_url(provider_link, "direct_url")
         affiliate_url = get_link_url(provider_link, "affiliate_url")
         landing_url = get_link_url(provider_link, "landing_url")
+        if landing_url is None:
+            pattern_landing_url = get_global_pattern_landing_url(provider.get("provider_name", ""), country)
+            landing_url = pattern_landing_url or None
         monetized_url = affiliate_url or direct_url or landing_url
         monetization_type = (
             provider_link.monetization_type
