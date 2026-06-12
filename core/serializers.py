@@ -1548,6 +1548,43 @@ class FriendshipSerializer(serializers.ModelSerializer):
         return FriendshipUserSerializer(obj.other_user(request.user), context=self.context).data
 
 
+class TMDbGenderSerializer(serializers.Serializer):
+    code = serializers.IntegerField()
+    label = serializers.CharField(allow_blank=True)
+
+
+class TMDbPersonBriefSerializer(serializers.Serializer):
+    tmdb_person_id = serializers.IntegerField(allow_null=True)
+    name = serializers.CharField(allow_blank=True)
+    profile_url = serializers.URLField(allow_null=True)
+    known_for_department = serializers.CharField(allow_blank=True)
+    gender = TMDbGenderSerializer()
+    birthday = serializers.CharField(allow_null=True, allow_blank=True)
+    deathday = serializers.CharField(allow_null=True, allow_blank=True)
+    place_of_birth = serializers.CharField(allow_blank=True)
+    facebook_url = serializers.URLField(allow_null=True)
+    instagram_url = serializers.URLField(allow_null=True)
+    x_url = serializers.URLField(allow_null=True)
+    tmdb_url = serializers.URLField(allow_null=True)
+
+
+class TMDbDirectorCreditSerializer(TMDbPersonBriefSerializer):
+    job = serializers.CharField(allow_blank=True)
+
+
+class TMDbCastCreditSerializer(TMDbPersonBriefSerializer):
+    character = serializers.CharField(allow_blank=True)
+    order = serializers.IntegerField(allow_null=True)
+
+
+class MovieCreditsSerializer(serializers.Serializer):
+    movie_id = serializers.IntegerField()
+    tmdb_id = serializers.IntegerField(allow_null=True)
+    type = serializers.ChoiceField(choices=["movie", "tv"])
+    director = TMDbDirectorCreditSerializer(many=True)
+    cast = TMDbCastCreditSerializer(many=True)
+
+
 class WatchProviderSerializer(serializers.Serializer):
     provider_id = serializers.IntegerField(allow_null=True)
     provider_name = serializers.CharField(allow_blank=True)
