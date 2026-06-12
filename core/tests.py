@@ -8493,7 +8493,7 @@ class TMDbCreditsEndpointTests(TestCase):
         movie = self._create_movie()
         requested_paths = []
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             requested_paths.append(path)
             return self._tmdb_response(path, params)
 
@@ -8524,7 +8524,7 @@ class TMDbCreditsEndpointTests(TestCase):
         movie = self._create_movie()
         requested_paths = []
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             requested_paths.append(path)
             return self._tmdb_response(path, params)
 
@@ -8540,9 +8540,11 @@ class TMDbCreditsEndpointTests(TestCase):
 
     def test_person_detail_endpoint_returns_cached_brief_person_payload(self):
         requested_paths = []
+        requested_timeouts = []
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             requested_paths.append(path)
+            requested_timeouts.append(timeout)
             return self._tmdb_response(path, params)
 
         with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
@@ -8555,11 +8557,12 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(first_response.data["facebook_url"], "https://www.facebook.com/fb100")
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(requested_paths, ["/person/100", "/person/100/external_ids"])
+        self.assertEqual(requested_timeouts, [4, 4])
 
     def test_person_detail_endpoint_maps_sam_neill_personal_fields(self):
         requested_paths = []
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             requested_paths.append(path)
             if path == "/person/4783":
                 return {
@@ -8600,7 +8603,7 @@ class TMDbCreditsEndpointTests(TestCase):
     def test_person_detail_endpoint_keeps_person_details_when_external_ids_fail(self):
         requested_paths = []
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             requested_paths.append(path)
             if path == "/person/4783":
                 return {
@@ -8618,31 +8621,43 @@ class TMDbCreditsEndpointTests(TestCase):
             self.fail(f"Unexpected TMDb path: {path}")
 
         with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
-            response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+            first_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+            second_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["birthday"], "1947-09-14")
-        self.assertEqual(response.data["place_of_birth"], "Omagh, County Tyrone, Northern Ireland, UK")
-        self.assertIsNone(response.data["facebook_url"])
-        self.assertIsNone(response.data["instagram_url"])
-        self.assertIsNone(response.data["x_url"])
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["birthday"], "1947-09-14")
+        self.assertEqual(first_response.data["place_of_birth"], "Omagh, County Tyrone, Northern Ireland, UK")
+        self.assertIsNone(first_response.data["facebook_url"])
+        self.assertIsNone(first_response.data["instagram_url"])
+        self.assertIsNone(first_response.data["x_url"])
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data["birthday"], "1947-09-14")
         self.assertEqual(requested_paths, ["/person/4783", "/person/4783/external_ids"])
 
     def test_person_detail_endpoint_returns_minimal_payload_when_tmdb_fails(self):
-        with patch("core.tmdb_credits.get_tmdb_json", side_effect=TMDbServiceError("TMDb unavailable")):
-            response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+        requested_paths = []
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["tmdb_person_id"], 4783)
-        self.assertEqual(response.data["name"], "")
-        self.assertIsNone(response.data["birthday"])
-        self.assertEqual(response.data["place_of_birth"], "")
-        self.assertEqual(response.data["tmdb_url"], "https://www.themoviedb.org/person/4783")
+        def fake_get_tmdb_json(path, params=None, timeout=None):
+            requested_paths.append(path)
+            raise TMDbServiceError("TMDb unavailable")
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            first_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+            second_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["tmdb_person_id"], 4783)
+        self.assertEqual(first_response.data["name"], "")
+        self.assertIsNone(first_response.data["birthday"])
+        self.assertEqual(first_response.data["place_of_birth"], "")
+        self.assertEqual(first_response.data["tmdb_url"], "https://www.themoviedb.org/person/4783")
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(requested_paths, ["/person/4783"])
 
     def test_series_credits_uses_created_by_when_no_director_is_in_crew(self):
         series = self._create_movie(type=Movie.SERIES, tmdb_id=777)
 
-        def fake_get_tmdb_json(path, params=None):
+        def fake_get_tmdb_json(path, params=None, timeout=None):
             if path == "/tv/777/credits":
                 return {"crew": [], "cast": []}
             if path == "/tv/777":
