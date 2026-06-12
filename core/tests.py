@@ -8488,7 +8488,7 @@ class TMDbCreditsEndpointTests(TestCase):
             }
         self.fail(f"Unexpected TMDb path: {path}")
 
-    def test_movie_credits_returns_full_cast_and_enriches_director_and_first_twenty_cast_members(self):
+    def test_movie_credits_returns_basic_cast_and_director_without_person_detail_requests(self):
         movie = self._create_movie()
         requested_paths = []
 
@@ -8506,18 +8506,18 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(len(response.data["director"]), 1)
         self.assertEqual(response.data["director"][0]["tmdb_person_id"], 10)
         self.assertEqual(response.data["director"][0]["job"], "Director")
-        self.assertEqual(response.data["director"][0]["profile_url"], "https://image.tmdb.org/t/p/w185/person-10.jpg")
+        self.assertEqual(response.data["director"][0]["profile_url"], "https://image.tmdb.org/t/p/w185/director.jpg")
         self.assertEqual(response.data["director"][0]["gender"], {"code": 1, "label": "Female"})
-        self.assertEqual(response.data["director"][0]["instagram_url"], "https://www.instagram.com/ig10")
+        self.assertIsNone(response.data["director"][0]["instagram_url"])
         self.assertEqual(len(response.data["cast"]), 22)
         self.assertEqual(response.data["cast"][0]["tmdb_person_id"], 100)
-        self.assertEqual(response.data["cast"][0]["birthday"], "1980-01-02")
+        self.assertIsNone(response.data["cast"][0]["birthday"])
+        self.assertEqual(response.data["cast"][0]["profile_url"], "https://image.tmdb.org/t/p/w185/cast-100.jpg")
         self.assertEqual(response.data["cast"][19]["tmdb_person_id"], 119)
-        self.assertEqual(response.data["cast"][19]["x_url"], "https://x.com/tw119")
+        self.assertIsNone(response.data["cast"][19]["x_url"])
         self.assertEqual(response.data["cast"][20]["tmdb_person_id"], 120)
         self.assertIsNone(response.data["cast"][20]["birthday"])
-        self.assertNotIn("/person/120", requested_paths)
-        self.assertNotIn("/person/120/external_ids", requested_paths)
+        self.assertEqual(requested_paths, ["/movie/550/credits"])
 
     def test_movie_credits_uses_cached_tmdb_payloads(self):
         movie = self._create_movie()
@@ -8534,8 +8534,8 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(requested_paths.count("/movie/550/credits"), 1)
-        self.assertEqual(requested_paths.count("/person/10"), 1)
-        self.assertEqual(requested_paths.count("/person/10/external_ids"), 1)
+        self.assertNotIn("/person/10", requested_paths)
+        self.assertNotIn("/person/10/external_ids", requested_paths)
 
     def test_person_detail_endpoint_returns_cached_brief_person_payload(self):
         requested_paths = []
@@ -8563,19 +8563,6 @@ class TMDbCreditsEndpointTests(TestCase):
                 return {"crew": [], "cast": []}
             if path == "/tv/777":
                 return {"created_by": [{"id": 30, "name": "Series Creator", "profile_path": "/creator.jpg"}]}
-            if path == "/person/30":
-                return {
-                    "id": 30,
-                    "name": "Series Creator",
-                    "profile_path": "/creator-detail.jpg",
-                    "known_for_department": "Writing",
-                    "gender": 0,
-                    "birthday": None,
-                    "deathday": None,
-                    "place_of_birth": "",
-                }
-            if path == "/person/30/external_ids":
-                return {"facebook_id": None, "instagram_id": None, "twitter_id": None}
             self.fail(f"Unexpected TMDb path: {path}")
 
         with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):

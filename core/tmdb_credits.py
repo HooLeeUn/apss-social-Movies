@@ -41,31 +41,10 @@ def get_movie_credits_payload(movie: Movie) -> dict[str, Any]:
         return payload
 
     credits = get_cached_tmdb_credits(movie)
-    directors = build_director_entries(movie, credits)
-    cast = build_cast_entries(credits)
-
-    person_ids_to_enrich = {
-        person["tmdb_person_id"]
-        for person in directors
-        if person.get("tmdb_person_id") is not None
-    }
-    person_ids_to_enrich.update(
-        person["tmdb_person_id"]
-        for person in cast[:TMDB_PERSON_DETAIL_LIMIT]
-        if person.get("tmdb_person_id") is not None
-    )
-
-    person_details = {}
-    for person_id in person_ids_to_enrich:
-        try:
-            person_details[person_id] = get_cached_person_payload(person_id)
-        except TMDbServiceError:
-            continue
-
     return {
         **payload,
-        "director": [enrich_person_entry(person, person_details) for person in directors],
-        "cast": [enrich_person_entry(person, person_details) for person in cast],
+        "director": build_director_entries(movie, credits),
+        "cast": build_cast_entries(credits),
     }
 
 
@@ -132,7 +111,11 @@ def build_director_entries(movie: Movie, credits: dict[str, Any]) -> list[dict[s
     if directors or movie.type != Movie.SERIES or not movie.tmdb_id:
         return directors
 
-    tv_details = get_cached_tv_details(movie.tmdb_id)
+    try:
+        tv_details = get_cached_tv_details(movie.tmdb_id)
+    except TMDbServiceError:
+        return []
+
     created_by = tv_details.get("created_by", [])
     if not isinstance(created_by, list):
         return []
