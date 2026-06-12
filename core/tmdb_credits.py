@@ -11,6 +11,11 @@ TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w185"
 TMDB_WEB_BASE_URL = "https://www.themoviedb.org"
 TMDB_CREDITS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_CACHE_TIMEOUT = 60 * 60 * 24 * 7
+TMDB_PERSON_DETAIL_CACHE_TIMEOUT = 60 * 60 * 24 * 7
+TMDB_PERSON_EXTERNAL_IDS_CACHE_TIMEOUT = 60 * 60 * 24 * 7
+TMDB_PERSON_PARTIAL_CACHE_TIMEOUT = 60 * 60
+TMDB_PERSON_FAILURE_CACHE_TIMEOUT = 60 * 5
+TMDB_PERSON_REQUEST_TIMEOUT = 4
 TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_DETAIL_LIMIT = 20
 
@@ -41,31 +46,10 @@ def get_movie_credits_payload(movie: Movie) -> dict[str, Any]:
         return payload
 
     credits = get_cached_tmdb_credits(movie)
-    directors = build_director_entries(movie, credits)
-    cast = build_cast_entries(credits)
-
-    person_ids_to_enrich = {
-        person["tmdb_person_id"]
-        for person in directors
-        if person.get("tmdb_person_id") is not None
-    }
-    person_ids_to_enrich.update(
-        person["tmdb_person_id"]
-        for person in cast[:TMDB_PERSON_DETAIL_LIMIT]
-        if person.get("tmdb_person_id") is not None
-    )
-
-    person_details = {}
-    for person_id in person_ids_to_enrich:
-        try:
-            person_details[person_id] = get_cached_person_payload(person_id)
-        except TMDbServiceError:
-            continue
-
     return {
         **payload,
-        "director": [enrich_person_entry(person, person_details) for person in directors],
-        "cast": [enrich_person_entry(person, person_details) for person in cast],
+        "director": build_director_entries(movie, credits),
+        "cast": build_cast_entries(credits),
     }
 
 
@@ -107,19 +91,68 @@ def get_cached_tv_details(tmdb_id: int) -> dict[str, Any]:
 
 
 def get_cached_person_payload(person_id: int) -> dict[str, Any]:
-    cache_key = f"tmdb-person:v1:{person_id}"
+    cache_key = f"tmdb-person:v2:{person_id}"
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
         return cached_payload
 
-    details = get_tmdb_json(f"/person/{person_id}")
-    external_ids = get_tmdb_json(f"/person/{person_id}/external_ids")
+    try:
+        details = get_cached_person_details(person_id)
+    except TMDbServiceError:
+        payload = build_minimal_person_payload(person_id)
+        cache.set(cache_key, payload, TMDB_PERSON_FAILURE_CACHE_TIMEOUT)
+        return payload
+
+    external_ids_loaded = True
+    try:
+        external_ids = get_cached_person_external_ids(person_id)
+    except TMDbServiceError:
+        external_ids_loaded = False
+        external_ids = {}
+
     payload = serialize_person_payload(details, external_ids)
-    cache.set(cache_key, payload, TMDB_PERSON_CACHE_TIMEOUT)
+    cache_timeout = (
+        TMDB_PERSON_CACHE_TIMEOUT
+        if external_ids_loaded
+        else TMDB_PERSON_PARTIAL_CACHE_TIMEOUT
+    )
+    cache.set(cache_key, payload, cache_timeout)
     return payload
 
 
-def build_director_entries(movie: Movie, credits: dict[str, Any]) -> list[dict[str, Any]]:
+def get_cached_person_details(person_id: int) -> dict[str, Any]:
+    cache_key = f"tmdb-person-details:v1:{person_id}"
+    cached_payload = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    tmdb_payload = get_tmdb_json(
+        f"/person/{person_id}", timeout=TMDB_PERSON_REQUEST_TIMEOUT
+    )
+    cache.set(cache_key, tmdb_payload, TMDB_PERSON_DETAIL_CACHE_TIMEOUT)
+    return tmdb_payload
+
+
+def get_cached_person_external_ids(person_id: int) -> dict[str, Any]:
+    cache_key = f"tmdb-person-external-ids:v1:{person_id}"
+    cached_payload = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    tmdb_payload = get_tmdb_json(
+        f"/person/{person_id}/external_ids", timeout=TMDB_PERSON_REQUEST_TIMEOUT
+    )
+    cache.set(cache_key, tmdb_payload, TMDB_PERSON_EXTERNAL_IDS_CACHE_TIMEOUT)
+    return tmdb_payload
+
+
+def build_minimal_person_payload(person_id: int) -> dict[str, Any]:
+    return serialize_person_payload({"id": person_id}, {})
+
+
+def build_director_entries(
+    movie: Movie, credits: dict[str, Any]
+) -> list[dict[str, Any]]:
     crew = credits.get("crew", [])
     if not isinstance(crew, list):
         crew = []
@@ -132,7 +165,11 @@ def build_director_entries(movie: Movie, credits: dict[str, Any]) -> list[dict[s
     if directors or movie.type != Movie.SERIES or not movie.tmdb_id:
         return directors
 
-    tv_details = get_cached_tv_details(movie.tmdb_id)
+    try:
+        tv_details = get_cached_tv_details(movie.tmdb_id)
+    except TMDbServiceError:
+        return []
+
     created_by = tv_details.get("created_by", [])
     if not isinstance(created_by, list):
         return []
@@ -159,7 +196,9 @@ def build_cast_entries(credits: dict[str, Any]) -> list[dict[str, Any]]:
     ]
     return sorted(
         entries,
-        key=lambda entry: entry.get("order") if entry.get("order") is not None else 999999,
+        key=lambda entry: (
+            entry.get("order") if entry.get("order") is not None else 999999
+        ),
     )
 
 
@@ -183,7 +222,9 @@ def serialize_credit_person(person: dict[str, Any], role_key: str) -> dict[str, 
     }
 
 
-def serialize_person_payload(details: dict[str, Any], external_ids: dict[str, Any]) -> dict[str, Any]:
+def serialize_person_payload(
+    details: dict[str, Any], external_ids: dict[str, Any]
+) -> dict[str, Any]:
     person_id = details.get("id")
     return {
         "tmdb_person_id": person_id,
@@ -195,13 +236,17 @@ def serialize_person_payload(details: dict[str, Any], external_ids: dict[str, An
         "deathday": details.get("deathday") or None,
         "place_of_birth": details.get("place_of_birth") or "",
         "facebook_url": build_social_url("facebook", external_ids.get("facebook_id")),
-        "instagram_url": build_social_url("instagram", external_ids.get("instagram_id")),
+        "instagram_url": build_social_url(
+            "instagram", external_ids.get("instagram_id")
+        ),
         "x_url": build_social_url("x", external_ids.get("twitter_id")),
         "tmdb_url": build_tmdb_person_url(person_id),
     }
 
 
-def enrich_person_entry(person: dict[str, Any], details_by_person_id: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def enrich_person_entry(
+    person: dict[str, Any], details_by_person_id: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
     person_id = person.get("tmdb_person_id")
     details = details_by_person_id.get(person_id)
     if not details:

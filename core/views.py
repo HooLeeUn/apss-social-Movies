@@ -64,7 +64,7 @@ from .models import (
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .tmdb import TMDbServiceError
-from .tmdb_credits import build_empty_credits_payload, get_movie_credits_payload, get_person_payload
+from .tmdb_credits import build_empty_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
 from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
@@ -2995,22 +2995,28 @@ class MovieDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = MovieListSerializer
     lookup_field = "pk"
+    anonymous_cache_timeout = 60 * 5
 
     def get_queryset(self):
         user = self.request.user
-        has_preferences = user.is_authenticated and UserTasteProfile.objects.filter(
-            user_id=user.id,
-            ratings_count__gt=0,
-        ).exists()
-        if user.is_authenticated:
-            qs = Movie.objects.feed_for_user(user, include_recommendation_score=has_preferences)
-        else:
-            qs = Movie.objects.with_display_rating().with_my_rating(user)
-
+        qs = Movie.objects.with_display_rating().with_my_rating(user)
         qs = qs.with_in_my_list(user).with_in_my_recommendations(user).with_comment_stats().select_related("author", "author__profile").annotate(
             general_rating=F("display_rating"),
         )
         return qs.with_following_rating_stats(user)
+
+    def retrieve(self, request, *args, **kwargs):
+        if request.user.is_authenticated:
+            return super().retrieve(request, *args, **kwargs)
+
+        cache_key = f"movie-detail:v1:anonymous:{kwargs.get(self.lookup_url_kwarg or self.lookup_field)}"
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        response = super().retrieve(request, *args, **kwargs)
+        cache.set(cache_key, response.data, self.anonymous_cache_timeout)
+        return response
 
 
 class MyMovieListView(generics.ListAPIView):
@@ -3045,7 +3051,7 @@ class TMDbPersonDetailView(APIView):
             payload = get_person_payload(person_id)
         except TMDbServiceError as exc:
             logger.warning("TMDb person request failed for person_id=%s: %s", person_id, exc)
-            return Response({"detail": "TMDb person data is unavailable."}, status=status.HTTP_502_BAD_GATEWAY)
+            payload = build_minimal_person_payload(person_id)
 
         serializer = TMDbPersonBriefSerializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)
