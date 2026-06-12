@@ -11,6 +11,8 @@ TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w185"
 TMDB_WEB_BASE_URL = "https://www.themoviedb.org"
 TMDB_CREDITS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_CACHE_TIMEOUT = 60 * 60 * 24 * 7
+TMDB_PERSON_DETAIL_CACHE_TIMEOUT = 60 * 60 * 24 * 7
+TMDB_PERSON_EXTERNAL_IDS_CACHE_TIMEOUT = 60 * 60 * 24 * 7
 TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_DETAIL_LIMIT = 20
 
@@ -86,16 +88,49 @@ def get_cached_tv_details(tmdb_id: int) -> dict[str, Any]:
 
 
 def get_cached_person_payload(person_id: int) -> dict[str, Any]:
-    cache_key = f"tmdb-person:v1:{person_id}"
+    cache_key = f"tmdb-person:v2:{person_id}"
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
         return cached_payload
 
-    details = get_tmdb_json(f"/person/{person_id}")
-    external_ids = get_tmdb_json(f"/person/{person_id}/external_ids")
+    details = get_cached_person_details(person_id)
+    external_ids_loaded = True
+    try:
+        external_ids = get_cached_person_external_ids(person_id)
+    except TMDbServiceError:
+        external_ids_loaded = False
+        external_ids = {}
+
     payload = serialize_person_payload(details, external_ids)
-    cache.set(cache_key, payload, TMDB_PERSON_CACHE_TIMEOUT)
+    if external_ids_loaded:
+        cache.set(cache_key, payload, TMDB_PERSON_CACHE_TIMEOUT)
     return payload
+
+
+def get_cached_person_details(person_id: int) -> dict[str, Any]:
+    cache_key = f"tmdb-person-details:v1:{person_id}"
+    cached_payload = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    tmdb_payload = get_tmdb_json(f"/person/{person_id}")
+    cache.set(cache_key, tmdb_payload, TMDB_PERSON_DETAIL_CACHE_TIMEOUT)
+    return tmdb_payload
+
+
+def get_cached_person_external_ids(person_id: int) -> dict[str, Any]:
+    cache_key = f"tmdb-person-external-ids:v1:{person_id}"
+    cached_payload = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    tmdb_payload = get_tmdb_json(f"/person/{person_id}/external_ids")
+    cache.set(cache_key, tmdb_payload, TMDB_PERSON_EXTERNAL_IDS_CACHE_TIMEOUT)
+    return tmdb_payload
+
+
+def build_minimal_person_payload(person_id: int) -> dict[str, Any]:
+    return serialize_person_payload({"id": person_id}, {})
 
 
 def build_director_entries(movie: Movie, credits: dict[str, Any]) -> list[dict[str, Any]]:

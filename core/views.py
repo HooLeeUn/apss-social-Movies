@@ -64,7 +64,7 @@ from .models import (
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .tmdb import TMDbServiceError
-from .tmdb_credits import build_empty_credits_payload, get_movie_credits_payload, get_person_payload
+from .tmdb_credits import build_empty_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
 from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
@@ -3051,7 +3051,7 @@ class TMDbPersonDetailView(APIView):
             payload = get_person_payload(person_id)
         except TMDbServiceError as exc:
             logger.warning("TMDb person request failed for person_id=%s: %s", person_id, exc)
-            return Response({"detail": "TMDb person data is unavailable."}, status=status.HTTP_502_BAD_GATEWAY)
+            payload = build_minimal_person_payload(person_id)
 
         serializer = TMDbPersonBriefSerializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)

@@ -26,6 +26,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.feed_pool import DailyFeedPoolService
+from core.tmdb import TMDbServiceError
 from core.models import (
     Comment,
     CommentReaction,
@@ -8554,6 +8555,89 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(first_response.data["facebook_url"], "https://www.facebook.com/fb100")
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(requested_paths, ["/person/100", "/person/100/external_ids"])
+
+    def test_person_detail_endpoint_maps_sam_neill_personal_fields(self):
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None):
+            requested_paths.append(path)
+            if path == "/person/4783":
+                return {
+                    "id": 4783,
+                    "name": "Sam Neill",
+                    "profile_path": "/yIY7lJqX6RwcG3G7mxN7t6HwCZp.jpg",
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "birthday": "1947-09-14",
+                    "deathday": None,
+                    "place_of_birth": "Omagh, County Tyrone, Northern Ireland, UK",
+                }
+            if path == "/person/4783/external_ids":
+                return {
+                    "facebook_id": "samneillofficial",
+                    "instagram_id": "samneilltheprop",
+                    "twitter_id": "TwoPaddocks",
+                }
+            self.fail(f"Unexpected TMDb path: {path}")
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["tmdb_person_id"], 4783)
+        self.assertEqual(response.data["name"], "Sam Neill")
+        self.assertEqual(response.data["known_for_department"], "Acting")
+        self.assertEqual(response.data["gender"], {"code": 2, "label": "Male"})
+        self.assertEqual(response.data["birthday"], "1947-09-14")
+        self.assertIsNone(response.data["deathday"])
+        self.assertEqual(response.data["place_of_birth"], "Omagh, County Tyrone, Northern Ireland, UK")
+        self.assertEqual(response.data["facebook_url"], "https://www.facebook.com/samneillofficial")
+        self.assertEqual(response.data["instagram_url"], "https://www.instagram.com/samneilltheprop")
+        self.assertEqual(response.data["x_url"], "https://x.com/TwoPaddocks")
+        self.assertEqual(response.data["tmdb_url"], "https://www.themoviedb.org/person/4783")
+        self.assertEqual(requested_paths, ["/person/4783", "/person/4783/external_ids"])
+
+    def test_person_detail_endpoint_keeps_person_details_when_external_ids_fail(self):
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None):
+            requested_paths.append(path)
+            if path == "/person/4783":
+                return {
+                    "id": 4783,
+                    "name": "Sam Neill",
+                    "profile_path": None,
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "birthday": "1947-09-14",
+                    "deathday": None,
+                    "place_of_birth": "Omagh, County Tyrone, Northern Ireland, UK",
+                }
+            if path == "/person/4783/external_ids":
+                raise TMDbServiceError("external ids unavailable")
+            self.fail(f"Unexpected TMDb path: {path}")
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["birthday"], "1947-09-14")
+        self.assertEqual(response.data["place_of_birth"], "Omagh, County Tyrone, Northern Ireland, UK")
+        self.assertIsNone(response.data["facebook_url"])
+        self.assertIsNone(response.data["instagram_url"])
+        self.assertIsNone(response.data["x_url"])
+        self.assertEqual(requested_paths, ["/person/4783", "/person/4783/external_ids"])
+
+    def test_person_detail_endpoint_returns_minimal_payload_when_tmdb_fails(self):
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=TMDbServiceError("TMDb unavailable")):
+            response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 4783}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["tmdb_person_id"], 4783)
+        self.assertEqual(response.data["name"], "")
+        self.assertIsNone(response.data["birthday"])
+        self.assertEqual(response.data["place_of_birth"], "")
+        self.assertEqual(response.data["tmdb_url"], "https://www.themoviedb.org/person/4783")
 
     def test_series_credits_uses_created_by_when_no_director_is_in_crew(self):
         series = self._create_movie(type=Movie.SERIES, tmdb_id=777)
