@@ -10,7 +10,11 @@ class TMDbServiceError(Exception):
     """Raised when a TMDb request fails or configuration is invalid."""
 
 
-def get_tmdb_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def get_tmdb_json(
+    path: str,
+    params: dict[str, Any] | None = None,
+    timeout: float | tuple[float, float] | None = None,
+) -> dict[str, Any]:
     token = getattr(settings, "TMDB_READ_ACCESS_TOKEN", "")
     if not token:
         raise TMDbServiceError("TMDB_READ_ACCESS_TOKEN is not configured")
@@ -18,6 +22,12 @@ def get_tmdb_json(path: str, params: dict[str, Any] | None = None) -> dict[str, 
     base_url = getattr(settings, "TMDB_BASE_URL", "https://api.themoviedb.org/3")
     normalized_base_url = base_url.rstrip("/")
     normalized_path = path if path.startswith("/") else f"/{path}"
+
+    request_timeout = (
+        timeout
+        if timeout is not None
+        else getattr(settings, "TMDB_REQUEST_TIMEOUT", 10)
+    )
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -29,7 +39,7 @@ def get_tmdb_json(path: str, params: dict[str, Any] | None = None) -> dict[str, 
             f"{normalized_base_url}{normalized_path}",
             params=params or {},
             headers=headers,
-            timeout=10,
+            timeout=request_timeout,
         )
     except requests.Timeout as exc:
         raise TMDbServiceError("TMDb request timed out") from exc
