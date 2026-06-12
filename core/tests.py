@@ -8417,3 +8417,171 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         movie.refresh_from_db()
         self.assertEqual(movie.tmdb_id, 598)
         mock_tmdb.assert_not_called()
+
+
+@override_settings(TMDB_READ_ACCESS_TOKEN="test-token")
+class TMDbCreditsEndpointTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="tmdbuser",
+            email="tmdb@example.com",
+            password="strongpass123",
+        )
+
+    def _create_movie(self, **kwargs):
+        defaults = {
+            "author": self.user,
+            "title_english": "TMDb Title",
+            "title_spanish": "Título TMDb",
+            "type": Movie.MOVIE,
+            "tmdb_id": 550,
+        }
+        defaults.update(kwargs)
+        return Movie.objects.create(**defaults)
+
+    def _tmdb_response(self, path, params=None):
+        if path == "/movie/550/credits":
+            return {
+                "crew": [
+                    {
+                        "id": 10,
+                        "name": "Jane Director",
+                        "job": "Director",
+                        "profile_path": "/director.jpg",
+                        "known_for_department": "Directing",
+                        "gender": 1,
+                    }
+                ],
+                "cast": [
+                    {
+                        "id": person_id,
+                        "name": f"Cast {person_id}",
+                        "character": f"Character {person_id}",
+                        "order": order,
+                        "profile_path": f"/cast-{person_id}.jpg",
+                        "known_for_department": "Acting",
+                        "gender": 2,
+                    }
+                    for order, person_id in enumerate(range(100, 122))
+                ],
+            }
+        if path.startswith("/person/") and path.endswith("/external_ids"):
+            person_id = int(path.split("/")[2])
+            return {
+                "facebook_id": f"fb{person_id}",
+                "instagram_id": f"ig{person_id}",
+                "twitter_id": f"tw{person_id}",
+            }
+        if path.startswith("/person/"):
+            person_id = int(path.split("/")[2])
+            return {
+                "id": person_id,
+                "name": "Jane Director" if person_id == 10 else f"Cast {person_id}",
+                "profile_path": f"/person-{person_id}.jpg",
+                "known_for_department": "Directing" if person_id == 10 else "Acting",
+                "gender": 1 if person_id == 10 else 2,
+                "birthday": "1980-01-02",
+                "deathday": None,
+                "place_of_birth": "Example City",
+            }
+        self.fail(f"Unexpected TMDb path: {path}")
+
+    def test_movie_credits_returns_full_cast_and_enriches_director_and_first_twenty_cast_members(self):
+        movie = self._create_movie()
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None):
+            requested_paths.append(path)
+            return self._tmdb_response(path, params)
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["movie_id"], movie.id)
+        self.assertEqual(response.data["tmdb_id"], 550)
+        self.assertEqual(response.data["type"], "movie")
+        self.assertEqual(len(response.data["director"]), 1)
+        self.assertEqual(response.data["director"][0]["tmdb_person_id"], 10)
+        self.assertEqual(response.data["director"][0]["job"], "Director")
+        self.assertEqual(response.data["director"][0]["profile_url"], "https://image.tmdb.org/t/p/w185/person-10.jpg")
+        self.assertEqual(response.data["director"][0]["gender"], {"code": 1, "label": "Female"})
+        self.assertEqual(response.data["director"][0]["instagram_url"], "https://www.instagram.com/ig10")
+        self.assertEqual(len(response.data["cast"]), 22)
+        self.assertEqual(response.data["cast"][0]["tmdb_person_id"], 100)
+        self.assertEqual(response.data["cast"][0]["birthday"], "1980-01-02")
+        self.assertEqual(response.data["cast"][19]["tmdb_person_id"], 119)
+        self.assertEqual(response.data["cast"][19]["x_url"], "https://x.com/tw119")
+        self.assertEqual(response.data["cast"][20]["tmdb_person_id"], 120)
+        self.assertIsNone(response.data["cast"][20]["birthday"])
+        self.assertNotIn("/person/120", requested_paths)
+        self.assertNotIn("/person/120/external_ids", requested_paths)
+
+    def test_movie_credits_uses_cached_tmdb_payloads(self):
+        movie = self._create_movie()
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None):
+            requested_paths.append(path)
+            return self._tmdb_response(path, params)
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            first_response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+            second_response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(requested_paths.count("/movie/550/credits"), 1)
+        self.assertEqual(requested_paths.count("/person/10"), 1)
+        self.assertEqual(requested_paths.count("/person/10/external_ids"), 1)
+
+    def test_person_detail_endpoint_returns_cached_brief_person_payload(self):
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None):
+            requested_paths.append(path)
+            return self._tmdb_response(path, params)
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            first_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 100}))
+            second_response = self.client.get(reverse("tmdb-person-detail", kwargs={"person_id": 100}))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["tmdb_person_id"], 100)
+        self.assertEqual(first_response.data["profile_url"], "https://image.tmdb.org/t/p/w185/person-100.jpg")
+        self.assertEqual(first_response.data["facebook_url"], "https://www.facebook.com/fb100")
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(requested_paths, ["/person/100", "/person/100/external_ids"])
+
+    def test_series_credits_uses_created_by_when_no_director_is_in_crew(self):
+        series = self._create_movie(type=Movie.SERIES, tmdb_id=777)
+
+        def fake_get_tmdb_json(path, params=None):
+            if path == "/tv/777/credits":
+                return {"crew": [], "cast": []}
+            if path == "/tv/777":
+                return {"created_by": [{"id": 30, "name": "Series Creator", "profile_path": "/creator.jpg"}]}
+            if path == "/person/30":
+                return {
+                    "id": 30,
+                    "name": "Series Creator",
+                    "profile_path": "/creator-detail.jpg",
+                    "known_for_department": "Writing",
+                    "gender": 0,
+                    "birthday": None,
+                    "deathday": None,
+                    "place_of_birth": "",
+                }
+            if path == "/person/30/external_ids":
+                return {"facebook_id": None, "instagram_id": None, "twitter_id": None}
+            self.fail(f"Unexpected TMDb path: {path}")
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": series.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["type"], "tv")
+        self.assertEqual(response.data["director"][0]["tmdb_person_id"], 30)
+        self.assertEqual(response.data["director"][0]["job"], "Creator")

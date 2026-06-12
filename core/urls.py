@@ -13,10 +13,10 @@ from .views import (
     DirectedCommentsListView, ReceivedDirectedCommentsView, SentDirectedCommentsView, MeMessagesView, MeMessagesSummaryView, MeMessagesMarkAsReadView,
     MeNotificationsView, MeNotificationsMarkReadView, MeNotificationsMarkAllReadView, MeNotificationsMarkReadBatchView,
     MeNotificationsMarkContextReadView,
-    MovieListView, MovieSearchView, MovieDetailView, MovieWatchProvidersView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
+    MovieListView, MovieSearchView, MovieDetailView, MovieCreditsView, MovieWatchProvidersView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView,
     MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, UserMovieRecommendationsView, MovieRecommendationToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
-    ProfilePrivacyBlockedUserDetailView, LegalPoliciesView,
+    ProfilePrivacyBlockedUserDetailView, LegalPoliciesView, TMDbPersonDetailView,
 )
 
 urlpatterns = [
@@ -83,6 +83,8 @@ urlpatterns = [
     path("movies/", MovieListView.as_view(), name="movie-list"),
     path("movies/<int:pk>/", MovieDetailView.as_view(), name="movie-detail"),
     path("movies/<int:pk>/watch-providers/", MovieWatchProvidersView.as_view(), name="movie-watch-providers"),
+    path("movies/<int:pk>/credits/", MovieCreditsView.as_view(), name="movie-credits"),
+    path("tmdb/people/<int:person_id>/", TMDbPersonDetailView.as_view(), name="tmdb-person-detail"),
     path("feed/movies/", FeedMoviesView.as_view(), name="feed-movies"),
     path("feed/weekly-recommendations/", WeeklyRecommendationsView.as_view(), name="weekly-recommendations"),
     path("movies/weekly/", WeeklyRecommendationsView.as_view(), name="movies-weekly"),
