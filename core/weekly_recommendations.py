@@ -13,7 +13,6 @@ from core.models import (
     Movie,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
-    build_genre_key,
 )
 
 WEEKLY_RECOMMENDATIONS_LIMIT = 8
@@ -94,14 +93,8 @@ def get_weekly_recommendation_candidates(window):
 
 def select_weekly_recommendation_movies(window, limit=WEEKLY_RECOMMENDATIONS_LIMIT):
     selected_movies = []
-    seen_genres = set()
 
     for movie in get_weekly_recommendation_candidates(window):
-        genre_key = build_genre_key(movie.genre) or "__none__"
-        if genre_key in seen_genres:
-            continue
-
-        seen_genres.add(genre_key)
         selected_movies.append(movie)
         if len(selected_movies) == limit:
             break
