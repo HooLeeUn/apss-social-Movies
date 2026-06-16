@@ -43,7 +43,11 @@ SECRET_KEY = 'django-insecure-2s)l_tnv2tvxjua)jq55@t8zu&utruip8gs=^m8jraio0ixir+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "192.168.40.19",
+]
 
 
 # Application definition
@@ -158,6 +162,8 @@ REST_FRAMEWORK = {
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://192.168.40.19:3000",
 ]
 
 BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "http://localhost:8000")
