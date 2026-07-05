@@ -7075,9 +7075,19 @@ class MeProfileStreamingCountryTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.profile.streaming_country, Profile.StreamingCountry.US)
         self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.US)
+        self.assertEqual(response.data["country"], Profile.StreamingCountry.US)
+
+    def test_me_patch_updates_country_alias_for_supported_country(self):
+        response = self.client.patch(self.url, {"country": Profile.StreamingCountry.MX}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.profile.streaming_country, Profile.StreamingCountry.MX)
+        self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.MX)
+        self.assertEqual(response.data["country"], Profile.StreamingCountry.MX)
 
     def test_me_patch_rejects_invalid_streaming_country(self):
-        response = self.client.patch(self.url, {"streaming_country": "AR"}, format="json")
+        response = self.client.patch(self.url, {"streaming_country": "ZZ"}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("streaming_country", response.data)
