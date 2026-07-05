@@ -306,6 +306,11 @@ class MeSerializer(serializers.ModelSerializer):
         choices=Profile.StreamingCountry.choices,
         required=False,
     )
+    country = serializers.ChoiceField(
+        source="profile.streaming_country",
+        choices=Profile.StreamingCountry.choices,
+        required=False,
+    )
     
     # read-only stats (vienen anotados en la vista)
     followers_count = serializers.IntegerField(read_only=True)
@@ -317,7 +322,7 @@ class MeSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "username","email",
-            "bio", "avatar", "is_public", "streaming_country",
+            "bio", "avatar", "is_public", "streaming_country", "country",
             "followers_count", "following_count",
             "posts_count", "avg_post_rating",
         ]

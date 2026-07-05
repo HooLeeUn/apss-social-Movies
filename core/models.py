@@ -990,8 +990,30 @@ class Profile(models.Model):
         PRIVATE = "private", "Private"
 
     class StreamingCountry(models.TextChoices):
+        AR = "AR", "Argentina"
+        BO = "BO", "Bolivia"
+        BZ = "BZ", "Belice"
+        CA = "CA", "Canadá"
+        CL = "CL", "Chile"
         CO = "CO", "Colombia"
+        CR = "CR", "Costa Rica"
+        CU = "CU", "Cuba"
+        DO = "DO", "República Dominicana"
+        EC = "EC", "Ecuador"
+        ES = "ES", "España"
+        GT = "GT", "Guatemala"
+        HN = "HN", "Honduras"
+        MX = "MX", "México"
+        NI = "NI", "Nicaragua"
+        PA = "PA", "Panamá"
+        PE = "PE", "Perú"
+        PR = "PR", "Puerto Rico"
+        PY = "PY", "Paraguay"
+        SV = "SV", "El Salvador"
+        UK = "UK", "Reino Unido"
         US = "US", "Estados Unidos"
+        UY = "UY", "Uruguay"
+        VE = "VE", "Venezuela"
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
