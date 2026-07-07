@@ -39,6 +39,7 @@ from core.models import (
     ProfileFavoriteMovie,
     MovieRating,
     StreamingProviderLink,
+    TMDbPayloadCache,
     PendingUserRegistration,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
@@ -7523,6 +7524,51 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb.requests.get")
+    def test_uses_persistent_watch_provider_cache_after_memory_cache_is_cleared(self, mock_get):
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"results": {"US": {"link": "https://example.com", "flatrate": [], "rent": [], "buy": []}}},
+        )
+
+        first_response = self.client.get(self.url, {"country": "US"})
+        cache.clear()
+        second_response = self.client.get(self.url, {"country": "US"})
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data["link"], "https://example.com")
+        mock_get.assert_called_once()
+        self.assertTrue(
+            TMDbPayloadCache.objects.filter(
+                tmdb_id=self.movie.tmdb_id,
+                content_type="movie",
+                payload_type=TMDbPayloadCache.PayloadType.WATCH_PROVIDERS,
+                country_code="US",
+            ).exists()
+        )
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
+    def test_returns_stale_watch_provider_cache_when_tmdb_fails(self, mock_get):
+        TMDbPayloadCache.objects.create(
+            movie=self.movie,
+            tmdb_id=self.movie.tmdb_id,
+            content_type="movie",
+            payload_type=TMDbPayloadCache.PayloadType.WATCH_PROVIDERS,
+            country_code="US",
+            payload={"link": "https://stale.example", "flatrate": [], "rent": [], "buy": []},
+            source="tmdb",
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+        mock_get.side_effect = requests.RequestException("down")
+
+        response = self.client.get(self.url, {"country": "US"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["link"], "https://stale.example")
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb.requests.get")
     def test_returns_empty_arrays_when_movie_has_no_tmdb_id(self, mock_get):
         self.movie.tmdb_id = None
         self.movie.save(update_fields=["tmdb_id"])
@@ -8548,6 +8594,56 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(requested_paths.count("/movie/550/credits"), 1)
         self.assertNotIn("/person/10", requested_paths)
         self.assertNotIn("/person/10/external_ids", requested_paths)
+
+    def test_movie_credits_uses_persistent_cache_after_memory_cache_is_cleared(self):
+        movie = self._create_movie()
+        requested_paths = []
+
+        def fake_get_tmdb_json(path, params=None, timeout=None):
+            requested_paths.append(path)
+            return self._tmdb_response(path, params)
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            first_response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+
+        cache.clear()
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=TMDbServiceError("down")) as mock_tmdb:
+            second_response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data["director"][0]["name"], "Jane Director")
+        self.assertEqual(requested_paths, ["/movie/550/credits"])
+        mock_tmdb.assert_not_called()
+        self.assertTrue(
+            TMDbPayloadCache.objects.filter(
+                tmdb_id=550,
+                content_type="movie",
+                payload_type=TMDbPayloadCache.PayloadType.CREDITS,
+            ).exists()
+        )
+
+    def test_credits_returns_stale_persistent_cache_when_tmdb_fails(self):
+        movie = self._create_movie(director="Local Director", cast_members="Local Actor")
+        TMDbPayloadCache.objects.create(
+            movie=movie,
+            tmdb_id=movie.tmdb_id,
+            content_type="movie",
+            payload_type=TMDbPayloadCache.PayloadType.CREDITS,
+            payload={
+                "crew": [{"id": 11, "name": "Stale Director", "job": "Director"}],
+                "cast": [{"id": 12, "name": "Stale Actor", "character": "Hero", "order": 0}],
+            },
+            source="tmdb",
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=TMDbServiceError("down")):
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": movie.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["director"][0]["name"], "Stale Director")
+        self.assertEqual(response.data["cast"][0]["name"], "Stale Actor")
 
     def test_person_detail_endpoint_returns_cached_brief_person_payload(self):
         requested_paths = []

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
 from typing import Any
 
 from django.core.cache import cache
 from django.db.models import Q
+from django.utils import timezone
 
-from .models import Movie, StreamingProviderLink
+from .models import Movie, StreamingProviderLink, TMDbPayloadCache
 from .streaming_provider_links_seed import get_global_pattern_landing_url
-from .tmdb import get_tmdb_json
+from .tmdb import TMDbServiceError, get_tmdb_json
 
 TMDB_LOGO_BASE_URL = "https://image.tmdb.org/t/p/w92"
-WATCH_PROVIDER_CACHE_TIMEOUT = 60 * 60 * 24
+WATCH_PROVIDER_CACHE_TIMEOUT = 60 * 60 * 24 * 3
 WATCH_PROVIDER_GROUPS = ("flatrate", "rent", "buy")
+TRUE_DETECTIVE_TMDB_ID = 46648
+
+logger = logging.getLogger(__name__)
 
 
 def get_movie_watch_providers(movie: Movie, country_code: str) -> dict[str, Any]:
@@ -69,14 +75,32 @@ def get_cached_country_watch_providers(movie: Movie, country: str) -> dict[str, 
     cache_key = build_watch_provider_cache_key(movie, country)
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
+        log_true_detective_providers_source(movie.tmdb_id, country, "memory-cache")
         return cached_payload
 
-    tmdb_payload = fetch_tmdb_watch_providers(movie)
+    content_kind = get_tmdb_content_kind(movie)
+    persistent_cache = get_persistent_watch_provider_payload(movie, content_kind, country)
+    if persistent_cache and persistent_cache.is_fresh():
+        cache.set(cache_key, persistent_cache.payload, WATCH_PROVIDER_CACHE_TIMEOUT)
+        log_true_detective_providers_source(movie.tmdb_id, country, "persistent-cache")
+        return persistent_cache.payload
+
+    try:
+        tmdb_payload = fetch_tmdb_watch_providers(movie)
+    except TMDbServiceError:
+        if persistent_cache:
+            log_true_detective_providers_source(movie.tmdb_id, country, "stale-persistent-cache")
+            return persistent_cache.payload
+        log_true_detective_providers_source(movie.tmdb_id, country, "fallback")
+        raise
+
     country_payload = tmdb_payload.get("results", {}).get(country, {})
     if not isinstance(country_payload, dict):
         country_payload = {}
 
+    store_persistent_watch_provider_payload(movie, content_kind, country, country_payload)
     cache.set(cache_key, country_payload, WATCH_PROVIDER_CACHE_TIMEOUT)
+    log_true_detective_providers_source(movie.tmdb_id, country, "tmdb")
     return country_payload
 
 
@@ -233,3 +257,44 @@ def get_link_url(provider_link: StreamingProviderLink | None, field_name: str) -
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def get_persistent_watch_provider_payload(movie: Movie, content_kind: str, country: str) -> TMDbPayloadCache | None:
+    cache_entry = (
+        TMDbPayloadCache.objects.filter(
+            tmdb_id=movie.tmdb_id,
+            content_type=content_kind,
+            payload_type=TMDbPayloadCache.PayloadType.WATCH_PROVIDERS,
+            country_code=country,
+            season_number=0,
+        )
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if cache_entry and cache_entry.movie_id != movie.id:
+        TMDbPayloadCache.objects.filter(pk=cache_entry.pk, movie__isnull=True).update(movie=movie)
+    return cache_entry
+
+
+def store_persistent_watch_provider_payload(
+    movie: Movie, content_kind: str, country: str, payload: dict[str, Any]
+) -> TMDbPayloadCache:
+    cache_entry, _created = TMDbPayloadCache.objects.update_or_create(
+        tmdb_id=movie.tmdb_id,
+        content_type=content_kind,
+        payload_type=TMDbPayloadCache.PayloadType.WATCH_PROVIDERS,
+        country_code=country,
+        season_number=0,
+        defaults={
+            "movie": movie,
+            "payload": payload,
+            "source": "tmdb",
+            "expires_at": timezone.now() + timedelta(seconds=WATCH_PROVIDER_CACHE_TIMEOUT),
+        },
+    )
+    return cache_entry
+
+
+def log_true_detective_providers_source(tmdb_id: int | None, country: str, source: str) -> None:
+    if tmdb_id == TRUE_DETECTIVE_TMDB_ID:
+        logger.info("True Detective providers source for %s: %s", country, source)

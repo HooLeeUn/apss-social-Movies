@@ -518,6 +518,55 @@ class StreamingProviderLink(models.Model):
         return f"{self.provider_name} ({self.country_code})"
 
 
+class TMDbPayloadCache(models.Model):
+    class PayloadType(models.TextChoices):
+        CREDITS = "credits", "Credits"
+        TV_DETAILS = "tv_details", "TV details"
+        TV_SEASON_CREDITS = "tv_season_credits", "TV season credits"
+        WATCH_PROVIDERS = "watch_providers", "Watch providers"
+
+    movie = models.ForeignKey(
+        Movie,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="tmdb_payload_caches",
+    )
+    tmdb_id = models.PositiveIntegerField(db_index=True)
+    content_type = models.CharField(max_length=10, choices=[("movie", "Movie"), ("tv", "TV")])
+    payload_type = models.CharField(max_length=32, choices=PayloadType.choices)
+    country_code = models.CharField(max_length=2, blank=True, default="")
+    season_number = models.PositiveSmallIntegerField(default=0)
+    payload = models.JSONField(default=dict)
+    source = models.CharField(max_length=32, default="tmdb")
+    fetched_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tmdb_id", "content_type", "payload_type", "country_code", "season_number"],
+                name="unique_tmdb_payload_cache_key",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["tmdb_id", "content_type", "payload_type", "country_code"],
+                name="tmdb_payload_lookup_idx",
+            ),
+            models.Index(fields=["movie", "payload_type"], name="tmdb_payload_movie_idx"),
+        ]
+
+    def is_fresh(self):
+        return self.expires_at > timezone.now()
+
+    def __str__(self):
+        return f"TMDbPayloadCache({self.payload_type}, {self.content_type}/{self.tmdb_id})"
+
+
 class MovieRating(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movie_ratings")
     movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="movie_ratings")

@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 import unicodedata
 from typing import Any
 
 from django.core.cache import cache
+from django.utils import timezone
 
-from .models import Movie
+from .models import Movie, TMDbPayloadCache
 from .tmdb import TMDbServiceError, get_tmdb_json
 
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w185"
 TMDB_WEB_BASE_URL = "https://www.themoviedb.org"
-TMDB_CREDITS_CACHE_TIMEOUT = 60 * 60 * 24
+TMDB_CREDITS_CACHE_TIMEOUT = 60 * 60 * 24 * 14
 TMDB_PERSON_CACHE_TIMEOUT = 60 * 60 * 24 * 7
 TMDB_PERSON_DETAIL_CACHE_TIMEOUT = 60 * 60 * 24 * 7
 TMDB_PERSON_EXTERNAL_IDS_CACHE_TIMEOUT = 60 * 60 * 24 * 7
 TMDB_PERSON_PARTIAL_CACHE_TIMEOUT = 60 * 60
 TMDB_PERSON_FAILURE_CACHE_TIMEOUT = 60 * 5
 TMDB_PERSON_REQUEST_TIMEOUT = 4
-TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24
+TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24 * 14
 TMDB_PERSON_DETAIL_LIMIT = 20
 TMDB_SEASON_CAST_LIMIT = 5
 TRUE_DETECTIVE_TMDB_ID = 46648
@@ -100,34 +102,109 @@ def build_local_credits_payload(
 
 def get_cached_tmdb_credits(movie: Movie) -> dict[str, Any]:
     content_kind = get_tmdb_content_kind(movie)
-    cache_key = f"tmdb-credits:v1:{content_kind}:{movie.tmdb_id}"
+    cache_key = f"tmdb-credits:v2:{movie.id}:{content_kind}:{movie.tmdb_id}"
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
+        log_true_detective_credits_source(movie.tmdb_id, "memory-cache")
         return cached_payload
 
-    tmdb_payload = get_tmdb_json(f"/{content_kind}/{movie.tmdb_id}/credits")
+    persistent_cache = get_persistent_tmdb_payload(
+        tmdb_id=movie.tmdb_id,
+        content_type=content_kind,
+        payload_type=TMDbPayloadCache.PayloadType.CREDITS,
+        movie=movie,
+    )
+    if persistent_cache and persistent_cache.is_fresh():
+        cache.set(cache_key, persistent_cache.payload, TMDB_CREDITS_CACHE_TIMEOUT)
+        log_true_detective_credits_source(movie.tmdb_id, "persistent-cache")
+        return persistent_cache.payload
+
+    try:
+        tmdb_payload = get_tmdb_json(f"/{content_kind}/{movie.tmdb_id}/credits")
+    except TMDbServiceError:
+        if persistent_cache:
+            log_true_detective_credits_source(movie.tmdb_id, "stale-persistent-cache")
+            return persistent_cache.payload
+        log_true_detective_credits_source(movie.tmdb_id, "fallback")
+        raise
+
+    store_persistent_tmdb_payload(
+        tmdb_id=movie.tmdb_id,
+        content_type=content_kind,
+        payload_type=TMDbPayloadCache.PayloadType.CREDITS,
+        payload=tmdb_payload,
+        ttl_seconds=TMDB_CREDITS_CACHE_TIMEOUT,
+        movie=movie,
+    )
     cache.set(cache_key, tmdb_payload, TMDB_CREDITS_CACHE_TIMEOUT)
+    log_true_detective_credits_source(movie.tmdb_id, "tmdb")
     return tmdb_payload
 
 
 def get_cached_tv_season_credits(tmdb_id: int, season_number: int) -> dict[str, Any]:
-    cache_key = f"tmdb-tv-season-credits:v1:{tmdb_id}:{season_number}"
+    cache_key = f"tmdb-tv-season-credits:v2:{tmdb_id}:{season_number}"
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
         return cached_payload
 
-    tmdb_payload = get_tmdb_json(f"/tv/{tmdb_id}/season/{season_number}/credits")
+    persistent_cache = get_persistent_tmdb_payload(
+        tmdb_id=tmdb_id,
+        content_type="tv",
+        payload_type=TMDbPayloadCache.PayloadType.TV_SEASON_CREDITS,
+        season_number=season_number,
+    )
+    if persistent_cache and persistent_cache.is_fresh():
+        cache.set(cache_key, persistent_cache.payload, TMDB_CREDITS_CACHE_TIMEOUT)
+        return persistent_cache.payload
+
+    try:
+        tmdb_payload = get_tmdb_json(f"/tv/{tmdb_id}/season/{season_number}/credits")
+    except TMDbServiceError:
+        if persistent_cache:
+            return persistent_cache.payload
+        raise
+
+    store_persistent_tmdb_payload(
+        tmdb_id=tmdb_id,
+        content_type="tv",
+        payload_type=TMDbPayloadCache.PayloadType.TV_SEASON_CREDITS,
+        season_number=season_number,
+        payload=tmdb_payload,
+        ttl_seconds=TMDB_CREDITS_CACHE_TIMEOUT,
+    )
     cache.set(cache_key, tmdb_payload, TMDB_CREDITS_CACHE_TIMEOUT)
     return tmdb_payload
 
 
 def get_cached_tv_details(tmdb_id: int) -> dict[str, Any]:
-    cache_key = f"tmdb-tv-details:v1:{tmdb_id}"
+    cache_key = f"tmdb-tv-details:v2:{tmdb_id}"
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
         return cached_payload
 
-    tmdb_payload = get_tmdb_json(f"/tv/{tmdb_id}")
+    persistent_cache = get_persistent_tmdb_payload(
+        tmdb_id=tmdb_id,
+        content_type="tv",
+        payload_type=TMDbPayloadCache.PayloadType.TV_DETAILS,
+    )
+    if persistent_cache and persistent_cache.is_fresh():
+        cache.set(cache_key, persistent_cache.payload, TMDB_TV_DETAILS_CACHE_TIMEOUT)
+        return persistent_cache.payload
+
+    try:
+        tmdb_payload = get_tmdb_json(f"/tv/{tmdb_id}")
+    except TMDbServiceError:
+        if persistent_cache:
+            return persistent_cache.payload
+        raise
+
+    store_persistent_tmdb_payload(
+        tmdb_id=tmdb_id,
+        content_type="tv",
+        payload_type=TMDbPayloadCache.PayloadType.TV_DETAILS,
+        payload=tmdb_payload,
+        ttl_seconds=TMDB_TV_DETAILS_CACHE_TIMEOUT,
+    )
     cache.set(cache_key, tmdb_payload, TMDB_TV_DETAILS_CACHE_TIMEOUT)
     return tmdb_payload
 
@@ -436,3 +513,62 @@ def serialize_gender(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         code = 0
     return {"code": code, "label": GENDER_LABELS.get(code, GENDER_LABELS[0])}
+
+
+def get_persistent_tmdb_payload(
+    *,
+    tmdb_id: int,
+    content_type: str,
+    payload_type: str,
+    movie: Movie | None = None,
+    country_code: str = "",
+    season_number: int = 0,
+) -> TMDbPayloadCache | None:
+    cache_entry = (
+        TMDbPayloadCache.objects.filter(
+            tmdb_id=tmdb_id,
+            content_type=content_type,
+            payload_type=payload_type,
+            country_code=country_code,
+            season_number=season_number,
+        )
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if cache_entry and movie and cache_entry.movie_id != movie.id:
+        TMDbPayloadCache.objects.filter(pk=cache_entry.pk, movie__isnull=True).update(movie=movie)
+    return cache_entry
+
+
+def store_persistent_tmdb_payload(
+    *,
+    tmdb_id: int,
+    content_type: str,
+    payload_type: str,
+    payload: dict[str, Any],
+    ttl_seconds: int,
+    movie: Movie | None = None,
+    country_code: str = "",
+    season_number: int = 0,
+    source: str = "tmdb",
+) -> TMDbPayloadCache:
+    expires_at = timezone.now() + timedelta(seconds=ttl_seconds)
+    cache_entry, _created = TMDbPayloadCache.objects.update_or_create(
+        tmdb_id=tmdb_id,
+        content_type=content_type,
+        payload_type=payload_type,
+        country_code=country_code,
+        season_number=season_number,
+        defaults={
+            "movie": movie,
+            "payload": payload,
+            "source": source,
+            "expires_at": expires_at,
+        },
+    )
+    return cache_entry
+
+
+def log_true_detective_credits_source(tmdb_id: int | None, source: str) -> None:
+    if tmdb_id == TRUE_DETECTIVE_TMDB_ID:
+        logger.info("True Detective credits source: %s", source)
