@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+import requests
+from django.conf import settings
 from django.utils import timezone
 
 from .models import Movie
@@ -10,7 +12,9 @@ from .tmdb import get_tmdb_json
 
 YOUTUBE_EMBED_BASE_URL = "https://www.youtube.com/embed/"
 YOUTUBE_WATCH_BASE_URL = "https://www.youtube.com/watch?v="
+YOUTUBE_OEMBED_URL = "https://www.youtube.com/oembed"
 TRAILER_NEGATIVE_CACHE_TTL = timedelta(days=30)
+YOUTUBE_VALIDATION_TIMEOUT = 3
 ENGLISH_COUNTRIES = {"US", "CA", "UK", "BZ"}
 
 
@@ -43,12 +47,16 @@ def build_trailer_payload(youtube_key: str | None, language: str | None, source:
 def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[str, Any]:
     requested_language = language_for_country(country)
     cached_key = _get_cached_key(movie, requested_language)
-    if cached_key:
+    if cached_key and is_youtube_video_available(cached_key):
         return build_trailer_payload(cached_key, requested_language, "cache")
+    if cached_key:
+        _clear_cached_key(movie, requested_language)
 
     fallback_key = _get_cached_key(movie, "en") if requested_language != "en" else None
-    if fallback_key:
+    if fallback_key and is_youtube_video_available(fallback_key):
         return build_trailer_payload(fallback_key, "en", "cache")
+    if fallback_key:
+        _clear_cached_key(movie, "en")
 
     if _has_recent_negative_cache(movie):
         return build_trailer_payload(None, None, "tmdb")
@@ -62,7 +70,7 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
     if not isinstance(videos, list):
         videos = []
 
-    selected_language, youtube_key = select_best_trailer(videos, requested_language)
+    selected_language, youtube_key = select_first_available_trailer(videos, requested_language)
     movie.trailer_checked_at = timezone.now()
     update_fields = ["trailer_checked_at"]
 
@@ -77,19 +85,25 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
     return build_trailer_payload(youtube_key, selected_language, "tmdb")
 
 
-def select_best_trailer(videos: list[dict[str, Any]], requested_language: str) -> tuple[str | None, str | None]:
+def select_first_available_trailer(videos: list[dict[str, Any]], requested_language: str) -> tuple[str | None, str | None]:
+    for language, candidate in iter_trailer_candidates(videos, requested_language):
+        youtube_key = candidate.get("key")
+        if youtube_key and is_youtube_video_available(str(youtube_key)):
+            return language, str(youtube_key)
+    return None, None
+
+
+def iter_trailer_candidates(videos: list[dict[str, Any]], requested_language: str):
     languages = [requested_language]
     if requested_language != "en":
         languages.append("en")
 
     for language in languages:
-        candidate = _select_for_language(videos, language)
-        if candidate:
-            return language, candidate.get("key")
-    return None, None
+        for candidate in _candidates_for_language(videos, language):
+            yield language, candidate
 
 
-def _select_for_language(videos: list[dict[str, Any]], language: str) -> dict[str, Any] | None:
+def _candidates_for_language(videos: list[dict[str, Any]], language: str) -> list[dict[str, Any]]:
     candidates = [
         video for video in videos
         if isinstance(video, dict)
@@ -98,16 +112,33 @@ def _select_for_language(videos: list[dict[str, Any]], language: str) -> dict[st
         and (video.get("iso_639_1") or "").lower() == language
         and video.get("key")
     ]
-    if not candidates:
-        return None
+    return sorted(
+        candidates,
+        key=lambda video: (video.get("official") is True, video.get("published_at") or ""),
+        reverse=True,
+    )
 
-    official = [video for video in candidates if video.get("official") is True]
-    pool = official or candidates
-    return sorted(pool, key=lambda video: video.get("published_at") or "", reverse=True)[0]
+
+def is_youtube_video_available(youtube_key: str) -> bool:
+    try:
+        response = requests.get(
+            YOUTUBE_OEMBED_URL,
+            params={"url": f"{YOUTUBE_WATCH_BASE_URL}{youtube_key}", "format": "json"},
+            timeout=getattr(settings, "YOUTUBE_VALIDATION_TIMEOUT", YOUTUBE_VALIDATION_TIMEOUT),
+        )
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
 
 
 def _get_cached_key(movie: Movie, language: str) -> str:
     return (movie.trailer_en_key if language == "en" else movie.trailer_es_key) or ""
+
+
+def _clear_cached_key(movie: Movie, language: str) -> None:
+    field_name = "trailer_en_key" if language == "en" else "trailer_es_key"
+    setattr(movie, field_name, "")
+    movie.save(update_fields=[field_name])
 
 
 def _has_recent_negative_cache(movie: Movie) -> bool:
