@@ -9,6 +9,7 @@ from .models import Movie
 from .tmdb import get_tmdb_json
 
 YOUTUBE_EMBED_BASE_URL = "https://www.youtube.com/embed/"
+YOUTUBE_WATCH_BASE_URL = "https://www.youtube.com/watch?v="
 TRAILER_NEGATIVE_CACHE_TTL = timedelta(days=30)
 ENGLISH_COUNTRIES = {"US", "CA", "UK", "BZ"}
 
@@ -22,6 +23,7 @@ def build_trailer_payload(youtube_key: str | None, language: str | None, source:
     if not youtube_key:
         return {
             "trailer_url": None,
+            "watch_url": None,
             "youtube_key": None,
             "language": None,
             "source": source,
@@ -30,6 +32,7 @@ def build_trailer_payload(youtube_key: str | None, language: str | None, source:
 
     return {
         "trailer_url": f"{YOUTUBE_EMBED_BASE_URL}{youtube_key}",
+        "watch_url": f"{YOUTUBE_WATCH_BASE_URL}{youtube_key}",
         "youtube_key": youtube_key,
         "language": language,
         "source": source,
