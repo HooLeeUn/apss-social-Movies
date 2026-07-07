@@ -65,6 +65,7 @@ from .models import (
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .tmdb import TMDbServiceError
 from .tmdb_credits import build_empty_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
+from .trailers import get_movie_trailer_payload
 from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
@@ -3055,6 +3056,27 @@ class TMDbPersonDetailView(APIView):
 
         serializer = TMDbPersonBriefSerializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MovieTrailerView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        movie = get_object_or_404(Movie, pk=pk)
+
+        try:
+            payload = get_movie_trailer_payload(movie, request.query_params.get("country"))
+        except TMDbServiceError as exc:
+            logger.warning("TMDb trailer request failed for Movie(id=%s): %s", movie.id, exc)
+            payload = {
+                "trailer_url": None,
+                "youtube_key": None,
+                "language": None,
+                "source": "tmdb",
+                "available": False,
+            }
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class MovieWatchProvidersView(APIView):
