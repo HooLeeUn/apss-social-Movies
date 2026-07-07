@@ -57,30 +57,11 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
     requested_language = language_for_country(country)
     cached_key = _get_cached_key(movie, requested_language)
     if cached_key:
-        cached_validation = validate_youtube_video(cached_key)
-        if cached_validation != "invalid":
-            return build_trailer_payload(
-                cached_key,
-                requested_language,
-                "cache",
-                external_only=cached_validation == "external_only",
-            )
-        _clear_cached_key(movie, requested_language)
+        return build_trailer_payload(cached_key, requested_language, "cache")
 
     fallback_key = _get_cached_key(movie, "en") if requested_language != "en" else None
     if fallback_key:
-        fallback_validation = validate_youtube_video(fallback_key)
-        if fallback_validation != "invalid":
-            return build_trailer_payload(
-                fallback_key,
-                "en",
-                "cache",
-                external_only=fallback_validation == "external_only",
-            )
-        _clear_cached_key(movie, "en")
-
-    if _has_recent_negative_cache(movie):
-        return build_trailer_payload(None, None, "tmdb")
+        return build_trailer_payload(fallback_key, "en", "cache")
 
     if not movie.tmdb_id:
         return build_trailer_payload(None, None, "tmdb")
@@ -91,9 +72,7 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
     if not isinstance(videos, list):
         videos = []
 
-    selected_language, youtube_key, external_watch_key, external_only = select_first_embeddable_trailer(
-        videos, requested_language
-    )
+    selected_language, youtube_key = select_first_youtube_trailer(videos, requested_language)
     movie.trailer_checked_at = timezone.now()
     update_fields = ["trailer_checked_at"]
 
@@ -105,26 +84,17 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
         update_fields.append("trailer_en_key")
 
     movie.save(update_fields=update_fields)
-    return build_trailer_payload(youtube_key, selected_language, "tmdb", external_watch_key, external_only)
+    return build_trailer_payload(youtube_key, selected_language, "tmdb")
 
 
-def select_first_embeddable_trailer(
+def select_first_youtube_trailer(
     videos: list[dict[str, Any]], requested_language: str
-) -> tuple[str | None, str | None, str | None, bool]:
-    first_watch_key = None
+) -> tuple[str | None, str | None]:
     for language, candidate in iter_trailer_candidates(videos, requested_language):
         youtube_key = candidate.get("key")
-        if not youtube_key:
-            continue
-        youtube_key = str(youtube_key)
-        if first_watch_key is None:
-            first_watch_key = youtube_key
-        validation_status = validate_youtube_video(youtube_key)
-        if validation_status == "external_only":
-            return language, youtube_key, None, True
-        if validation_status != "invalid":
-            return language, youtube_key, None, False
-    return None, None, first_watch_key, False
+        if youtube_key:
+            return language, str(youtube_key)
+    return None, None
 
 
 def iter_trailer_candidates(videos: list[dict[str, Any]], requested_language: str):
