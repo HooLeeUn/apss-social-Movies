@@ -8703,7 +8703,7 @@ class MovieTrailerAvailabilityTests(TestCase):
         defaults.update(kwargs)
         return Movie.objects.create(**defaults)
 
-    def test_cached_trailer_is_validated_before_returning_available(self):
+    def test_cached_trailer_is_validated_as_embeddable_before_returning_available(self):
         movie = self._create_movie(trailer_es_key="cached-es")
 
         with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json") as mock_tmdb:
@@ -8742,7 +8742,7 @@ class MovieTrailerAvailabilityTests(TestCase):
         self.assertEqual(movie.trailer_es_key, "valid-es")
         self.assertEqual(mock_youtube.call_count, 3)
 
-    def test_returns_unavailable_when_no_tmdb_candidate_can_be_played(self):
+    def test_returns_external_only_when_no_tmdb_candidate_can_be_embedded(self):
         movie = self._create_movie()
         tmdb_payload = {
             "results": [
@@ -8759,10 +8759,11 @@ class MovieTrailerAvailabilityTests(TestCase):
             response.data,
             {
                 "trailer_url": None,
-                "watch_url": None,
+                "watch_url": "https://www.youtube.com/watch?v=bad-es",
                 "youtube_key": None,
                 "language": None,
                 "source": "tmdb",
                 "available": False,
+                "external_only": True,
             },
         )
