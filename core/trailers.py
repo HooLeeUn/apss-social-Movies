@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 import requests
 from django.conf import settings
@@ -16,6 +16,7 @@ YOUTUBE_OEMBED_URL = "https://www.youtube.com/oembed"
 TRAILER_NEGATIVE_CACHE_TTL = timedelta(days=30)
 YOUTUBE_VALIDATION_TIMEOUT = 3
 ENGLISH_COUNTRIES = {"US", "CA", "UK", "BZ"}
+YoutubeValidationStatus = Literal["embeddable", "external_only", "invalid", "unknown"]
 
 
 def language_for_country(country: str | None) -> str:
@@ -28,6 +29,7 @@ def build_trailer_payload(
     language: str | None,
     source: str,
     fallback_watch_key: str | None = None,
+    external_only: bool = False,
 ) -> dict[str, Any]:
     if not youtube_key:
         return {
@@ -41,28 +43,40 @@ def build_trailer_payload(
         }
 
     return {
-        "trailer_url": f"{YOUTUBE_EMBED_BASE_URL}{youtube_key}",
+        "trailer_url": None if external_only else f"{YOUTUBE_EMBED_BASE_URL}{youtube_key}",
         "watch_url": f"{YOUTUBE_WATCH_BASE_URL}{youtube_key}",
         "youtube_key": youtube_key,
         "language": language,
         "source": source,
         "available": True,
-        "external_only": False,
+        "external_only": external_only,
     }
 
 
 def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[str, Any]:
     requested_language = language_for_country(country)
     cached_key = _get_cached_key(movie, requested_language)
-    if cached_key and is_youtube_video_embeddable(cached_key):
-        return build_trailer_payload(cached_key, requested_language, "cache")
     if cached_key:
+        cached_validation = validate_youtube_video(cached_key)
+        if cached_validation != "invalid":
+            return build_trailer_payload(
+                cached_key,
+                requested_language,
+                "cache",
+                external_only=cached_validation == "external_only",
+            )
         _clear_cached_key(movie, requested_language)
 
     fallback_key = _get_cached_key(movie, "en") if requested_language != "en" else None
-    if fallback_key and is_youtube_video_embeddable(fallback_key):
-        return build_trailer_payload(fallback_key, "en", "cache")
     if fallback_key:
+        fallback_validation = validate_youtube_video(fallback_key)
+        if fallback_validation != "invalid":
+            return build_trailer_payload(
+                fallback_key,
+                "en",
+                "cache",
+                external_only=fallback_validation == "external_only",
+            )
         _clear_cached_key(movie, "en")
 
     if _has_recent_negative_cache(movie):
@@ -77,7 +91,9 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
     if not isinstance(videos, list):
         videos = []
 
-    selected_language, youtube_key, external_watch_key = select_first_embeddable_trailer(videos, requested_language)
+    selected_language, youtube_key, external_watch_key, external_only = select_first_embeddable_trailer(
+        videos, requested_language
+    )
     movie.trailer_checked_at = timezone.now()
     update_fields = ["trailer_checked_at"]
 
@@ -89,12 +105,12 @@ def get_movie_trailer_payload(movie: Movie, country: str | None = None) -> dict[
         update_fields.append("trailer_en_key")
 
     movie.save(update_fields=update_fields)
-    return build_trailer_payload(youtube_key, selected_language, "tmdb", external_watch_key)
+    return build_trailer_payload(youtube_key, selected_language, "tmdb", external_watch_key, external_only)
 
 
 def select_first_embeddable_trailer(
     videos: list[dict[str, Any]], requested_language: str
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, bool]:
     first_watch_key = None
     for language, candidate in iter_trailer_candidates(videos, requested_language):
         youtube_key = candidate.get("key")
@@ -103,9 +119,12 @@ def select_first_embeddable_trailer(
         youtube_key = str(youtube_key)
         if first_watch_key is None:
             first_watch_key = youtube_key
-        if is_youtube_video_embeddable(youtube_key):
-            return language, youtube_key, None
-    return None, None, first_watch_key
+        validation_status = validate_youtube_video(youtube_key)
+        if validation_status == "external_only":
+            return language, youtube_key, None, True
+        if validation_status != "invalid":
+            return language, youtube_key, None, False
+    return None, None, first_watch_key, False
 
 
 def iter_trailer_candidates(videos: list[dict[str, Any]], requested_language: str):
@@ -134,16 +153,27 @@ def _candidates_for_language(videos: list[dict[str, Any]], language: str) -> lis
     )
 
 
-def is_youtube_video_embeddable(youtube_key: str) -> bool:
+def validate_youtube_video(youtube_key: str) -> YoutubeValidationStatus:
     try:
         response = requests.get(
             YOUTUBE_OEMBED_URL,
-            params={"url": f"{YOUTUBE_EMBED_BASE_URL}{youtube_key}", "format": "json"},
+            params={"url": f"{YOUTUBE_WATCH_BASE_URL}{youtube_key}", "format": "json"},
             timeout=getattr(settings, "YOUTUBE_VALIDATION_TIMEOUT", YOUTUBE_VALIDATION_TIMEOUT),
         )
     except requests.RequestException:
-        return False
-    return response.status_code == 200
+        return "unknown"
+
+    if response.status_code == 200:
+        return "embeddable"
+    if response.status_code in (401, 403):
+        return "external_only"
+    if response.status_code == 404:
+        return "invalid"
+    return "unknown"
+
+
+def is_youtube_video_embeddable(youtube_key: str) -> bool:
+    return validate_youtube_video(youtube_key) != "invalid"
 
 
 def _get_cached_key(movie: Movie, language: str) -> str:
