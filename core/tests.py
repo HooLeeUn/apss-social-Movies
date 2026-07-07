@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import requests
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AnonymousUser
@@ -8703,46 +8704,83 @@ class MovieTrailerAvailabilityTests(TestCase):
         defaults.update(kwargs)
         return Movie.objects.create(**defaults)
 
-    def test_cached_trailer_is_validated_as_embeddable_before_returning_available(self):
+    def test_cached_trailer_returns_available_without_oembed_validation(self):
         movie = self._create_movie(trailer_es_key="cached-es")
 
         with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json") as mock_tmdb:
-            mock_youtube.return_value.status_code = 200
             response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["available"])
+        self.assertEqual(response.data["trailer_url"], "https://www.youtube.com/embed/cached-es")
+        self.assertEqual(response.data["watch_url"], "https://www.youtube.com/watch?v=cached-es")
         self.assertEqual(response.data["youtube_key"], "cached-es")
         self.assertEqual(response.data["source"], "cache")
+        self.assertFalse(response.data["external_only"])
         mock_tmdb.assert_not_called()
-        mock_youtube.assert_called_once()
+        mock_youtube.assert_not_called()
 
-    def test_invalid_cached_trailer_is_cleared_and_replaced_with_next_valid_candidate(self):
+    def test_oembed_network_failure_keeps_cached_trailer_available(self):
+        movie = self._create_movie(trailer_es_key="cached-es")
+
+        with patch("core.trailers.requests.get", side_effect=requests.RequestException), patch(
+            "core.trailers.get_tmdb_json"
+        ) as mock_tmdb:
+            response = self.client.get(
+                reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"}
+            )
+
+        movie.refresh_from_db()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+        self.assertEqual(response.data["trailer_url"], "https://www.youtube.com/embed/cached-es")
+        self.assertEqual(response.data["watch_url"], "https://www.youtube.com/watch?v=cached-es")
+        self.assertEqual(response.data["youtube_key"], "cached-es")
+        self.assertFalse(response.data["external_only"])
+        self.assertEqual(movie.trailer_es_key, "cached-es")
+        mock_tmdb.assert_not_called()
+
+    def test_cached_trailer_is_not_cleared_by_oembed_failure(self):
         movie = self._create_movie(trailer_es_key="removed-es")
-        tmdb_payload = {
-            "results": [
-                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "still-removed", "official": True, "published_at": "2024-01-01T00:00:00.000Z"},
-                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "valid-es", "official": True, "published_at": "2023-01-01T00:00:00.000Z"},
-            ]
-        }
 
-        with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
-            mock_youtube.side_effect = [
-                SimpleNamespace(status_code=404),
-                SimpleNamespace(status_code=404),
-                SimpleNamespace(status_code=200),
-            ]
+        with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json") as mock_tmdb:
+            mock_youtube.return_value = SimpleNamespace(status_code=404)
             response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
 
         movie.refresh_from_db()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["available"])
-        self.assertEqual(response.data["youtube_key"], "valid-es")
-        self.assertEqual(response.data["source"], "tmdb")
-        self.assertEqual(movie.trailer_es_key, "valid-es")
-        self.assertEqual(mock_youtube.call_count, 3)
+        self.assertEqual(response.data["youtube_key"], "removed-es")
+        self.assertEqual(response.data["source"], "cache")
+        self.assertEqual(movie.trailer_es_key, "removed-es")
+        mock_youtube.assert_not_called()
+        mock_tmdb.assert_not_called()
 
-    def test_returns_external_only_when_no_tmdb_candidate_can_be_embedded(self):
+    def test_tmdb_trailer_with_unexpected_oembed_failure_stays_available(self):
+        movie = self._create_movie(
+            title_english="Back to the Future", title_spanish="Volver al futuro", tmdb_id=105
+        )
+        tmdb_payload = {
+            "results": [
+                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "qvsgGtivCgs", "official": True},
+            ]
+        }
+
+        with patch(
+            "core.trailers.requests.get", return_value=SimpleNamespace(status_code=503)
+        ), patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
+            response = self.client.get(
+                reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"}
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+        self.assertEqual(response.data["trailer_url"], "https://www.youtube.com/embed/qvsgGtivCgs")
+        self.assertEqual(response.data["watch_url"], "https://www.youtube.com/watch?v=qvsgGtivCgs")
+        self.assertEqual(response.data["youtube_key"], "qvsgGtivCgs")
+        self.assertFalse(response.data["external_only"])
+
+    def test_tmdb_candidate_returns_available_without_oembed_validation(self):
         movie = self._create_movie()
         tmdb_payload = {
             "results": [
@@ -8751,19 +8789,22 @@ class MovieTrailerAvailabilityTests(TestCase):
             ]
         }
 
-        with patch("core.trailers.requests.get", return_value=SimpleNamespace(status_code=404)), patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
+        with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
             response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
 
+        movie.refresh_from_db()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             response.data,
             {
-                "trailer_url": None,
+                "trailer_url": "https://www.youtube.com/embed/bad-es",
                 "watch_url": "https://www.youtube.com/watch?v=bad-es",
-                "youtube_key": None,
-                "language": None,
+                "youtube_key": "bad-es",
+                "language": "es",
                 "source": "tmdb",
-                "available": False,
-                "external_only": True,
+                "available": True,
+                "external_only": False,
             },
         )
+        self.assertEqual(movie.trailer_es_key, "bad-es")
+        mock_youtube.assert_not_called()
