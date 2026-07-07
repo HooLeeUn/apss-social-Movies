@@ -3070,6 +3070,7 @@ class MovieTrailerView(APIView):
             logger.warning("TMDb trailer request failed for Movie(id=%s): %s", movie.id, exc)
             payload = {
                 "trailer_url": None,
+                "watch_url": None,
                 "youtube_key": None,
                 "language": None,
                 "source": "tmdb",
