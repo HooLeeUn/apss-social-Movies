@@ -8672,7 +8672,10 @@ class TMDbCreditsEndpointTests(TestCase):
             if path == "/tv/777/credits":
                 return {"crew": [], "cast": []}
             if path == "/tv/777":
-                return {"created_by": [{"id": 30, "name": "Series Creator", "profile_path": "/creator.jpg"}]}
+                return {
+                    "created_by": [{"id": 30, "name": "Series Creator", "profile_path": "/creator.jpg"}],
+                    "seasons": [],
+                }
             self.fail(f"Unexpected TMDb path: {path}")
 
         with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
@@ -8682,6 +8685,118 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(response.data["type"], "tv")
         self.assertEqual(response.data["director"][0]["tmdb_person_id"], 30)
         self.assertEqual(response.data["director"][0]["job"], "Creator")
+
+    def test_series_credits_builds_unique_cast_from_top_five_per_season(self):
+        series = self._create_movie(type=Movie.SERIES, tmdb_id=46648)
+        requested_paths = []
+
+        def cast_person(person_id, name, order, character):
+            return {
+                "id": person_id,
+                "name": name,
+                "character": character,
+                "order": order,
+                "profile_path": None,
+                "known_for_department": "Acting",
+                "gender": 0,
+            }
+
+        def fake_get_tmdb_json(path, params=None, timeout=None):
+            requested_paths.append(path)
+            if path == "/tv/46648/credits":
+                return {"crew": [], "cast": []}
+            if path == "/tv/46648":
+                return {
+                    "created_by": [{"id": 77, "name": "Nic Pizzolatto"}],
+                    "seasons": [
+                        {"season_number": 0},
+                        {"season_number": 1},
+                        {"season_number": 2},
+                    ],
+                }
+            if path == "/tv/46648/season/1/credits":
+                return {
+                    "cast": [
+                        cast_person(1, "Actor One", 0, "One"),
+                        cast_person(2, "Actor Two", 1, "Two"),
+                        cast_person(3, "Actor Three", 2, "Three"),
+                        cast_person(4, "Actor Four", 3, "Four"),
+                        cast_person(5, "Actor Five", 4, "Five"),
+                        cast_person(6, "Actor Six", 5, "Six"),
+                    ]
+                }
+            if path == "/tv/46648/season/2/credits":
+                return {
+                    "cast": [
+                        cast_person(3, "Actor Three", 0, "Three Again"),
+                        cast_person(None, "José Actor", 1, "Jose"),
+                        cast_person(None, "Jose Actor", 2, "Jose Duplicate"),
+                        cast_person(8, "Actor Eight", 3, "Eight"),
+                        cast_person(9, "Actor Nine", 4, "Nine"),
+                    ]
+                }
+            self.fail(f"Unexpected TMDb path: {path}")
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=fake_get_tmdb_json):
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": series.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            requested_paths,
+            [
+                "/tv/46648/credits",
+                "/tv/46648",
+                "/tv/46648/season/1/credits",
+                "/tv/46648/season/2/credits",
+            ],
+        )
+        self.assertEqual(
+            [person["name"] for person in response.data["cast"]],
+            [
+                "Actor One",
+                "Actor Two",
+                "Actor Three",
+                "Actor Four",
+                "Actor Five",
+                "José Actor",
+                "Actor Eight",
+                "Actor Nine",
+            ],
+        )
+        self.assertEqual(response.data["cast"][2]["seasons"], [1, 2])
+        self.assertEqual(response.data["cast"][2]["first_season"], 1)
+        self.assertEqual(response.data["cast"][5]["seasons"], [2])
+
+    def test_credits_falls_back_to_local_people_without_tmdb_id(self):
+        series = self._create_movie(
+            type=Movie.SERIES,
+            tmdb_id=None,
+            director="Local Creator",
+            cast_members="Local Actor, Another Actor",
+        )
+
+        with patch("core.tmdb_credits.get_tmdb_json") as mock_tmdb:
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": series.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["director"][0]["name"], "Local Creator")
+        self.assertEqual([person["name"] for person in response.data["cast"]], ["Local Actor", "Another Actor"])
+        mock_tmdb.assert_not_called()
+
+    def test_credits_falls_back_to_local_people_when_tmdb_fails(self):
+        series = self._create_movie(
+            type=Movie.SERIES,
+            tmdb_id=999,
+            director="Fallback Creator",
+            cast_members="Fallback Actor",
+        )
+
+        with patch("core.tmdb_credits.get_tmdb_json", side_effect=TMDbServiceError("down")):
+            response = self.client.get(reverse("movie-credits", kwargs={"pk": series.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["director"][0]["name"], "Fallback Creator")
+        self.assertEqual(response.data["cast"][0]["name"], "Fallback Actor")
 
 
 @override_settings(TMDB_READ_ACCESS_TOKEN="test-token")

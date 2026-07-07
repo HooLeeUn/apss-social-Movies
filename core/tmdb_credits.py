@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import unicodedata
 from typing import Any
 
 from django.core.cache import cache
@@ -18,6 +20,10 @@ TMDB_PERSON_FAILURE_CACHE_TIMEOUT = 60 * 5
 TMDB_PERSON_REQUEST_TIMEOUT = 4
 TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_DETAIL_LIMIT = 20
+TMDB_SEASON_CAST_LIMIT = 5
+TRUE_DETECTIVE_TMDB_ID = 46648
+
+logger = logging.getLogger(__name__)
 
 GENDER_LABELS = {
     0: "Not specified/Unknown",
@@ -43,13 +49,21 @@ PERSON_DETAIL_FIELDS = {
 def get_movie_credits_payload(movie: Movie) -> dict[str, Any]:
     payload = build_empty_credits_payload(movie)
     if not movie.tmdb_id:
-        return payload
+        return build_local_credits_payload(movie, payload)
 
     credits = get_cached_tmdb_credits(movie)
+    tv_details = (
+        get_cached_tv_details(movie.tmdb_id) if movie.type == Movie.SERIES else None
+    )
+    cast = (
+        build_series_cast_entries(movie, tv_details)
+        if movie.type == Movie.SERIES
+        else build_cast_entries(credits)
+    )
     return {
         **payload,
-        "director": build_director_entries(movie, credits),
-        "cast": build_cast_entries(credits),
+        "director": build_director_entries(movie, credits, tv_details=tv_details),
+        "cast": cast,
     }
 
 
@@ -67,6 +81,23 @@ def build_empty_credits_payload(movie: Movie) -> dict[str, Any]:
     }
 
 
+def build_local_credits_payload(
+    movie: Movie, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    payload = payload or build_empty_credits_payload(movie)
+    return {
+        **payload,
+        "director": [
+            serialize_local_person(name, "job", "Director")
+            for name in split_local_people(movie.director)
+        ],
+        "cast": [
+            {**serialize_local_person(name, "character", ""), "order": index}
+            for index, name in enumerate(split_local_people(movie.cast_members))
+        ],
+    }
+
+
 def get_cached_tmdb_credits(movie: Movie) -> dict[str, Any]:
     content_kind = get_tmdb_content_kind(movie)
     cache_key = f"tmdb-credits:v1:{content_kind}:{movie.tmdb_id}"
@@ -75,6 +106,17 @@ def get_cached_tmdb_credits(movie: Movie) -> dict[str, Any]:
         return cached_payload
 
     tmdb_payload = get_tmdb_json(f"/{content_kind}/{movie.tmdb_id}/credits")
+    cache.set(cache_key, tmdb_payload, TMDB_CREDITS_CACHE_TIMEOUT)
+    return tmdb_payload
+
+
+def get_cached_tv_season_credits(tmdb_id: int, season_number: int) -> dict[str, Any]:
+    cache_key = f"tmdb-tv-season-credits:v1:{tmdb_id}:{season_number}"
+    cached_payload = cache.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    tmdb_payload = get_tmdb_json(f"/tv/{tmdb_id}/season/{season_number}/credits")
     cache.set(cache_key, tmdb_payload, TMDB_CREDITS_CACHE_TIMEOUT)
     return tmdb_payload
 
@@ -151,7 +193,7 @@ def build_minimal_person_payload(person_id: int) -> dict[str, Any]:
 
 
 def build_director_entries(
-    movie: Movie, credits: dict[str, Any]
+    movie: Movie, credits: dict[str, Any], tv_details: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     crew = credits.get("crew", [])
     if not isinstance(crew, list):
@@ -165,10 +207,11 @@ def build_director_entries(
     if directors or movie.type != Movie.SERIES or not movie.tmdb_id:
         return directors
 
-    try:
-        tv_details = get_cached_tv_details(movie.tmdb_id)
-    except TMDbServiceError:
-        return []
+    if tv_details is None:
+        try:
+            tv_details = get_cached_tv_details(movie.tmdb_id)
+        except TMDbServiceError:
+            return []
 
     created_by = tv_details.get("created_by", [])
     if not isinstance(created_by, list):
@@ -200,6 +243,103 @@ def build_cast_entries(credits: dict[str, Any]) -> list[dict[str, Any]]:
             entry.get("order") if entry.get("order") is not None else 999999
         ),
     )
+
+
+def build_series_cast_entries(
+    movie: Movie, tv_details: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    if tv_details is None:
+        tv_details = get_cached_tv_details(movie.tmdb_id)
+
+    seasons = tv_details.get("seasons", [])
+    if not isinstance(seasons, list):
+        seasons = []
+    season_numbers = [
+        season.get("season_number")
+        for season in seasons
+        if isinstance(season, dict) and season.get("season_number") not in (None, 0)
+    ]
+
+    if movie.tmdb_id == TRUE_DETECTIVE_TMDB_ID:
+        logger.info("True Detective TMDb seasons consulted: %s", season_numbers)
+
+    entries_by_key: dict[tuple[str, Any], dict[str, Any]] = {}
+    for season_number in season_numbers:
+        season_credits = get_cached_tv_season_credits(movie.tmdb_id, season_number)
+        top_cast = build_cast_entries(season_credits)[:TMDB_SEASON_CAST_LIMIT]
+        if movie.tmdb_id == TRUE_DETECTIVE_TMDB_ID:
+            logger.info(
+                "True Detective TMDb season %s top 5 before dedupe: %s",
+                season_number,
+                [
+                    (person.get("tmdb_person_id"), person.get("name"))
+                    for person in top_cast
+                ],
+            )
+        for person in top_cast:
+            key = build_cast_dedupe_key(person)
+            if key not in entries_by_key:
+                entries_by_key[key] = {
+                    **person,
+                    "seasons": [season_number],
+                    "first_season": season_number,
+                }
+            elif season_number not in entries_by_key[key]["seasons"]:
+                entries_by_key[key]["seasons"].append(season_number)
+
+    final_cast = list(entries_by_key.values())
+    if movie.tmdb_id == TRUE_DETECTIVE_TMDB_ID:
+        logger.info(
+            "True Detective TMDb final cast after dedupe: %s",
+            [
+                (
+                    person.get("tmdb_person_id"),
+                    person.get("name"),
+                    person.get("seasons"),
+                )
+                for person in final_cast
+            ],
+        )
+    return final_cast
+
+
+def build_cast_dedupe_key(person: dict[str, Any]) -> tuple[str, Any]:
+    person_id = person.get("tmdb_person_id")
+    if person_id:
+        return ("id", person_id)
+    return ("name", normalize_person_name(person.get("name")))
+
+
+def normalize_person_name(name: Any) -> str:
+    normalized = (
+        unicodedata.normalize("NFKD", str(name or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    return " ".join(normalized.casefold().split())
+
+
+def split_local_people(value: str | None) -> list[str]:
+    return [name.strip() for name in (value or "").split(",") if name.strip()]
+
+
+def serialize_local_person(name: str, role_key: str, role_value: str) -> dict[str, Any]:
+    return {
+        "tmdb_person_id": None,
+        "name": name,
+        role_key: role_value,
+        "order": None,
+        "profile_url": None,
+        "known_for_department": "",
+        "gender": serialize_gender(None),
+        "birthday": None,
+        "deathday": None,
+        "place_of_birth": "",
+        "facebook_url": None,
+        "instagram_url": None,
+        "x_url": None,
+        "tmdb_url": None,
+    }
 
 
 def serialize_credit_person(person: dict[str, Any], role_key: str) -> dict[str, Any]:
