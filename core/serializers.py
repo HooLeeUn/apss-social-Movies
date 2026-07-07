@@ -1580,6 +1580,8 @@ class TMDbDirectorCreditSerializer(TMDbPersonBriefSerializer):
 class TMDbCastCreditSerializer(TMDbPersonBriefSerializer):
     character = serializers.CharField(allow_blank=True)
     order = serializers.IntegerField(allow_null=True)
+    seasons = serializers.ListField(child=serializers.IntegerField(), required=False)
+    first_season = serializers.IntegerField(required=False)
 
 
 class MovieCreditsSerializer(serializers.Serializer):

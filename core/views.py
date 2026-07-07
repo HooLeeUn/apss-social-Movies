@@ -64,7 +64,7 @@ from .models import (
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .tmdb import TMDbServiceError
-from .tmdb_credits import build_empty_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
+from .tmdb_credits import build_local_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
 from .trailers import get_movie_trailer_payload
 from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
@@ -3038,7 +3038,7 @@ class MovieCreditsView(APIView):
             payload = get_movie_credits_payload(movie)
         except TMDbServiceError as exc:
             logger.warning("TMDb credits request failed for Movie(id=%s): %s", movie.id, exc)
-            payload = build_empty_credits_payload(movie)
+            payload = build_local_credits_payload(movie)
 
         serializer = MovieCreditsSerializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)
