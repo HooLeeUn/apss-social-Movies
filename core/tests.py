@@ -8681,3 +8681,88 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(response.data["type"], "tv")
         self.assertEqual(response.data["director"][0]["tmdb_person_id"], 30)
         self.assertEqual(response.data["director"][0]["job"], "Creator")
+
+
+@override_settings(TMDB_READ_ACCESS_TOKEN="test-token")
+class MovieTrailerAvailabilityTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="traileruser",
+            email="trailer@example.com",
+            password="pass12345",
+        )
+
+    def _create_movie(self, **kwargs):
+        defaults = {
+            "author": self.user,
+            "title_english": "Trailer Movie",
+            "title_spanish": "Película Trailer",
+            "type": Movie.MOVIE,
+            "tmdb_id": 550,
+        }
+        defaults.update(kwargs)
+        return Movie.objects.create(**defaults)
+
+    def test_cached_trailer_is_validated_before_returning_available(self):
+        movie = self._create_movie(trailer_es_key="cached-es")
+
+        with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json") as mock_tmdb:
+            mock_youtube.return_value.status_code = 200
+            response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+        self.assertEqual(response.data["youtube_key"], "cached-es")
+        self.assertEqual(response.data["source"], "cache")
+        mock_tmdb.assert_not_called()
+        mock_youtube.assert_called_once()
+
+    def test_invalid_cached_trailer_is_cleared_and_replaced_with_next_valid_candidate(self):
+        movie = self._create_movie(trailer_es_key="removed-es")
+        tmdb_payload = {
+            "results": [
+                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "still-removed", "official": True, "published_at": "2024-01-01T00:00:00.000Z"},
+                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "valid-es", "official": True, "published_at": "2023-01-01T00:00:00.000Z"},
+            ]
+        }
+
+        with patch("core.trailers.requests.get") as mock_youtube, patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
+            mock_youtube.side_effect = [
+                SimpleNamespace(status_code=404),
+                SimpleNamespace(status_code=404),
+                SimpleNamespace(status_code=200),
+            ]
+            response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
+
+        movie.refresh_from_db()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["available"])
+        self.assertEqual(response.data["youtube_key"], "valid-es")
+        self.assertEqual(response.data["source"], "tmdb")
+        self.assertEqual(movie.trailer_es_key, "valid-es")
+        self.assertEqual(mock_youtube.call_count, 3)
+
+    def test_returns_unavailable_when_no_tmdb_candidate_can_be_played(self):
+        movie = self._create_movie()
+        tmdb_payload = {
+            "results": [
+                {"site": "YouTube", "type": "Trailer", "iso_639_1": "es", "key": "bad-es", "official": True},
+                {"site": "YouTube", "type": "Trailer", "iso_639_1": "en", "key": "bad-en", "official": True},
+            ]
+        }
+
+        with patch("core.trailers.requests.get", return_value=SimpleNamespace(status_code=404)), patch("core.trailers.get_tmdb_json", return_value=tmdb_payload):
+            response = self.client.get(reverse("movie-trailer", kwargs={"pk": movie.id}), {"country": "CO"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "trailer_url": None,
+                "watch_url": None,
+                "youtube_key": None,
+                "language": None,
+                "source": "tmdb",
+                "available": False,
+            },
+        )
