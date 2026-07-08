@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from django.core.cache import cache
@@ -22,6 +23,7 @@ TMDB_TV_DETAILS_CACHE_TIMEOUT = 60 * 60 * 24
 TMDB_PERSON_DETAIL_LIMIT = 20
 TMDB_SEASON_CAST_LIMIT = 5
 TRUE_DETECTIVE_TMDB_ID = 46648
+TMDB_SEASON_CREDITS_MAX_WORKERS = 6
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +266,11 @@ def build_series_cast_entries(
         logger.info("True Detective TMDb seasons consulted: %s", season_numbers)
 
     entries_by_key: dict[tuple[str, Any], dict[str, Any]] = {}
+    season_credits_by_number = get_tv_season_credits_payloads(
+        movie.tmdb_id, season_numbers
+    )
     for season_number in season_numbers:
-        season_credits = get_cached_tv_season_credits(movie.tmdb_id, season_number)
+        season_credits = season_credits_by_number.get(season_number, {})
         top_cast = build_cast_entries(season_credits)[:TMDB_SEASON_CAST_LIMIT]
         if movie.tmdb_id == TRUE_DETECTIVE_TMDB_ID:
             logger.info(
@@ -301,6 +306,27 @@ def build_series_cast_entries(
             ],
         )
     return final_cast
+
+
+def get_tv_season_credits_payloads(
+    tmdb_id: int, season_numbers: list[int]
+) -> dict[int, dict[str, Any]]:
+    if not season_numbers:
+        return {}
+
+    max_workers = min(TMDB_SEASON_CREDITS_MAX_WORKERS, len(season_numbers))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return dict(
+            zip(
+                season_numbers,
+                executor.map(
+                    lambda season_number: get_cached_tv_season_credits(
+                        tmdb_id, season_number
+                    ),
+                    season_numbers,
+                ),
+            )
+        )
 
 
 def build_cast_dedupe_key(person: dict[str, Any]) -> tuple[str, Any]:

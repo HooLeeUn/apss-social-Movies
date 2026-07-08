@@ -1,6 +1,7 @@
 import io
 import gzip
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -7114,7 +7115,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         cache.clear()
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_returns_country_watch_providers_grouped_by_monetization_type(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7171,7 +7172,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(args[0], "https://api.themoviedb.org/3/movie/27205/watch/providers")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_uses_tv_watch_provider_endpoint_for_series(self, mock_get):
         self.movie.type = Movie.SERIES
         self.movie.save(update_fields=["type"])
@@ -7187,7 +7188,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(args[0], "https://api.themoviedb.org/3/tv/27205/watch/providers")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_applies_general_provider_link_for_provider_and_country(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7222,7 +7223,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(provider["monetization_type"], "cpa")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_uses_landing_url_when_affiliate_and_direct_urls_are_missing(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7255,7 +7256,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_colombia_seeded_channel_providers_are_clickable_from_landing_url(self, mock_get):
         call_command("refresh_streaming_provider_links")
         expected_landing_urls = {
@@ -7310,7 +7311,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
                 self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_global_pattern_providers_are_clickable_for_us_without_tmdb_watch_url_fallback(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7361,7 +7362,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
                 self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_claro_video_is_clickable_from_global_landing_url_in_supported_country(self, mock_get):
         call_command("refresh_streaming_provider_links")
         mock_get.return_value = SimpleNamespace(
@@ -7396,7 +7397,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_specific_tmdb_provider_link_overrides_general_link(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7438,7 +7439,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(provider["monetization_type"], "affiliate")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_uses_direct_url_when_affiliate_url_is_missing(self, mock_get):
         StreamingProviderLink.objects.create(
             provider_id=8,
@@ -7472,7 +7473,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertTrue(provider["is_clickable"])
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_does_not_use_provider_direct_url_when_tmdb_supplies_one(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7507,7 +7508,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         self.assertEqual(provider["monetization_type"], "none")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_caches_tmdb_response_per_movie_and_country(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7522,7 +7523,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         mock_get.assert_called_once()
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_returns_empty_arrays_when_movie_has_no_tmdb_id(self, mock_get):
         self.movie.tmdb_id = None
         self.movie.save(update_fields=["tmdb_id"])
@@ -7538,7 +7539,7 @@ class MovieWatchProvidersEndpointTests(TestCase):
         mock_get.assert_not_called()
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_returns_empty_arrays_when_country_has_no_providers(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7852,7 +7853,7 @@ class StreamingProviderLinkCommandTests(TestCase):
 
 class TMDbServiceTests(TestCase):
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_get_tmdb_json_success(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
@@ -7877,7 +7878,7 @@ class TMDbServiceTests(TestCase):
             get_tmdb_json("movie/123")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token")
-    @patch("core.tmdb.requests.get")
+    @patch("core.tmdb._SESSION.get")
     def test_get_tmdb_json_raises_on_non_200(self, mock_get):
         mock_get.return_value = SimpleNamespace(status_code=401, text="Unauthorized")
 
@@ -8741,14 +8742,10 @@ class TMDbCreditsEndpointTests(TestCase):
             response = self.client.get(reverse("movie-credits", kwargs={"pk": series.pk}))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            requested_paths,
-            [
-                "/tv/46648/credits",
-                "/tv/46648",
-                "/tv/46648/season/1/credits",
-                "/tv/46648/season/2/credits",
-            ],
+        self.assertEqual(requested_paths[:2], ["/tv/46648/credits", "/tv/46648"])
+        self.assertCountEqual(
+            requested_paths[2:],
+            ["/tv/46648/season/1/credits", "/tv/46648/season/2/credits"],
         )
         self.assertEqual(
             [person["name"] for person in response.data["cast"]],
@@ -8766,6 +8763,24 @@ class TMDbCreditsEndpointTests(TestCase):
         self.assertEqual(response.data["cast"][2]["seasons"], [1, 2])
         self.assertEqual(response.data["cast"][2]["first_season"], 1)
         self.assertEqual(response.data["cast"][5]["seasons"], [2])
+
+    def test_series_season_credit_fetches_run_in_parallel(self):
+        from core.tmdb_credits import get_tv_season_credits_payloads
+
+        def fake_get_cached_tv_season_credits(tmdb_id, season_number):
+            time.sleep(0.1)
+            return {"cast": [{"id": season_number}]}
+
+        with patch(
+            "core.tmdb_credits.get_cached_tv_season_credits",
+            side_effect=fake_get_cached_tv_season_credits,
+        ):
+            started_at = time.perf_counter()
+            payloads = get_tv_season_credits_payloads(123, [1, 2, 3])
+            elapsed = time.perf_counter() - started_at
+
+        self.assertEqual(set(payloads), {1, 2, 3})
+        self.assertLess(elapsed, 0.25)
 
     def test_credits_falls_back_to_local_people_without_tmdb_id(self):
         series = self._create_movie(
