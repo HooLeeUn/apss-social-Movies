@@ -212,7 +212,11 @@ class Command(BaseCommand):
         return self._repair_result(None, "none", "skipped_no_match", "Sin coincidencia confiable; tmdb_id queda vacío.")
 
     def _repair_result(self, row, reason, status, notes):
-        return {"tmdb_id": row.get("tmdb_id") if row else None, "reason": reason, "status": status, "notes": notes}
+        if isinstance(row, int):
+            tmdb_id = row
+        else:
+            tmdb_id = row.get("tmdb_id") if row else None
+        return {"tmdb_id": tmdb_id, "reason": reason, "status": status, "notes": notes}
 
     def _find_tmdb_by_imdb(self, movie, imdb_id):
         content_kind = "tv" if movie.type == Movie.SERIES else "movie"
