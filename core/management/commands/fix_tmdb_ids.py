@@ -54,12 +54,18 @@ class Command(BaseCommand):
         if options["only_duplicates"] and options["include_all"]:
             raise CommandError("Usa --only-duplicates o --include-all, no ambos.")
 
-        exports_dir = Path(options["exports_dir"])
+        exports_dir = Path(options["exports_dir"]).expanduser()
+        if not exports_dir.is_absolute():
+            exports_dir = (Path.cwd() / exports_dir).resolve()
+        else:
+            exports_dir = exports_dir.resolve()
         local_index = self._build_local_index(exports_dir, quiet=options["quiet_warnings"])
         duplicate_tmdb_ids = self._get_duplicate_tmdb_ids()
         movies = list(self._get_movies_queryset(options, duplicate_tmdb_ids))
         if not options["apply"] and not options["quiet_warnings"]:
             self._print_dry_run_diagnostics(local_index, movies)
+        if not local_index["rows_loaded"]:
+            raise CommandError(f"No se cargaron registros locales desde exports-dir: {exports_dir}")
         report_path = Path.cwd() / self.REPORT_FILENAME
 
         stats = Counter()
@@ -202,24 +208,53 @@ class Command(BaseCommand):
             writer.writerows(rows)
 
     def _build_local_index(self, exports_dir, quiet=False):
+        index = {
+            "exports_dir": str(exports_dir),
+            "exports_dir_exists": exports_dir.exists(),
+            "by_imdb": defaultdict(list),
+            "by_title": defaultdict(list),
+            "by_year": defaultdict(list),
+            "by_tmdb_id": defaultdict(list),
+            "files": [],
+            "rows_loaded": 0,
+            "files_processed": 0,
+            "media_types": Counter(),
+        }
         if not exports_dir.exists():
-            raise CommandError(f"No existe exports-dir: {exports_dir}")
-        index = {"by_imdb": defaultdict(list), "by_title": defaultdict(list), "files": [], "rows_loaded": 0}
+            if not quiet:
+                self.stdout.write(self.style.WARNING(f"No se encontraron exports locales en la ruta {exports_dir}"))
+            return index
+
         files = []
         for pattern in self.EXPORT_PATTERNS:
-            files.extend(exports_dir.glob(pattern))
+            files.extend(exports_dir.rglob(pattern))
         for file_path in sorted(set(files)):
             index["files"].append(str(file_path))
+
+        if not index["files"] and not quiet:
+            self.stdout.write(self.style.WARNING(f"No se encontraron exports locales en la ruta {exports_dir}"))
+
+        for file_path in [Path(path) for path in index["files"]]:
             media_type = self._media_type_from_export_name(file_path.name)
+            loaded_from_file = 0
             for raw in self._iter_json_rows(file_path):
                 row = self._normalize_export_row(raw, media_type=media_type)
                 if not row["tmdb_id"]:
                     continue
+                loaded_from_file += 1
                 index["rows_loaded"] += 1
+                index["by_tmdb_id"][row["tmdb_id"]].append(row)
+                if row["release_year"]:
+                    index["by_year"][row["release_year"]].append(row)
+                if row["media_type"]:
+                    index["media_types"][row["media_type"]] += 1
                 if row["imdb_id"]:
                     index["by_imdb"][row["imdb_id"]].append(row)
                 for title in row["titles"]:
                     index["by_title"][title].append(row)
+            if loaded_from_file:
+                index["files_processed"] += 1
+
         return index
 
     def _iter_json_rows(self, file_path):
@@ -289,19 +324,29 @@ class Command(BaseCommand):
 
     def _print_dry_run_diagnostics(self, local_index, movies):
         self.stdout.write("Diagnóstico dry-run:")
-        self.stdout.write(f"  archivos encontrados en tmdb_exports: {len(local_index['files'])}")
-        for file_path in local_index["files"][:20]:
+        self.stdout.write(f"  exports-dir absoluto: {local_index['exports_dir']}")
+        self.stdout.write(f"  exports-dir existe: {'sí' if local_index['exports_dir_exists'] else 'no'}")
+        self.stdout.write(f"  archivos encontrados en exports-dir: {len(local_index['files'])}")
+        for file_path in local_index["files"][:10]:
             self.stdout.write(f"    {file_path}")
-        if len(local_index["files"]) > 20:
-            self.stdout.write(f"    ... {len(local_index['files']) - 20} más")
+        if len(local_index["files"]) > 10:
+            self.stdout.write(f"    ... {len(local_index['files']) - 10} más")
+        self.stdout.write(f"  archivos TMDb procesados: {local_index['files_processed']}")
         self.stdout.write(f"  registros locales cargados: {local_index['rows_loaded']}")
         self.stdout.write(f"  imdb_id indexados: {len(local_index['by_imdb'])}")
         self.stdout.write(f"  títulos indexados: {len(local_index['by_title'])}")
+        self.stdout.write(f"  años indexados: {len(local_index['by_year'])}")
+        media_types = ", ".join(f"{key}={value}" for key, value in sorted(local_index["media_types"].items())) or "ninguno"
+        self.stdout.write(f"  media_type encontrados: {media_types}")
         tt_matches = local_index["by_imdb"].get("tt0120338", [])
         self.stdout.write(f"  resultado de buscar tt0120338: {self._diagnostic_matches(tt_matches)}")
         titanic_matches = local_index["by_title"].get(self._normalize_text("Titanic"), [])
         titanic_1997 = [row for row in titanic_matches if row.get("release_year") == 1997]
+        titanic_tmdb = local_index["by_tmdb_id"].get(597, [])
+        self.stdout.write(f"  candidatos locales para title=Titanic: {self._diagnostic_matches(titanic_matches)}")
+        self.stdout.write(f"  candidatos locales para title=Titanic year=1997: {self._diagnostic_matches(titanic_1997)}")
         self.stdout.write(f"  resultado de buscar título Titanic año 1997: {self._diagnostic_matches(titanic_1997)}")
+        self.stdout.write(f"  candidatos locales para tmdb_id=597: {self._diagnostic_matches(titanic_tmdb)}")
         self.stdout.write(f"  registros locales cargados para revisar: {len(movies)}")
 
     def _diagnostic_matches(self, matches):
