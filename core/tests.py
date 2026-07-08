@@ -2,6 +2,7 @@ import io
 import gzip
 import json
 import time
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8963,6 +8964,49 @@ class FixTmdbIdsCommandTests(TestCase):
         with gzip.open(file_path, "wt", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row) + "\n")
+
+    def test_repair_cleared_dry_run_title_director_accepts_integer_tmdb_id(self):
+        movie = self._create_movie(tmdb_id=None, release_year=1997, imdb_id="")
+
+        def fake_get_tmdb_json(path, params=None):
+            if path == "/search/movie":
+                return {"results": [{"id": 597, "title": "Titanic", "release_date": "1997-11-18"}]}
+            if path == "/movie/597/credits":
+                return {"crew": [{"job": "Director", "name": "James Cameron"}]}
+            return {}
+
+        with TemporaryDirectory() as tmp_dir, patch(
+            "core.management.commands.fix_tmdb_ids.get_tmdb_json",
+            side_effect=fake_get_tmdb_json,
+        ):
+            affected_csv = Path(tmp_dir) / "affected.csv"
+            affected_csv.write_text(f"movie_id\n{movie.id}\n", encoding="utf-8")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_dir)
+                out = io.StringIO()
+                call_command(
+                    "fix_tmdb_ids",
+                    "--repair-cleared",
+                    "--affected-csv",
+                    str(affected_csv),
+                    "--exports-dir",
+                    str(Path(tmp_dir) / "tmdb_exports"),
+                    "--year-tolerance",
+                    "2",
+                    stdout=out,
+                )
+                report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+                self.assertTrue(report_path.exists())
+                report = report_path.read_text(encoding="utf-8")
+            finally:
+                os.chdir(previous_cwd)
+
+        movie.refresh_from_db()
+        self.assertIsNone(movie.tmdb_id)
+        self.assertIn("Modo: DRY-RUN", out.getvalue())
+        self.assertIn("repaired: 1", out.getvalue())
+        self.assertIn(",597,title_director", report)
 
     def test_dry_run_matches_official_export_by_title_and_year(self):
         unchanged = self._create_movie(
