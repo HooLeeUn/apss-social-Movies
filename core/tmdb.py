@@ -3,11 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 
 
 class TMDbServiceError(Exception):
     """Raised when a TMDb request fails or configuration is invalid."""
+
+
+_SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(pool_connections=10, pool_maxsize=10))
+_SESSION.mount("http://", HTTPAdapter(pool_connections=10, pool_maxsize=10))
 
 
 def get_tmdb_json(
@@ -35,7 +41,7 @@ def get_tmdb_json(
     }
 
     try:
-        response = requests.get(
+        response = _SESSION.get(
             f"{normalized_base_url}{normalized_path}",
             params=params or {},
             headers=headers,
