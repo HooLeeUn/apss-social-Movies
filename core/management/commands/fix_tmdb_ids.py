@@ -2,28 +2,33 @@ import csv
 import gzip
 import json
 import re
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Count, Q
-
+from django.db.models import Count
 from core.models import Movie
+from core.tmdb import TMDbServiceError, get_tmdb_json
 
 
 class Command(BaseCommand):
-    help = "Diagnostica y repara tmdb_id duplicados de Movie usando exports locales de TMDb."
+    help = "Diagnostica, limpia y repara tmdb_id duplicados sospechosos sin tocar registros no afectados."
 
     EXPORT_PATTERNS = ("*.json.gz", "*.json", "*.jsonl.gz", "*.jsonl")
-    REPORT_FILENAME = "tmdb_id_fix_report.csv"
+    DUPLICATES_REPORT = "tmdb_duplicates_report.csv"
+    CLEAR_REPORT = "tmdb_clear_duplicates_report.csv"
+    REPAIR_REPORT = "tmdb_repair_cleared_report.csv"
+    AFFECTED_REPORTS = (CLEAR_REPORT, DUPLICATES_REPORT)
     DERIVED_FIELDS_TO_CLEAR = (
+        "tmdb_id",
         "image",
+        "synopsis",
+        "synopsis_es",
         "trailer_es_key",
         "trailer_en_key",
         "trailer_checked_at",
-        "synopsis",
-        "synopsis_es",
     )
     REPORT_COLUMNS = (
         "movie_id",
@@ -33,76 +38,123 @@ class Command(BaseCommand):
         "cast_members",
         "imdb_id",
         "old_tmdb_id",
-        "new_tmdb_id",
-        "match_reason",
         "status",
-        "derived_fields_cleared",
         "notes",
     )
+    REPAIR_COLUMNS = (*REPORT_COLUMNS, "new_tmdb_id", "match_reason")
 
     def add_arguments(self, parser):
-        parser.add_argument("--apply", action="store_true", help="Guarda los cambios. Por defecto sólo dry-run.")
-        parser.add_argument("--start-id", type=int, default=None, help="ID inicial opcional.")
-        parser.add_argument("--limit", type=int, default=None, help="Cantidad máxima de registros a revisar.")
+        parser.add_argument("--diagnose-duplicates", action="store_true", help="Genera tmdb_duplicates_report.csv.")
+        parser.add_argument("--clear-duplicates", action="store_true", help="Limpia sólo el grupo duplicado sospechoso con --apply.")
+        parser.add_argument("--repair-cleared", action="store_true", help="Reimporta tmdb_id sólo para movie_id del CSV afectado.")
+        parser.add_argument("--apply", action="store_true", help="Guarda cambios. Por defecto sólo dry-run.")
         parser.add_argument("--exports-dir", type=str, default="tmdb_exports", help="Carpeta de exports locales.")
-        parser.add_argument("--use-local-exports", action="store_true", help="Compatibilidad explícita: este comando siempre usa exports locales.")
-        parser.add_argument("--only-duplicates", action="store_true", help="Revisar sólo tmdb_id duplicados sospechosos.")
-        parser.add_argument("--include-all", action="store_true", help="Revisar también registros no duplicados.")
+        parser.add_argument("--start-id", type=int, default=None, help="ID inicial opcional.")
+        parser.add_argument("--limit", type=int, default=None, help="Cantidad máxima de registros a procesar.")
+        parser.add_argument("--year-tolerance", type=int, default=2, help="Tolerancia de año para title_en + año.")
         parser.add_argument("--quiet-warnings", action="store_true", help="Reduce ruido en consola.")
+        parser.add_argument("--affected-csv", type=str, default=None, help="CSV con movie_id a reparar; por defecto usa clear/duplicates report.")
+        # Opciones heredadas aceptadas por compatibilidad; ya no activan reparación masiva.
+        parser.add_argument("--use-local-exports", action="store_true", help="Compatibilidad: los exports locales se usan cuando aplica.")
+        parser.add_argument("--only-duplicates", action="store_true", help="Compatibilidad: equivalente a --diagnose-duplicates.")
+        parser.add_argument("--include-all", action="store_true", help="Obsoleto: no se permite tocar registros no afectados.")
 
     def handle(self, *args, **options):
-        if options["only_duplicates"] and options["include_all"]:
-            raise CommandError("Usa --only-duplicates o --include-all, no ambos.")
+        if options["include_all"]:
+            raise CommandError("fix_tmdb_ids ya no permite --include-all: sólo procesa duplicados sospechosos.")
+        phases = [options["diagnose_duplicates"] or options["only_duplicates"], options["clear_duplicates"], options["repair_cleared"]]
+        if sum(bool(phase) for phase in phases) != 1:
+            raise CommandError("Elige exactamente una fase: --diagnose-duplicates, --clear-duplicates o --repair-cleared.")
 
-        exports_dir = Path(options["exports_dir"]).expanduser()
-        if not exports_dir.is_absolute():
-            exports_dir = (Path.cwd() / exports_dir).resolve()
+        exports_dir = self._resolve_path(options["exports_dir"])
+        local_index = None
+        if options["repair_cleared"]:
+            local_index = self._build_local_index(exports_dir, quiet=options["quiet_warnings"])
+            if not local_index["rows_loaded"] and not options["quiet_warnings"]:
+                self.stdout.write(self.style.WARNING(f"No se cargaron exports locales desde {exports_dir}."))
+
+        if options["repair_cleared"]:
+            self._repair_cleared(options, local_index)
+        elif options["clear_duplicates"]:
+            self._clear_duplicates(options)
         else:
-            exports_dir = exports_dir.resolve()
-        local_index = self._build_local_index(exports_dir, quiet=options["quiet_warnings"])
-        duplicate_tmdb_ids = self._get_duplicate_tmdb_ids()
-        movies = list(self._get_movies_queryset(options, duplicate_tmdb_ids))
-        if not options["apply"] and not options["quiet_warnings"]:
-            self._print_dry_run_diagnostics(local_index, movies)
-        if not local_index["rows_loaded"]:
-            raise CommandError(f"No se cargaron registros locales desde exports-dir: {exports_dir}")
-        report_path = Path.cwd() / self.REPORT_FILENAME
+            self._diagnose_duplicates(options)
 
-        stats = Counter()
+    def _diagnose_duplicates(self, options):
+        movies = list(self._affected_duplicates_queryset(options))
+        rows = [self._base_row(movie, "affected_duplicate", "tmdb_id duplicado sospechoso") for movie in movies]
+        report_path = Path.cwd() / self.DUPLICATES_REPORT
+        self._write_report(report_path, rows, self.REPORT_COLUMNS)
+        self._print_summary("Diagnóstico de duplicados", options, movies, report_path, Counter(row["status"] for row in rows))
+
+    def _clear_duplicates(self, options):
+        movies = list(self._affected_duplicates_queryset(options))
         rows = []
         updates = []
-
-        if not options["quiet_warnings"]:
-            self._print_duplicate_summary(duplicate_tmdb_ids)
-
         for movie in movies:
-            is_duplicate = movie.tmdb_id in duplicate_tmdb_ids if movie.tmdb_id else False
-            decision = self._decide_movie(movie, local_index, is_duplicate)
-            stats[decision["status"]] += 1
-            rows.append(self._build_report_row(movie, decision))
-
-            if options["apply"] and decision["status"] == "updated":
-                self._apply_decision(movie, decision)
+            rows.append(self._base_row(movie, "cleared" if options["apply"] else "would_clear", self._clear_notes()))
+            if options["apply"]:
+                movie.tmdb_id = None
+                movie.image = None
+                movie.synopsis = ""
+                movie.synopsis_es = None
+                movie.trailer_es_key = None
+                movie.trailer_en_key = None
+                movie.trailer_checked_at = None
+                movie.tmdb_lookup_status = ""
+                movie.tmdb_lookup_error = ""
                 updates.append(movie)
-
         if updates:
             Movie.objects.bulk_update(
                 updates,
-                ["tmdb_id", *self.DERIVED_FIELDS_TO_CLEAR, "tmdb_lookup_status", "tmdb_lookup_error"],
+                [*self.DERIVED_FIELDS_TO_CLEAR, "tmdb_lookup_status", "tmdb_lookup_error"],
                 batch_size=500,
             )
+        report_path = Path.cwd() / self.CLEAR_REPORT
+        self._write_report(report_path, rows, self.REPORT_COLUMNS)
+        self._print_summary("Limpieza de duplicados", options, movies, report_path, Counter(row["status"] for row in rows))
 
-        self._write_report(report_path, rows)
-        self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
-        self.stdout.write(f"Modo: {'APPLY' if options['apply'] else 'DRY-RUN'}")
-        self.stdout.write(f"Registros revisados: {len(movies)}")
-        self.stdout.write(f"tmdb_id duplicados sospechosos: {len(duplicate_tmdb_ids)}")
-        self.stdout.write(f"updated: {stats['updated']}")
-        self.stdout.write(f"unchanged: {stats['unchanged']}")
-        self.stdout.write(f"skipped_ambiguous: {stats['skipped_ambiguous']}")
-        self.stdout.write(f"skipped_no_match: {stats['skipped_no_match']}")
-        self.stdout.write(f"skipped_not_duplicate: {stats['skipped_not_duplicate']}")
-        self.stdout.write(f"Reporte CSV: {report_path}")
+    def _repair_cleared(self, options, local_index):
+        movie_ids = self._load_affected_movie_ids(options.get("affected_csv"))
+        qs = Movie.objects.filter(id__in=movie_ids).only(
+            "id", "title_english", "release_year", "director", "cast_members", "imdb_id", "tmdb_id", "type",
+            "tmdb_lookup_status", "tmdb_lookup_error",
+        ).order_by("id")
+        if options["start_id"] is not None:
+            qs = qs.filter(id__gte=options["start_id"])
+        if options["limit"]:
+            qs = qs[: options["limit"]]
+        movies = list(qs)
+        rows = []
+        updates = []
+        stats = Counter()
+        for movie in movies:
+            decision = self._repair_decision(movie, local_index, options)
+            stats[decision["status"]] += 1
+            rows.append({**self._base_row(movie, decision["status"], decision["notes"]), "new_tmdb_id": decision["tmdb_id"] or "", "match_reason": decision["reason"]})
+            if options["apply"]:
+                movie.tmdb_id = decision["tmdb_id"]
+                movie.tmdb_lookup_status = "found" if decision["tmdb_id"] else "not_found"
+                movie.tmdb_lookup_error = "" if decision["tmdb_id"] else decision["status"]
+                updates.append(movie)
+        if updates:
+            Movie.objects.bulk_update(updates, ["tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"], batch_size=500)
+        report_path = Path.cwd() / self.REPAIR_REPORT
+        self._write_report(report_path, rows, self.REPAIR_COLUMNS)
+        self._print_summary("Reparación de duplicados limpiados", options, movies, report_path, stats)
+
+    def _affected_duplicates_queryset(self, options):
+        duplicate_ids = self._get_duplicate_tmdb_ids()
+        qs = Movie.objects.filter(tmdb_id__in=duplicate_ids or [-1]).only(
+            "id", "title_english", "release_year", "director", "cast_members", "imdb_id", "tmdb_id", "type",
+            "image", "synopsis", "synopsis_es", "trailer_es_key", "trailer_en_key", "trailer_checked_at",
+            "tmdb_lookup_status", "tmdb_lookup_error",
+        ).order_by("tmdb_id", "id")
+        if options["start_id"] is not None:
+            qs = qs.filter(id__gte=options["start_id"])
+        if options["limit"]:
+            qs = qs[: options["limit"]]
+        return qs
 
     def _get_duplicate_tmdb_ids(self):
         return set(
@@ -113,148 +165,113 @@ class Command(BaseCommand):
             .values_list("tmdb_id", flat=True)
         )
 
-    def _get_movies_queryset(self, options, duplicate_tmdb_ids):
-        qs = Movie.objects.all().only(
-            "id", "title_english", "release_year", "director", "cast_members",
-            "imdb_id", "tmdb_id", "type", "image", "trailer_es_key", "trailer_en_key",
-            "trailer_checked_at", "synopsis", "synopsis_es", "tmdb_lookup_status", "tmdb_lookup_error",
-        ).order_by("id")
-        if options["start_id"] is not None:
-            qs = qs.filter(id__gte=options["start_id"])
-        if options["only_duplicates"] or not options["include_all"]:
-            qs = qs.filter(tmdb_id__in=duplicate_tmdb_ids or [-1])
-        else:
-            qs = qs.filter(Q(tmdb_id__isnull=False) | Q(imdb_id__isnull=False) | Q(title_english__isnull=False))
-        if options["limit"]:
-            qs = qs[: options["limit"]]
-        return qs
-
-    def _decide_movie(self, movie, local_index, is_duplicate):
-        if not is_duplicate:
-            return self._decision(None, "none", "skipped_not_duplicate", "No tiene tmdb_id duplicado sospechoso.")
-
+    def _repair_decision(self, movie, local_index, options):
+        content_matches = lambda rows: self._filter_by_content_kind(movie, rows)
         imdb_id = self._normalize_imdb_id(movie.imdb_id)
         if imdb_id:
-            imdb_matches = local_index["by_imdb"].get(imdb_id, [])
-            if len(imdb_matches) == 1:
-                return self._candidate_decision(movie, imdb_matches[0], "imdb_id")
-            if len(imdb_matches) > 1:
-                return self._decision(None, "imdb_id", "skipped_ambiguous", self._ambiguous_note(imdb_matches))
+            matches = content_matches(local_index["by_imdb"].get(imdb_id, []))
+            unique = self._unique_by_tmdb_id(matches)
+            if len(unique) == 1:
+                return self._repair_result(next(iter(unique)), "imdb_id", "repaired", "Coincidencia exacta por imdb_id en exports locales.")
+            if len(unique) > 1:
+                return self._repair_result(None, "imdb_id", "skipped_ambiguous", self._ambiguous_note(unique.values()))
+            try:
+                api_match = self._find_tmdb_by_imdb(movie, imdb_id)
+            except TMDbServiceError as exc:
+                api_match = None
+                if not local_index["rows_loaded"]:
+                    return self._repair_result(None, "imdb_id", "skipped_no_match", f"API TMDb no disponible: {exc}")
+            if api_match:
+                return self._repair_result(api_match, "imdb_id", "repaired", "Coincidencia exacta por imdb_id usando /find.")
 
         title = self._normalize_text(movie.title_english)
-        title_matches = self._filter_by_content_kind(movie, local_index["by_title"].get(title, [])) if title else []
-        first_director = self._first_director(movie.director)
-        if title_matches and first_director:
-            director_matches = [row for row in title_matches if self._normalize_text(first_director) in row["director_names"]]
-            unique_by_id = {row["tmdb_id"]: row for row in director_matches if row.get("tmdb_id")}
-            if len(unique_by_id) == 1:
-                return self._candidate_decision(movie, next(iter(unique_by_id.values())), "title_director")
-            if len(unique_by_id) > 1:
-                return self._decision(None, "title_director", "skipped_ambiguous", self._ambiguous_note(unique_by_id.values()))
-
+        title_matches = content_matches(local_index["by_title"].get(title, [])) if title else []
         if title_matches and movie.release_year:
-            year_matches = [row for row in title_matches if row.get("release_year") == movie.release_year]
-            unique_by_id = {row["tmdb_id"]: row for row in year_matches if row.get("tmdb_id")}
-            if len(unique_by_id) == 1:
-                return self._candidate_decision(movie, next(iter(unique_by_id.values())), "title_year")
-            if len(unique_by_id) > 1:
-                return self._decision(None, "title_year", "skipped_ambiguous", self._ambiguous_note(unique_by_id.values()))
+            tolerance = max(0, options["year_tolerance"])
+            exact = [row for row in title_matches if row.get("release_year") == movie.release_year]
+            in_tolerance = [row for row in title_matches if row.get("release_year") and abs(row["release_year"] - movie.release_year) <= tolerance]
+            for reason, candidates in (("title_year", exact), ("title_year_tolerance", in_tolerance)):
+                unique = self._unique_by_tmdb_id(candidates)
+                if len(unique) == 1:
+                    return self._repair_result(next(iter(unique)), reason, "repaired", "Coincidencia única y confiable por title_en + año.")
+                if len(unique) > 1:
+                    return self._repair_result(None, reason, "skipped_ambiguous", self._ambiguous_note(unique.values()))
 
-        return self._decision(None, "none", "skipped_no_match", "Sin coincidencia local confiable por imdb_id, título + director ni título + año.")
+        first_director = self._first_director(movie.director)
+        if title and first_director:
+            try:
+                api_matches = self._search_tmdb_by_title(movie, title, first_director)
+            except TMDbServiceError as exc:
+                return self._repair_result(None, "title_director", "skipped_no_match", f"API TMDb no disponible: {exc}")
+            unique = self._unique_by_tmdb_id(api_matches)
+            if len(unique) == 1:
+                return self._repair_result(next(iter(unique)), "title_director", "repaired", "Coincidencia única por title_en + primer director completo.")
+            if len(unique) > 1:
+                return self._repair_result(None, "title_director", "skipped_ambiguous", self._ambiguous_note(unique.values()))
 
-    def _candidate_decision(self, movie, candidate, reason):
-        new_tmdb_id = candidate.get("tmdb_id")
-        if not new_tmdb_id:
-            return self._decision(None, reason, "skipped_no_match", "La coincidencia no contiene tmdb_id.")
-        if movie.tmdb_id == new_tmdb_id:
-            return self._decision(new_tmdb_id, reason, "unchanged", "El tmdb_id actual ya coincide con el export local.")
-        return self._decision(new_tmdb_id, reason, "updated", "Se corrige tmdb_id y se limpian campos derivados contaminables.")
+        return self._repair_result(None, "none", "skipped_no_match", "Sin coincidencia confiable; tmdb_id queda vacío.")
 
-    def _decision(self, new_tmdb_id, match_reason, status, notes):
-        return {"new_tmdb_id": new_tmdb_id, "match_reason": match_reason, "status": status, "notes": notes}
+    def _repair_result(self, row, reason, status, notes):
+        return {"tmdb_id": row.get("tmdb_id") if row else None, "reason": reason, "status": status, "notes": notes}
 
-    def _apply_decision(self, movie, decision):
-        movie.tmdb_id = decision["new_tmdb_id"]
-        movie.image = None
-        movie.trailer_es_key = None
-        movie.trailer_en_key = None
-        movie.trailer_checked_at = None
-        movie.synopsis = ""
-        movie.synopsis_es = None
-        movie.tmdb_lookup_status = "found"
-        movie.tmdb_lookup_error = ""
+    def _find_tmdb_by_imdb(self, movie, imdb_id):
+        content_kind = "tv" if movie.type == Movie.SERIES else "movie"
+        results_key = "tv_results" if content_kind == "tv" else "movie_results"
+        data = get_tmdb_json(f"/find/{imdb_id}", params={"external_source": "imdb_id"})
+        candidates = data.get(results_key) or []
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        return {"tmdb_id": candidate.get("id"), "release_year": self._extract_release_year(candidate), "media_type": content_kind}
 
-    def _build_report_row(self, movie, decision):
-        cleared = ",".join(self.DERIVED_FIELDS_TO_CLEAR) if decision["status"] == "updated" else ""
-        return {
-            "movie_id": movie.id,
-            "title_en": movie.title_english,
-            "release_year": movie.release_year,
-            "director": movie.director,
-            "cast_members": movie.cast_members,
-            "imdb_id": movie.imdb_id,
-            "old_tmdb_id": movie.tmdb_id,
-            "new_tmdb_id": decision["new_tmdb_id"] or "",
-            "match_reason": decision["match_reason"],
-            "status": decision["status"],
-            "derived_fields_cleared": cleared,
-            "notes": decision["notes"],
-        }
+    def _search_tmdb_by_title(self, movie, normalized_title, first_director):
+        content_kind = "tv" if movie.type == Movie.SERIES else "movie"
+        data = get_tmdb_json(f"/search/{content_kind}", params={"query": movie.title_english, "include_adult": "false", "language": "en-US"})
+        matches = []
+        for candidate in data.get("results") or []:
+            candidate_title = self._normalize_text(candidate.get("title") or candidate.get("name") or candidate.get("original_title") or candidate.get("original_name"))
+            if candidate_title != normalized_title:
+                continue
+            tmdb_id = candidate.get("id")
+            credits = get_tmdb_json(f"/{content_kind}/{tmdb_id}/credits")
+            directors = self._director_names_from_credits(credits)
+            if self._normalize_text(first_director) in {self._normalize_text(name) for name in directors}:
+                matches.append({"tmdb_id": tmdb_id, "release_year": self._extract_release_year(candidate), "media_type": content_kind})
+            time.sleep(0.05)
+        return matches
 
-    def _write_report(self, path, rows):
-        with path.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=self.REPORT_COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
+    def _director_names_from_credits(self, credits):
+        return [person.get("name") for person in credits.get("crew") or [] if person.get("job") == "Director" and person.get("name")]
+
+    def _load_affected_movie_ids(self, csv_path):
+        paths = [self._resolve_path(csv_path)] if csv_path else [Path.cwd() / name for name in self.AFFECTED_REPORTS]
+        for path in paths:
+            if path.exists():
+                with path.open(newline="", encoding="utf-8") as fh:
+                    return [int(row["movie_id"]) for row in csv.DictReader(fh) if row.get("movie_id")]
+        raise CommandError("No se encontró CSV de afectados. Ejecuta primero --diagnose-duplicates o --clear-duplicates, o usa --affected-csv.")
 
     def _build_local_index(self, exports_dir, quiet=False):
-        index = {
-            "exports_dir": str(exports_dir),
-            "exports_dir_exists": exports_dir.exists(),
-            "by_imdb": defaultdict(list),
-            "by_title": defaultdict(list),
-            "by_year": defaultdict(list),
-            "by_tmdb_id": defaultdict(list),
-            "files": [],
-            "rows_loaded": 0,
-            "files_processed": 0,
-            "media_types": Counter(),
-        }
+        index = {"by_imdb": defaultdict(list), "by_title": defaultdict(list), "rows_loaded": 0, "files": []}
         if not exports_dir.exists():
             if not quiet:
-                self.stdout.write(self.style.WARNING(f"No se encontraron exports locales en la ruta {exports_dir}"))
+                self.stdout.write(self.style.WARNING(f"No se encontraron exports locales en {exports_dir}"))
             return index
-
         files = []
         for pattern in self.EXPORT_PATTERNS:
             files.extend(exports_dir.rglob(pattern))
+        index["files"] = [str(path) for path in sorted(set(files))]
         for file_path in sorted(set(files)):
-            index["files"].append(str(file_path))
-
-        if not index["files"] and not quiet:
-            self.stdout.write(self.style.WARNING(f"No se encontraron exports locales en la ruta {exports_dir}"))
-
-        for file_path in [Path(path) for path in index["files"]]:
             media_type = self._media_type_from_export_name(file_path.name)
-            loaded_from_file = 0
             for raw in self._iter_json_rows(file_path):
-                row = self._normalize_export_row(raw, media_type=media_type)
+                row = self._normalize_export_row(raw, media_type)
                 if not row["tmdb_id"]:
                     continue
-                loaded_from_file += 1
                 index["rows_loaded"] += 1
-                index["by_tmdb_id"][row["tmdb_id"]].append(row)
-                if row["release_year"]:
-                    index["by_year"][row["release_year"]].append(row)
-                if row["media_type"]:
-                    index["media_types"][row["media_type"]] += 1
                 if row["imdb_id"]:
                     index["by_imdb"][row["imdb_id"]].append(row)
                 for title in row["titles"]:
                     index["by_title"][title].append(row)
-            if loaded_from_file:
-                index["files_processed"] += 1
-
         return index
 
     def _iter_json_rows(self, file_path):
@@ -265,14 +282,9 @@ class Command(BaseCommand):
                 return
             fh.seek(0)
             if first == "[":
-                for row in json.load(fh):
-                    if isinstance(row, dict):
-                        yield row
+                yield from (row for row in json.load(fh) if isinstance(row, dict))
             else:
                 for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
@@ -282,20 +294,15 @@ class Command(BaseCommand):
 
     def _normalize_export_row(self, raw, media_type=None):
         tmdb_id = raw.get("tmdb_id") or raw.get("id") or raw.get("movie_id")
-        titles = {
-            self._normalize_text(raw.get(key))
-            for key in ("title", "original_title", "name", "original_name")
-        }
-        directors = self._extract_director_names(raw)
         try:
             tmdb_id = int(tmdb_id) if tmdb_id not in (None, "") else None
         except (TypeError, ValueError):
             tmdb_id = None
+        titles = {self._normalize_text(raw.get(key)) for key in ("title", "original_title", "name", "original_name")}
         return {
             "tmdb_id": tmdb_id,
             "imdb_id": self._normalize_imdb_id(raw.get("imdb_id") or raw.get("imdb")),
             "titles": {title for title in titles if title},
-            "director_names": {self._normalize_text(name) for name in directors if self._normalize_text(name)},
             "release_year": self._extract_release_year(raw),
             "media_type": media_type or raw.get("media_type"),
         }
@@ -308,75 +315,55 @@ class Command(BaseCommand):
         return None
 
     def _extract_release_year(self, raw):
-        value = raw.get("release_date") or raw.get("first_air_date") or raw.get("year") or ""
-        match = re.match(r"^(\d{4})", str(value))
+        match = re.match(r"^(\d{4})", str(raw.get("release_date") or raw.get("first_air_date") or raw.get("year") or ""))
         return int(match.group(1)) if match else None
 
     def _filter_by_content_kind(self, movie, matches):
-        expected = None
-        if movie.type == Movie.MOVIE:
-            expected = "movie"
-        elif movie.type == Movie.SERIES:
-            expected = "tv"
-        if not expected:
-            return matches
-        return [row for row in matches if row.get("media_type") in (None, expected)]
+        expected = "movie" if movie.type == Movie.MOVIE else "tv" if movie.type == Movie.SERIES else None
+        return [row for row in matches if row.get("media_type") in (None, expected)] if expected else list(matches)
 
-    def _print_dry_run_diagnostics(self, local_index, movies):
-        self.stdout.write("Diagnóstico dry-run:")
-        self.stdout.write(f"  exports-dir absoluto: {local_index['exports_dir']}")
-        self.stdout.write(f"  exports-dir existe: {'sí' if local_index['exports_dir_exists'] else 'no'}")
-        self.stdout.write(f"  archivos encontrados en exports-dir: {len(local_index['files'])}")
-        for file_path in local_index["files"][:10]:
-            self.stdout.write(f"    {file_path}")
-        if len(local_index["files"]) > 10:
-            self.stdout.write(f"    ... {len(local_index['files']) - 10} más")
-        self.stdout.write(f"  archivos TMDb procesados: {local_index['files_processed']}")
-        self.stdout.write(f"  registros locales cargados: {local_index['rows_loaded']}")
-        self.stdout.write(f"  imdb_id indexados: {len(local_index['by_imdb'])}")
-        self.stdout.write(f"  títulos indexados: {len(local_index['by_title'])}")
-        self.stdout.write(f"  años indexados: {len(local_index['by_year'])}")
-        media_types = ", ".join(f"{key}={value}" for key, value in sorted(local_index["media_types"].items())) or "ninguno"
-        self.stdout.write(f"  media_type encontrados: {media_types}")
-        tt_matches = local_index["by_imdb"].get("tt0120338", [])
-        self.stdout.write(f"  resultado de buscar tt0120338: {self._diagnostic_matches(tt_matches)}")
-        titanic_matches = local_index["by_title"].get(self._normalize_text("Titanic"), [])
-        titanic_1997 = [row for row in titanic_matches if row.get("release_year") == 1997]
-        titanic_tmdb = local_index["by_tmdb_id"].get(597, [])
-        self.stdout.write(f"  candidatos locales para title=Titanic: {self._diagnostic_matches(titanic_matches)}")
-        self.stdout.write(f"  candidatos locales para title=Titanic year=1997: {self._diagnostic_matches(titanic_1997)}")
-        self.stdout.write(f"  resultado de buscar título Titanic año 1997: {self._diagnostic_matches(titanic_1997)}")
-        self.stdout.write(f"  candidatos locales para tmdb_id=597: {self._diagnostic_matches(titanic_tmdb)}")
-        self.stdout.write(f"  registros locales cargados para revisar: {len(movies)}")
+    def _unique_by_tmdb_id(self, rows):
+        return {row["tmdb_id"]: row for row in rows if row.get("tmdb_id")}
 
-    def _diagnostic_matches(self, matches):
-        if not matches:
-            return "0 coincidencias"
-        preview = ", ".join(
-            f"tmdb_id={row.get('tmdb_id')} year={row.get('release_year')} media_type={row.get('media_type') or '-'}"
-            for row in matches[:5]
-        )
-        suffix = f" ... +{len(matches) - 5}" if len(matches) > 5 else ""
-        return f"{len(matches)} coincidencia(s): {preview}{suffix}"
+    def _base_row(self, movie, status, notes):
+        return {
+            "movie_id": movie.id,
+            "title_en": movie.title_english,
+            "release_year": movie.release_year,
+            "director": movie.director,
+            "cast_members": movie.cast_members,
+            "imdb_id": movie.imdb_id,
+            "old_tmdb_id": movie.tmdb_id,
+            "status": status,
+            "notes": notes,
+        }
 
-    def _extract_director_names(self, raw):
-        values = []
-        for key in ("directors", "director", "crew"):
-            item = raw.get(key)
-            if isinstance(item, str):
-                values.extend([part.strip() for part in re.split(r"[,;|\n]+", item) if part.strip()])
-            elif isinstance(item, list):
-                for person in item:
-                    if isinstance(person, str):
-                        values.append(person)
-                    elif isinstance(person, dict) and (person.get("job") == "Director" or key in ("director", "directors")):
-                        name = person.get("name") or person.get("original_name")
-                        if name:
-                            values.append(name)
-        return values
+    def _write_report(self, path, rows, columns):
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def _print_summary(self, title, options, movies, report_path, stats):
+        self.stdout.write(self.style.SUCCESS(f"{title} finalizado."))
+        self.stdout.write(f"Modo: {'APPLY' if options['apply'] else 'DRY-RUN'}")
+        self.stdout.write(f"Registros del grupo afectado procesados: {len(movies)}")
+        for key, value in sorted(stats.items()):
+            self.stdout.write(f"{key}: {value}")
+        self.stdout.write(f"Campos limpiados por --clear-duplicates --apply: {', '.join(self.DERIVED_FIELDS_TO_CLEAR)}")
+        self.stdout.write(f"Reporte CSV: {report_path}")
+        if options.get("repair_cleared"):
+            self.stdout.write("Los registros sin coincidencia confiable quedan con tmdb_id vacío.")
+
+    def _clear_notes(self):
+        return "Se limpian sólo campos contaminables del grupo duplicado sospechoso: " + ", ".join(self.DERIVED_FIELDS_TO_CLEAR)
+
+    def _resolve_path(self, value):
+        path = Path(value).expanduser()
+        return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
 
     def _first_director(self, value):
-        return next((part.strip() for part in (value or "").split(",") if part.strip()), "")
+        return next((part.strip() for part in re.split(r"[,;|\n]+", value or "") if part.strip()), "")
 
     def _normalize_imdb_id(self, value):
         value = str(value or "").strip().lower()
@@ -388,23 +375,4 @@ class Command(BaseCommand):
 
     def _ambiguous_note(self, matches):
         ids = sorted({str(row.get("tmdb_id")) for row in matches if row.get("tmdb_id")})
-        return "Coincidencia ambigua en exports locales: " + ",".join(ids[:10])
-
-    def _print_duplicate_summary(self, duplicate_tmdb_ids):
-        self.stdout.write("tmdb_id duplicados sospechosos:")
-        duplicates = (
-            Movie.objects.filter(tmdb_id__in=duplicate_tmdb_ids)
-            .values("tmdb_id")
-            .annotate(total=Count("id"))
-            .order_by("tmdb_id")
-        )
-        for item in duplicates:
-            self.stdout.write(f"  tmdb_id={item['tmdb_id']} registros={item['total']}")
-        affected = Movie.objects.filter(tmdb_id__in=duplicate_tmdb_ids).order_by("tmdb_id", "id").values(
-            "id", "title_english", "release_year", "director", "cast_members", "imdb_id", "tmdb_id"
-        )
-        for row in affected:
-            self.stdout.write(
-                "  Movie(id={id}, title_en={title_english!r}, release_year={release_year}, "
-                "director={director!r}, cast_members={cast_members!r}, imdb_id={imdb_id!r}, tmdb_id={tmdb_id})".format(**row)
-            )
+        return "Coincidencia ambigua: " + ",".join(ids[:10])
