@@ -8938,3 +8938,72 @@ class MovieTrailerAvailabilityTests(TestCase):
         )
         self.assertEqual(movie.trailer_es_key, "bad-es")
         mock_youtube.assert_not_called()
+
+class FixTmdbIdsCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="fix-tmdb-admin", email="fix-tmdb-admin@example.com", password="test1234"
+        )
+
+    def _create_movie(self, **kwargs):
+        defaults = {
+            "author": self.author,
+            "title_english": "Titanic",
+            "title_spanish": "Titanic",
+            "type": Movie.MOVIE,
+            "director": "James Cameron",
+            "imdb_id": "",
+            "tmdb_id": 597,
+        }
+        defaults.update(kwargs)
+        return Movie.objects.create(**defaults)
+
+    def _write_export(self, directory, rows):
+        file_path = Path(directory) / "movie_ids_07_08_2026.json.gz"
+        with gzip.open(file_path, "wt", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def test_dry_run_matches_official_export_by_title_and_year(self):
+        unchanged = self._create_movie(
+            release_year=1997,
+            director="James Cameron",
+            imdb_id="tt0120338",
+            tmdb_id=597,
+        )
+        wrong_duplicate = self._create_movie(
+            release_year=2016,
+            director="Maurice Sweeney",
+            imdb_id="tt1869152",
+            tmdb_id=597,
+        )
+        with TemporaryDirectory() as tmp_dir:
+            self._write_export(
+                tmp_dir,
+                [
+                    {"id": 597, "title": "Titanic", "original_title": "Titanic", "release_date": "1997-11-18"},
+                    {"id": 16535, "title": "Titanic", "original_title": "Titanic", "release_date": "2016-08-29"},
+                ],
+            )
+            out = io.StringIO()
+            call_command(
+                "fix_tmdb_ids",
+                "--exports-dir",
+                tmp_dir,
+                "--start-id",
+                str(min(unchanged.id, wrong_duplicate.id)),
+                "--limit",
+                "2",
+                stdout=out,
+            )
+
+        unchanged.refresh_from_db()
+        wrong_duplicate.refresh_from_db()
+        output = out.getvalue()
+        self.assertIn("registros locales cargados: 2", output)
+        self.assertIn("imdb_id indexados: 0", output)
+        self.assertIn("resultado de buscar tt0120338: 0 coincidencias", output)
+        self.assertIn("unchanged: 1", output)
+        self.assertIn("updated: 1", output)
+        self.assertEqual(unchanged.tmdb_id, 597)
+        self.assertEqual(wrong_duplicate.tmdb_id, 597)

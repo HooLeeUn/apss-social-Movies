@@ -58,6 +58,8 @@ class Command(BaseCommand):
         local_index = self._build_local_index(exports_dir, quiet=options["quiet_warnings"])
         duplicate_tmdb_ids = self._get_duplicate_tmdb_ids()
         movies = list(self._get_movies_queryset(options, duplicate_tmdb_ids))
+        if not options["apply"] and not options["quiet_warnings"]:
+            self._print_dry_run_diagnostics(local_index, movies)
         report_path = Path.cwd() / self.REPORT_FILENAME
 
         stats = Counter()
@@ -108,7 +110,7 @@ class Command(BaseCommand):
     def _get_movies_queryset(self, options, duplicate_tmdb_ids):
         qs = Movie.objects.all().only(
             "id", "title_english", "release_year", "director", "cast_members",
-            "imdb_id", "tmdb_id", "image", "trailer_es_key", "trailer_en_key",
+            "imdb_id", "tmdb_id", "type", "image", "trailer_es_key", "trailer_en_key",
             "trailer_checked_at", "synopsis", "synopsis_es", "tmdb_lookup_status", "tmdb_lookup_error",
         ).order_by("id")
         if options["start_id"] is not None:
@@ -134,9 +136,9 @@ class Command(BaseCommand):
                 return self._decision(None, "imdb_id", "skipped_ambiguous", self._ambiguous_note(imdb_matches))
 
         title = self._normalize_text(movie.title_english)
+        title_matches = self._filter_by_content_kind(movie, local_index["by_title"].get(title, [])) if title else []
         first_director = self._first_director(movie.director)
-        if title and first_director:
-            title_matches = local_index["by_title"].get(title, [])
+        if title_matches and first_director:
             director_matches = [row for row in title_matches if self._normalize_text(first_director) in row["director_names"]]
             unique_by_id = {row["tmdb_id"]: row for row in director_matches if row.get("tmdb_id")}
             if len(unique_by_id) == 1:
@@ -144,7 +146,15 @@ class Command(BaseCommand):
             if len(unique_by_id) > 1:
                 return self._decision(None, "title_director", "skipped_ambiguous", self._ambiguous_note(unique_by_id.values()))
 
-        return self._decision(None, "none", "skipped_no_match", "Sin coincidencia local confiable por imdb_id ni por título + primer director completo.")
+        if title_matches and movie.release_year:
+            year_matches = [row for row in title_matches if row.get("release_year") == movie.release_year]
+            unique_by_id = {row["tmdb_id"]: row for row in year_matches if row.get("tmdb_id")}
+            if len(unique_by_id) == 1:
+                return self._candidate_decision(movie, next(iter(unique_by_id.values())), "title_year")
+            if len(unique_by_id) > 1:
+                return self._decision(None, "title_year", "skipped_ambiguous", self._ambiguous_note(unique_by_id.values()))
+
+        return self._decision(None, "none", "skipped_no_match", "Sin coincidencia local confiable por imdb_id, título + director ni título + año.")
 
     def _candidate_decision(self, movie, candidate, reason):
         new_tmdb_id = candidate.get("tmdb_id")
@@ -194,23 +204,22 @@ class Command(BaseCommand):
     def _build_local_index(self, exports_dir, quiet=False):
         if not exports_dir.exists():
             raise CommandError(f"No existe exports-dir: {exports_dir}")
-        index = {"by_imdb": defaultdict(list), "by_title": defaultdict(list)}
+        index = {"by_imdb": defaultdict(list), "by_title": defaultdict(list), "files": [], "rows_loaded": 0}
         files = []
         for pattern in self.EXPORT_PATTERNS:
             files.extend(exports_dir.glob(pattern))
         for file_path in sorted(set(files)):
+            index["files"].append(str(file_path))
+            media_type = self._media_type_from_export_name(file_path.name)
             for raw in self._iter_json_rows(file_path):
-                row = self._normalize_export_row(raw)
+                row = self._normalize_export_row(raw, media_type=media_type)
                 if not row["tmdb_id"]:
                     continue
+                index["rows_loaded"] += 1
                 if row["imdb_id"]:
                     index["by_imdb"][row["imdb_id"]].append(row)
                 for title in row["titles"]:
                     index["by_title"][title].append(row)
-        if not quiet:
-            self.stdout.write(f"Exports locales cargados: {len(set(files))} archivos")
-            self.stdout.write(f"Índice imdb_id: {len(index['by_imdb'])} claves")
-            self.stdout.write(f"Índice títulos: {len(index['by_title'])} claves")
         return index
 
     def _iter_json_rows(self, file_path):
@@ -236,7 +245,7 @@ class Command(BaseCommand):
                     if isinstance(row, dict):
                         yield row
 
-    def _normalize_export_row(self, raw):
+    def _normalize_export_row(self, raw, media_type=None):
         tmdb_id = raw.get("tmdb_id") or raw.get("id") or raw.get("movie_id")
         titles = {
             self._normalize_text(raw.get(key))
@@ -252,7 +261,58 @@ class Command(BaseCommand):
             "imdb_id": self._normalize_imdb_id(raw.get("imdb_id") or raw.get("imdb")),
             "titles": {title for title in titles if title},
             "director_names": {self._normalize_text(name) for name in directors if self._normalize_text(name)},
+            "release_year": self._extract_release_year(raw),
+            "media_type": media_type or raw.get("media_type"),
         }
+
+    def _media_type_from_export_name(self, filename):
+        if filename.startswith("movie_ids_"):
+            return "movie"
+        if filename.startswith("tv_series_ids_"):
+            return "tv"
+        return None
+
+    def _extract_release_year(self, raw):
+        value = raw.get("release_date") or raw.get("first_air_date") or raw.get("year") or ""
+        match = re.match(r"^(\d{4})", str(value))
+        return int(match.group(1)) if match else None
+
+    def _filter_by_content_kind(self, movie, matches):
+        expected = None
+        if movie.type == Movie.MOVIE:
+            expected = "movie"
+        elif movie.type == Movie.SERIES:
+            expected = "tv"
+        if not expected:
+            return matches
+        return [row for row in matches if row.get("media_type") in (None, expected)]
+
+    def _print_dry_run_diagnostics(self, local_index, movies):
+        self.stdout.write("Diagnóstico dry-run:")
+        self.stdout.write(f"  archivos encontrados en tmdb_exports: {len(local_index['files'])}")
+        for file_path in local_index["files"][:20]:
+            self.stdout.write(f"    {file_path}")
+        if len(local_index["files"]) > 20:
+            self.stdout.write(f"    ... {len(local_index['files']) - 20} más")
+        self.stdout.write(f"  registros locales cargados: {local_index['rows_loaded']}")
+        self.stdout.write(f"  imdb_id indexados: {len(local_index['by_imdb'])}")
+        self.stdout.write(f"  títulos indexados: {len(local_index['by_title'])}")
+        tt_matches = local_index["by_imdb"].get("tt0120338", [])
+        self.stdout.write(f"  resultado de buscar tt0120338: {self._diagnostic_matches(tt_matches)}")
+        titanic_matches = local_index["by_title"].get(self._normalize_text("Titanic"), [])
+        titanic_1997 = [row for row in titanic_matches if row.get("release_year") == 1997]
+        self.stdout.write(f"  resultado de buscar título Titanic año 1997: {self._diagnostic_matches(titanic_1997)}")
+        self.stdout.write(f"  registros locales cargados para revisar: {len(movies)}")
+
+    def _diagnostic_matches(self, matches):
+        if not matches:
+            return "0 coincidencias"
+        preview = ", ".join(
+            f"tmdb_id={row.get('tmdb_id')} year={row.get('release_year')} media_type={row.get('media_type') or '-'}"
+            for row in matches[:5]
+        )
+        suffix = f" ... +{len(matches) - 5}" if len(matches) > 5 else ""
+        return f"{len(matches)} coincidencia(s): {preview}{suffix}"
 
     def _extract_director_names(self, raw):
         values = []
