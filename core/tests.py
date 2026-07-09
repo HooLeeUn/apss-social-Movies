@@ -1,3 +1,4 @@
+import csv
 import io
 import gzip
 import json
@@ -9007,6 +9008,70 @@ class FixTmdbIdsCommandTests(TestCase):
         self.assertIn("Modo: DRY-RUN", out.getvalue())
         self.assertIn("repaired: 1", out.getvalue())
         self.assertIn(",597,title_director", report)
+
+    def test_repair_cleared_skip_director_api_writes_incremental_report(self):
+        movie = self._create_movie(tmdb_id=None, release_year=1997, imdb_id="")
+        with TemporaryDirectory() as tmp_dir, patch("core.management.commands.fix_tmdb_ids.get_tmdb_json") as mocked_api:
+            affected_csv = Path(tmp_dir) / "affected.csv"
+            affected_csv.write_text(f"movie_id\n{movie.id}\n", encoding="utf-8")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_dir)
+                out = io.StringIO()
+                call_command(
+                    "fix_tmdb_ids",
+                    "--repair-cleared",
+                    "--affected-csv",
+                    str(affected_csv),
+                    "--exports-dir",
+                    str(Path(tmp_dir) / "tmdb_exports"),
+                    "--skip-director-api",
+                    stdout=out,
+                )
+                report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+                rows = list(csv.DictReader(report_path.open(newline="", encoding="utf-8")))
+            finally:
+                os.chdir(previous_cwd)
+
+        mocked_api.assert_not_called()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["movie_id"], str(movie.id))
+        self.assertEqual(rows[0]["status"], "skipped_director_api")
+        self.assertIn("Reporte CSV", out.getvalue())
+
+    def test_repair_cleared_resume_from_csv_appends_and_skips_existing_movie_ids(self):
+        skipped = self._create_movie(title_english="Skipped", tmdb_id=None, release_year=1997, imdb_id="")
+        processed = self._create_movie(title_english="Processed", tmdb_id=None, release_year=1998, imdb_id="")
+        with TemporaryDirectory() as tmp_dir:
+            affected_csv = Path(tmp_dir) / "affected.csv"
+            affected_csv.write_text(f"movie_id\n{skipped.id}\n{processed.id}\n", encoding="utf-8")
+            report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+            report_path.write_text(
+                "movie_id,title_en,release_year,director,cast_members,imdb_id,old_tmdb_id,status,notes,new_tmdb_id,match_reason\n"
+                f"{skipped.id},Skipped,1997,James Cameron,,,,skipped_no_match,previous,,none\n",
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_dir)
+                out = io.StringIO()
+                call_command(
+                    "fix_tmdb_ids",
+                    "--repair-cleared",
+                    "--affected-csv",
+                    str(affected_csv),
+                    "--exports-dir",
+                    str(Path(tmp_dir) / "tmdb_exports"),
+                    "--resume-from-csv",
+                    "--skip-director-api",
+                    stdout=out,
+                )
+                rows = list(csv.DictReader(report_path.open(newline="", encoding="utf-8")))
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual([row["movie_id"] for row in rows], [str(skipped.id), str(processed.id)])
+        self.assertIn("Registros omitidos por --resume-from-csv: 1", out.getvalue())
 
     def test_dry_run_matches_official_export_by_title_and_year(self):
         unchanged = self._create_movie(

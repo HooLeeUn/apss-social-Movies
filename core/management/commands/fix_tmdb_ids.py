@@ -54,6 +54,9 @@ class Command(BaseCommand):
         parser.add_argument("--year-tolerance", type=int, default=2, help="Tolerancia de año para title_en + año.")
         parser.add_argument("--quiet-warnings", action="store_true", help="Reduce ruido en consola.")
         parser.add_argument("--affected-csv", type=str, default=None, help="CSV con movie_id a reparar; por defecto usa clear/duplicates report.")
+        parser.add_argument("--resume-from-csv", action="store_true", help="Omite movie_id ya presentes en tmdb_repair_cleared_report.csv.")
+        parser.add_argument("--skip-director-api", action="store_true", help="En --repair-cleared no usa búsquedas API por title + director.")
+        parser.add_argument("--max-api-calls", type=int, default=None, help="Máximo de llamadas API para la etapa title + director.")
         # Opciones heredadas aceptadas por compatibilidad; ya no activan reparación masiva.
         parser.add_argument("--use-local-exports", action="store_true", help="Compatibilidad: los exports locales se usan cuando aplica.")
         parser.add_argument("--only-duplicates", action="store_true", help="Compatibilidad: equivalente a --diagnose-duplicates.")
@@ -116,32 +119,57 @@ class Command(BaseCommand):
 
     def _repair_cleared(self, options, local_index):
         movie_ids = self._load_affected_movie_ids(options.get("affected_csv"))
+        if options["start_id"] is not None:
+            movie_ids = [movie_id for movie_id in movie_ids if movie_id >= options["start_id"]]
+
+        report_path = Path.cwd() / self.REPAIR_REPORT
+        completed_ids = self._load_completed_repair_movie_ids(report_path) if options["resume_from_csv"] else set()
+        if completed_ids:
+            movie_ids = [movie_id for movie_id in movie_ids if movie_id not in completed_ids]
+
         qs = Movie.objects.filter(id__in=movie_ids).only(
             "id", "title_english", "release_year", "director", "cast_members", "imdb_id", "tmdb_id", "type",
             "tmdb_lookup_status", "tmdb_lookup_error",
         ).order_by("id")
-        if options["start_id"] is not None:
-            qs = qs.filter(id__gte=options["start_id"])
         if options["limit"]:
             qs = qs[: options["limit"]]
-        movies = list(qs)
-        rows = []
-        updates = []
+
+        append = options["resume_from_csv"] and report_path.exists()
         stats = Counter()
-        for movie in movies:
-            decision = self._repair_decision(movie, local_index, options)
-            stats[decision["status"]] += 1
-            rows.append({**self._base_row(movie, decision["status"], decision["notes"]), "new_tmdb_id": decision["tmdb_id"] or "", "match_reason": decision["reason"]})
-            if options["apply"]:
-                movie.tmdb_id = decision["tmdb_id"]
-                movie.tmdb_lookup_status = "found" if decision["tmdb_id"] else "not_found"
-                movie.tmdb_lookup_error = "" if decision["tmdb_id"] else decision["status"]
-                updates.append(movie)
+        processed = 0
+        updates = []
+        self._director_api_calls = 0
+        self._director_api_max = options.get("max_api_calls")
+        self._director_api_limit_reached = False
+
+        with report_path.open("a" if append else "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=self.REPAIR_COLUMNS)
+            if not append:
+                writer.writeheader()
+            for movie in qs.iterator(chunk_size=500):
+                decision = self._repair_decision(movie, local_index, options)
+                stats[decision["status"]] += 1
+                writer.writerow({**self._base_row(movie, decision["status"], decision["notes"]), "new_tmdb_id": decision["tmdb_id"] or "", "match_reason": decision["reason"]})
+                processed += 1
+                if options["apply"]:
+                    movie.tmdb_id = decision["tmdb_id"]
+                    movie.tmdb_lookup_status = "found" if decision["tmdb_id"] else "not_found"
+                    movie.tmdb_lookup_error = "" if decision["tmdb_id"] else decision["status"]
+                    updates.append(movie)
+                if processed % 1000 == 0:
+                    fh.flush()
+                    if updates:
+                        Movie.objects.bulk_update(updates, ["tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"], batch_size=500)
+                        updates = []
+                    self.stdout.write(f"Progreso --repair-cleared: {processed} registros procesados; CSV guardado en {report_path}")
+            fh.flush()
         if updates:
             Movie.objects.bulk_update(updates, ["tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"], batch_size=500)
-        report_path = Path.cwd() / self.REPAIR_REPORT
-        self._write_report(report_path, rows, self.REPAIR_COLUMNS)
-        self._print_summary("Reparación de duplicados limpiados", options, movies, report_path, stats)
+        self._print_summary("Reparación de duplicados limpiados", options, range(processed), report_path, stats)
+        if options.get("resume_from_csv"):
+            self.stdout.write(f"Registros omitidos por --resume-from-csv: {len(completed_ids)}")
+        if options.get("max_api_calls") is not None:
+            self.stdout.write(f"Llamadas API title+director usadas: {self._director_api_calls}/{options['max_api_calls']}")
 
     def _affected_duplicates_queryset(self, options):
         duplicate_ids = self._get_duplicate_tmdb_ids()
@@ -198,11 +226,17 @@ class Command(BaseCommand):
                     return self._repair_result(None, reason, "skipped_ambiguous", self._ambiguous_note(unique.values()))
 
         first_director = self._first_director(movie.director)
+        if options.get("skip_director_api") and title and first_director:
+            return self._repair_result(None, "title_director", "skipped_director_api", "Búsqueda por title + director omitida por --skip-director-api.")
+        if options.get("max_api_calls") is not None and self._director_api_calls >= options["max_api_calls"] and title and first_director:
+            return self._repair_result(None, "title_director", "skipped_api_limit", "Límite de --max-api-calls alcanzado para title + director.")
         if title and first_director:
             try:
                 api_matches = self._search_tmdb_by_title(movie, title, first_director)
             except TMDbServiceError as exc:
                 return self._repair_result(None, "title_director", "skipped_no_match", f"API TMDb no disponible: {exc}")
+            if self._director_api_limit_reached and not api_matches:
+                return self._repair_result(None, "title_director", "skipped_api_limit", "Límite de --max-api-calls alcanzado para title + director.")
             unique = self._unique_by_tmdb_id(api_matches)
             if len(unique) == 1:
                 return self._repair_result(next(iter(unique)), "title_director", "repaired", "Coincidencia única por title_en + primer director completo.")
@@ -230,6 +264,9 @@ class Command(BaseCommand):
 
     def _search_tmdb_by_title(self, movie, normalized_title, first_director):
         content_kind = "tv" if movie.type == Movie.SERIES else "movie"
+        if not self._can_use_director_api():
+            return []
+        self._director_api_calls += 1
         data = get_tmdb_json(f"/search/{content_kind}", params={"query": movie.title_english, "include_adult": "false", "language": "en-US"})
         matches = []
         for candidate in data.get("results") or []:
@@ -237,6 +274,9 @@ class Command(BaseCommand):
             if candidate_title != normalized_title:
                 continue
             tmdb_id = candidate.get("id")
+            if not self._can_use_director_api():
+                break
+            self._director_api_calls += 1
             credits = get_tmdb_json(f"/{content_kind}/{tmdb_id}/credits")
             directors = self._director_names_from_credits(credits)
             if self._normalize_text(first_director) in {self._normalize_text(name) for name in directors}:
@@ -244,8 +284,24 @@ class Command(BaseCommand):
             time.sleep(0.05)
         return matches
 
+
+    def _can_use_director_api(self):
+        limit = getattr(self, "_director_api_max", None)
+        if limit is None:
+            return True
+        if self._director_api_calls < limit:
+            return True
+        self._director_api_limit_reached = True
+        return False
+
     def _director_names_from_credits(self, credits):
         return [person.get("name") for person in credits.get("crew") or [] if person.get("job") == "Director" and person.get("name")]
+
+    def _load_completed_repair_movie_ids(self, report_path):
+        if not report_path.exists():
+            return set()
+        with report_path.open(newline="", encoding="utf-8") as fh:
+            return {int(row["movie_id"]) for row in csv.DictReader(fh) if row.get("movie_id")}
 
     def _load_affected_movie_ids(self, csv_path):
         paths = [self._resolve_path(csv_path)] if csv_path else [Path.cwd() / name for name in self.AFFECTED_REPORTS]
