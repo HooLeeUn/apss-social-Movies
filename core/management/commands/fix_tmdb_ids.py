@@ -47,6 +47,7 @@ class Command(BaseCommand):
         parser.add_argument("--diagnose-duplicates", action="store_true", help="Genera tmdb_duplicates_report.csv.")
         parser.add_argument("--clear-duplicates", action="store_true", help="Limpia sólo el grupo duplicado sospechoso con --apply.")
         parser.add_argument("--repair-cleared", action="store_true", help="Reimporta tmdb_id sólo para movie_id del CSV afectado.")
+        parser.add_argument("--apply-from-report", action="store_true", help="Aplica tmdb_repair_cleared_report.csv sin recalcular coincidencias ni consultar TMDb.")
         parser.add_argument("--apply", action="store_true", help="Guarda cambios. Por defecto sólo dry-run.")
         parser.add_argument("--exports-dir", type=str, default="tmdb_exports", help="Carpeta de exports locales.")
         parser.add_argument("--start-id", type=int, default=None, help="ID inicial opcional.")
@@ -65,9 +66,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if options["include_all"]:
             raise CommandError("fix_tmdb_ids ya no permite --include-all: sólo procesa duplicados sospechosos.")
-        phases = [options["diagnose_duplicates"] or options["only_duplicates"], options["clear_duplicates"], options["repair_cleared"]]
+        phases = [
+            options["diagnose_duplicates"] or options["only_duplicates"],
+            options["clear_duplicates"],
+            options["repair_cleared"],
+            options["apply_from_report"],
+        ]
         if sum(bool(phase) for phase in phases) != 1:
-            raise CommandError("Elige exactamente una fase: --diagnose-duplicates, --clear-duplicates o --repair-cleared.")
+            raise CommandError("Elige exactamente una fase: --diagnose-duplicates, --clear-duplicates, --repair-cleared o --apply-from-report.")
 
         exports_dir = self._resolve_path(options["exports_dir"])
         local_index = None
@@ -76,7 +82,9 @@ class Command(BaseCommand):
             if not local_index["rows_loaded"] and not options["quiet_warnings"]:
                 self.stdout.write(self.style.WARNING(f"No se cargaron exports locales desde {exports_dir}."))
 
-        if options["repair_cleared"]:
+        if options["apply_from_report"]:
+            self._apply_from_report(options)
+        elif options["repair_cleared"]:
             self._repair_cleared(options, local_index)
         elif options["clear_duplicates"]:
             self._clear_duplicates(options)
@@ -170,6 +178,101 @@ class Command(BaseCommand):
             self.stdout.write(f"Registros omitidos por --resume-from-csv: {len(completed_ids)}")
         if options.get("max_api_calls") is not None:
             self.stdout.write(f"Llamadas API title+director usadas: {self._director_api_calls}/{options['max_api_calls']}")
+
+    def _apply_from_report(self, options):
+        report_path = self._resolve_path(options.get("affected_csv") or self.REPAIR_REPORT)
+        if not report_path.exists():
+            raise CommandError(f"No se encontró CSV de reparación: {report_path}")
+
+        required_columns = {"movie_id", "status", "new_tmdb_id"}
+        stats = Counter()
+        processed = 0
+        updates = []
+        batch = []
+        batch_size = 500
+
+        with report_path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            missing_columns = required_columns - set(reader.fieldnames or [])
+            if missing_columns:
+                raise CommandError("CSV de reparación inválido. Faltan columnas obligatorias: " + ", ".join(sorted(missing_columns)))
+
+            for row_number, row in enumerate(reader, start=2):
+                batch.append((row_number, row))
+                if len(batch) >= batch_size:
+                    processed, updates = self._process_apply_report_batch(batch, options, stats, processed, updates)
+                    batch = []
+            if batch:
+                processed, updates = self._process_apply_report_batch(batch, options, stats, processed, updates)
+
+        if updates:
+            Movie.objects.bulk_update(updates, ["tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"], batch_size=batch_size)
+
+        self.stdout.write(self.style.SUCCESS("Aplicación desde reporte finalizada."))
+        self.stdout.write(f"Modo: {'APPLY' if options['apply'] else 'DRY-RUN'}")
+        self.stdout.write(f"Reporte CSV leído: {report_path}")
+        self.stdout.write("No se ejecutó _repair_decision.")
+        self.stdout.write("Llamadas API TMDb realizadas: 0")
+        self.stdout.write(f"Filas procesadas: {processed}")
+        self.stdout.write(f"Actualizados/reparadas: {stats['repaired']}")
+        self.stdout.write(f"Vacíos/sin coincidencia: {stats['skipped_no_match']}")
+        self.stdout.write(f"Ambiguos: {stats['skipped_ambiguous']}")
+        self.stdout.write(f"movie_id no encontrados: {stats['missing_movie']}")
+
+    def _process_apply_report_batch(self, batch, options, stats, processed, updates):
+        movie_ids = []
+        decisions = {}
+        for row_number, row in batch:
+            try:
+                movie_id = int(row["movie_id"])
+            except (TypeError, ValueError):
+                raise CommandError(f"movie_id inválido en fila {row_number}: {row.get('movie_id')!r}")
+
+            status = (row.get("status") or "").strip()
+            new_tmdb_id = (row.get("new_tmdb_id") or "").strip()
+            if status == "repaired":
+                try:
+                    new_tmdb_id = int(new_tmdb_id)
+                except (TypeError, ValueError):
+                    raise CommandError(f"new_tmdb_id inválido para status=repaired en fila {row_number}: {row.get('new_tmdb_id')!r}")
+                decisions[movie_id] = (new_tmdb_id, "found", "", status)
+            elif status in {"skipped_no_match", "skipped_ambiguous"}:
+                decisions[movie_id] = (None, "not_found", status, status)
+            else:
+                raise CommandError(f"status inválido en fila {row_number}: {status!r}")
+            movie_ids.append(movie_id)
+
+        movies_by_id = Movie.objects.filter(id__in=movie_ids).only(
+            "id", "tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"
+        ).in_bulk()
+
+        for movie_id in movie_ids:
+            tmdb_id, lookup_status, lookup_error, status = decisions[movie_id]
+            stats[status] += 1
+            processed += 1
+            movie = movies_by_id.get(movie_id)
+            if not movie:
+                stats["missing_movie"] += 1
+            elif options["apply"]:
+                movie.tmdb_id = tmdb_id
+                movie.tmdb_lookup_status = lookup_status
+                movie.tmdb_lookup_error = lookup_error
+                updates.append(movie)
+
+            if processed % 1000 == 0:
+                if updates:
+                    Movie.objects.bulk_update(updates, ["tmdb_id", "tmdb_lookup_status", "tmdb_lookup_error"], batch_size=500)
+                    updates = []
+                self.stdout.write(
+                    "Progreso --apply-from-report: "
+                    f"{processed} filas procesadas; "
+                    f"reparadas={stats['repaired']}; "
+                    f"sin coincidencia={stats['skipped_no_match']}; "
+                    f"ambiguas={stats['skipped_ambiguous']}; "
+                    f"movie_id no encontrados={stats['missing_movie']}"
+                )
+
+        return processed, updates
 
     def _affected_duplicates_queryset(self, options):
         duplicate_ids = self._get_duplicate_tmdb_ids()

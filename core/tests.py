@@ -9073,6 +9073,92 @@ class FixTmdbIdsCommandTests(TestCase):
         self.assertEqual([row["movie_id"] for row in rows], [str(skipped.id), str(processed.id)])
         self.assertIn("Registros omitidos por --resume-from-csv: 1", out.getvalue())
 
+    def test_apply_from_report_dry_run_does_not_repair_or_call_api(self):
+        repaired = self._create_movie(title_english="Repaired", tmdb_id=None, release_year=1997, imdb_id="")
+        no_match = self._create_movie(title_english="No Match", tmdb_id=123, release_year=1998, imdb_id="")
+        with TemporaryDirectory() as tmp_dir, patch(
+            "core.management.commands.fix_tmdb_ids.Command._repair_decision"
+        ) as mocked_decision, patch("core.management.commands.fix_tmdb_ids.get_tmdb_json") as mocked_api:
+            report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+            report_path.write_text(
+                "movie_id,status,new_tmdb_id\n"
+                f"{repaired.id},repaired,597\n"
+                f"{no_match.id},skipped_no_match,\n"
+                "999999,skipped_ambiguous,\n",
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            call_command(
+                "fix_tmdb_ids",
+                "--apply-from-report",
+                "--affected-csv",
+                str(report_path),
+                stdout=out,
+            )
+
+        repaired.refresh_from_db()
+        no_match.refresh_from_db()
+        mocked_decision.assert_not_called()
+        mocked_api.assert_not_called()
+        self.assertIsNone(repaired.tmdb_id)
+        self.assertEqual(no_match.tmdb_id, 123)
+        output = out.getvalue()
+        self.assertIn("Modo: DRY-RUN", output)
+        self.assertIn("No se ejecutó _repair_decision.", output)
+        self.assertIn("Llamadas API TMDb realizadas: 0", output)
+        self.assertIn("Actualizados/reparadas: 1", output)
+        self.assertIn("Vacíos/sin coincidencia: 1", output)
+        self.assertIn("Ambiguos: 1", output)
+        self.assertIn("movie_id no encontrados: 1", output)
+
+    def test_apply_from_report_apply_updates_database_without_api(self):
+        repaired = self._create_movie(title_english="Repaired", tmdb_id=None, release_year=1997, imdb_id="")
+        no_match = self._create_movie(title_english="No Match", tmdb_id=123, release_year=1998, imdb_id="")
+        ambiguous = self._create_movie(title_english="Ambiguous", tmdb_id=456, release_year=1999, imdb_id="")
+        with TemporaryDirectory() as tmp_dir, patch(
+            "core.management.commands.fix_tmdb_ids.Command._repair_decision"
+        ) as mocked_decision, patch("core.management.commands.fix_tmdb_ids.get_tmdb_json") as mocked_api:
+            report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+            report_path.write_text(
+                "movie_id,status,new_tmdb_id\n"
+                f"{repaired.id},repaired,597\n"
+                f"{no_match.id},skipped_no_match,\n"
+                f"{ambiguous.id},skipped_ambiguous,\n",
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            call_command(
+                "fix_tmdb_ids",
+                "--apply-from-report",
+                "--affected-csv",
+                str(report_path),
+                "--apply",
+                stdout=out,
+            )
+
+        repaired.refresh_from_db()
+        no_match.refresh_from_db()
+        ambiguous.refresh_from_db()
+        mocked_decision.assert_not_called()
+        mocked_api.assert_not_called()
+        self.assertEqual(repaired.tmdb_id, 597)
+        self.assertEqual(repaired.tmdb_lookup_status, "found")
+        self.assertEqual(repaired.tmdb_lookup_error, "")
+        self.assertIsNone(no_match.tmdb_id)
+        self.assertEqual(no_match.tmdb_lookup_status, "not_found")
+        self.assertEqual(no_match.tmdb_lookup_error, "skipped_no_match")
+        self.assertIsNone(ambiguous.tmdb_id)
+        self.assertEqual(ambiguous.tmdb_lookup_status, "not_found")
+        self.assertEqual(ambiguous.tmdb_lookup_error, "skipped_ambiguous")
+        self.assertIn("Modo: APPLY", out.getvalue())
+
+    def test_apply_from_report_requires_mandatory_columns(self):
+        with TemporaryDirectory() as tmp_dir:
+            report_path = Path(tmp_dir) / "tmdb_repair_cleared_report.csv"
+            report_path.write_text("movie_id,status\n1,repaired\n", encoding="utf-8")
+            with self.assertRaisesMessage(CommandError, "Faltan columnas obligatorias: new_tmdb_id"):
+                call_command("fix_tmdb_ids", "--apply-from-report", "--affected-csv", str(report_path))
+
     def test_dry_run_matches_official_export_by_title_and_year(self):
         unchanged = self._create_movie(
             release_year=1997,
