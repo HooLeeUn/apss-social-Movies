@@ -7916,6 +7916,14 @@ class EnrichMoviesTmdbCommandTests(TestCase):
             for row in rows:
                 fh.write(json.dumps(row) + "\n")
 
+    def _write_affected_csv(self, directory, rows):
+        file_path = Path(directory) / "affected.csv"
+        with open(file_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["movie_id", "status", "new_tmdb_id", "match_reason"])
+            writer.writeheader()
+            writer.writerows(rows)
+        return file_path
+
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_enriches_tmdb_image_and_synopsis(self, mock_tmdb, _mock_sleep):
@@ -8432,6 +8440,119 @@ class EnrichMoviesTmdbCommandTests(TestCase):
         movie.refresh_from_db()
         self.assertEqual(movie.tmdb_id, 598)
         mock_tmdb.assert_not_called()
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_affected_csv_processes_only_repaired_rows_with_existing_tmdb_id(self, mock_tmdb, _mock_sleep):
+        repaired = self._create_movie(tmdb_id=101, image="", synopsis="", synopsis_es="")
+        skipped_no_match = self._create_movie(tmdb_id=None, image="", synopsis="", synopsis_es="")
+        ambiguous = self._create_movie(tmdb_id=202, image="", synopsis="", synopsis_es="")
+        no_new_tmdb_id = self._create_movie(tmdb_id=303, image="", synopsis="", synopsis_es="")
+        mock_tmdb.side_effect = [
+            {"poster_path": "/repaired.jpg", "overview": "Repaired EN"},
+            {"overview": "Reparada ES"},
+        ]
+
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_affected_csv(
+                tmp_dir,
+                [
+                    {"movie_id": repaired.id, "status": "repaired", "new_tmdb_id": "101", "match_reason": "manual"},
+                    {
+                        "movie_id": skipped_no_match.id,
+                        "status": "skipped_no_match",
+                        "new_tmdb_id": "",
+                        "match_reason": "",
+                    },
+                    {
+                        "movie_id": ambiguous.id,
+                        "status": "skipped_ambiguous",
+                        "new_tmdb_id": "202",
+                        "match_reason": "",
+                    },
+                    {"movie_id": no_new_tmdb_id.id, "status": "repaired", "new_tmdb_id": "", "match_reason": ""},
+                ],
+            )
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb",
+                "--affected-csv",
+                str(csv_path),
+                "--use-existing-tmdb-id-only",
+                "--only-missing-image",
+                "--only-missing-synopsis",
+                "--sleep",
+                "0",
+                stdout=out,
+            )
+
+        repaired.refresh_from_db()
+        skipped_no_match.refresh_from_db()
+        ambiguous.refresh_from_db()
+        no_new_tmdb_id.refresh_from_db()
+        self.assertEqual(repaired.tmdb_id, 101)
+        self.assertEqual(repaired.image, "https://image.tmdb.org/t/p/w500/repaired.jpg")
+        self.assertEqual(repaired.synopsis, "Repaired EN")
+        self.assertEqual(repaired.synopsis_es, "Reparada ES")
+        self.assertEqual(skipped_no_match.image, "")
+        self.assertEqual(skipped_no_match.synopsis, "")
+        self.assertEqual(ambiguous.image, "")
+        self.assertEqual(no_new_tmdb_id.synopsis_es, "")
+        self.assertEqual(mock_tmdb.call_count, 2)
+        self.assertNotIn("/find/", str(mock_tmdb.call_args_list))
+        self.assertIn("csv_valid_rows: 1", out.getvalue())
+        self.assertIn("tmdb_ids_updated: 0", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_affected_csv_uses_movie_type_and_reports_missing_tmdb_and_not_found(
+        self, mock_tmdb, _mock_sleep
+    ):
+        series = self._create_movie(type=Movie.SERIES, tmdb_id=55, image="", synopsis="Existing EN", synopsis_es="")
+        missing_tmdb = self._create_movie(tmdb_id=None, image="", synopsis="", synopsis_es="")
+        mock_tmdb.side_effect = [
+            {"poster_path": "/series.jpg"},
+            {"overview": "Serie ES"},
+        ]
+
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_affected_csv(
+                tmp_dir,
+                [
+                    {"movie_id": series.id, "status": "repaired", "new_tmdb_id": "55", "match_reason": "manual"},
+                    {
+                        "movie_id": missing_tmdb.id,
+                        "status": "repaired",
+                        "new_tmdb_id": "999",
+                        "match_reason": "manual",
+                    },
+                    {"movie_id": 999999, "status": "repaired", "new_tmdb_id": "777", "match_reason": "manual"},
+                ],
+            )
+            out = io.StringIO()
+            call_command(
+                "enrich_movies_tmdb",
+                "--affected-csv",
+                str(csv_path),
+                "--only-missing-image",
+                "--only-missing-synopsis",
+                "--sleep",
+                "0",
+                stdout=out,
+            )
+
+        series.refresh_from_db()
+        missing_tmdb.refresh_from_db()
+        self.assertEqual(series.image, "https://image.tmdb.org/t/p/w500/series.jpg")
+        self.assertEqual(series.synopsis, "Existing EN")
+        self.assertEqual(series.synopsis_es, "Serie ES")
+        self.assertEqual(missing_tmdb.image, "")
+        self.assertEqual(mock_tmdb.call_args_list[0].args[0], "/tv/55")
+        self.assertEqual(mock_tmdb.call_args_list[1].args[0], "/tv/55")
+        self.assertNotIn("/find/", str(mock_tmdb.call_args_list))
+        self.assertIn("csv_valid_rows: 3", out.getvalue())
+        self.assertIn("skipped_missing_tmdb_id: 1", out.getvalue())
+        self.assertIn("movie_id_not_found: 1", out.getvalue())
 
 
 @override_settings(TMDB_READ_ACCESS_TOKEN="test-token")

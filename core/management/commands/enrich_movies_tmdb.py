@@ -1,3 +1,4 @@
+import csv
 import gzip
 import json
 import re
@@ -43,6 +44,17 @@ class Command(BaseCommand):
         parser.add_argument("--second-pass-relaxed-match", action="store_true")
         parser.add_argument("--year-tolerance", type=int, default=0)
         parser.add_argument("--min-match-score", type=int, default=80)
+        parser.add_argument(
+            "--affected-csv",
+            type=str,
+            default=None,
+            help="CSV con movie_id/status/new_tmdb_id para enriquecer únicamente registros reparados.",
+        )
+        parser.add_argument(
+            "--resume-from-csv",
+            action="store_true",
+            help="En modo --affected-csv, respeta --start-id como punto de reanudación del CSV.",
+        )
 
     def handle(self, *args, **options):
         sleep_seconds = max(0.0, options["sleep"])
@@ -57,6 +69,9 @@ class Command(BaseCommand):
                         "--workers > 1 deshabilitado temporalmente: se procesa y persiste en el thread principal."
                     )
                 )
+
+        if options["affected_csv"]:
+            return self._handle_affected_csv(options, stats, sleep_seconds, started_at)
 
         local_index = None
         if options["use_local_exports"] or options["second_pass_relaxed_match"]:
@@ -149,6 +164,180 @@ class Command(BaseCommand):
         self.stdout.write(f"persistence_mismatches: {stats['persistence_mismatches']}")
         self.stdout.write(f"workers_forced_to_main_thread: {stats['workers_forced_to_main_thread']}")
         self.stdout.write(f"errores: {stats['errors']}")
+
+    def _handle_affected_csv(self, options, stats, sleep_seconds, started_at):
+        affected_ids = self._read_affected_csv_movie_ids(options)
+        stats["csv_valid_rows"] = len(affected_ids)
+        stats["eligible_with_tmdb_id"] = Movie.objects.filter(id__in=affected_ids, tmdb_id__isnull=False).count()
+
+        csv_options = options.copy()
+        csv_options["use_existing_tmdb_id_only"] = True
+        csv_options["only_missing_tmdb_id"] = False
+        csv_options["second_pass_relaxed_match"] = False
+        csv_options["use_local_exports"] = False
+        csv_options["local_only"] = False
+
+        updates = []
+        processed = 0
+        updated_images = 0
+        updated_synopsis = 0
+        updated_synopsis_es = 0
+        found_ids = set()
+        first_processed_id = None
+        last_processed_id = None
+        chunk_size = 500
+
+        for index in range(0, len(affected_ids), chunk_size):
+            chunk_ids = affected_ids[index : index + chunk_size]
+            movies_by_id = {
+                movie.id: movie
+                for movie in self._get_affected_csv_movies_queryset(chunk_ids)
+            }
+            found_ids.update(movies_by_id.keys())
+            stats["movie_id_not_found"] += len(set(chunk_ids) - set(movies_by_id.keys()))
+            for movie_id in chunk_ids:
+                movie = movies_by_id.get(movie_id)
+                if movie is None:
+                    continue
+                processed += 1
+                if first_processed_id is None:
+                    first_processed_id = movie.id
+                last_processed_id = movie.id
+                result = self._enrich_movie(movie, csv_options, stats, sleep_seconds)
+                if result["error"]:
+                    movie.tmdb_lookup_status = "error"
+                    movie.tmdb_lookup_error = result["error"][:255]
+                    movie.tmdb_lookup_checked_at = timezone.now()
+                    updates.append(movie)
+                    if processed % 1000 == 0:
+                        self._write_affected_csv_progress(
+                            stats, processed, updated_images, updated_synopsis, updated_synopsis_es
+                        )
+                    continue
+                if result["updates"]:
+                    for field, value in result["updates"].items():
+                        setattr(movie, field, value)
+                    if "image" in result["updates"] and movie.image:
+                        updated_images += 1
+                    if "synopsis" in result["updates"] and movie.synopsis:
+                        updated_synopsis += 1
+                    if "synopsis_es" in result["updates"] and movie.synopsis_es:
+                        updated_synopsis_es += 1
+                    updates.append(movie)
+                if processed % 1000 == 0:
+                    self._write_affected_csv_progress(stats, processed, updated_images, updated_synopsis, updated_synopsis_es)
+
+            if not options["dry_run"] and updates:
+                Movie.objects.bulk_update(
+                    updates,
+                    [
+                        "image",
+                        "synopsis",
+                        "synopsis_es",
+                        "tmdb_lookup_status",
+                        "tmdb_lookup_error",
+                        "tmdb_lookup_checked_at",
+                    ],
+                    batch_size=chunk_size,
+                )
+                updates = []
+
+        elapsed_seconds = max(1e-6, (timezone.now() - started_at).total_seconds())
+        total_requests = stats["requests_realizadas"]
+        next_start_id = (last_processed_id + 1) if last_processed_id is not None else None
+
+        self.stdout.write(self.style.SUCCESS("Proceso CSV finalizado."))
+        self.stdout.write(f"csv_valid_rows: {stats['csv_valid_rows']}")
+        self.stdout.write(f"Procesadas: {processed}")
+        self.stdout.write(f"eligible_with_tmdb_id: {stats['eligible_with_tmdb_id']}")
+        self.stdout.write(f"skipped_missing_tmdb_id: {stats['skipped_missing_tmdb_id']}")
+        self.stdout.write("tmdb_ids_updated: 0")
+        self.stdout.write(f"Imágenes actualizadas: {updated_images}")
+        self.stdout.write(f"images_updated: {updated_images}")
+        self.stdout.write(f"Synopsis actualizadas: {updated_synopsis}")
+        self.stdout.write(f"synopsis_updated: {updated_synopsis}")
+        self.stdout.write(f"Synopsis_es actualizadas: {updated_synopsis_es}")
+        self.stdout.write(f"synopsis_es_updated: {updated_synopsis_es}")
+        self.stdout.write(f"movie_id_not_found: {stats['movie_id_not_found']}")
+        self.stdout.write(f"detail_requests_en: {stats['detail_requests_en']}")
+        self.stdout.write(f"detail_requests_es: {stats['detail_requests_es']}")
+        self.stdout.write(f"requests_realizadas: {total_requests}")
+        self.stdout.write(f"total_requests: {total_requests}")
+        self.stdout.write(f"registros_por_minuto: {processed*60/elapsed_seconds:.2f}")
+        self.stdout.write(f"requests_por_minuto: {total_requests*60/elapsed_seconds:.2f}")
+        self.stdout.write(f"first_processed_id: {first_processed_id}")
+        self.stdout.write(f"last_processed_id: {last_processed_id}")
+        self.stdout.write(f"next_start_id sugerido: {next_start_id}")
+        self.stdout.write(f"errores: {stats['errors']}")
+
+    def _read_affected_csv_movie_ids(self, options):
+        affected_ids = []
+        seen = set()
+        with open(options["affected_csv"], newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if (row.get("status") or "").strip() != "repaired":
+                    continue
+                if not self._valid_csv_tmdb_id(row.get("new_tmdb_id")):
+                    continue
+                movie_id = self._valid_csv_movie_id(row.get("movie_id"))
+                if movie_id is None:
+                    continue
+                if options["start_id"] is not None and movie_id < options["start_id"]:
+                    continue
+                if movie_id in seen:
+                    continue
+                seen.add(movie_id)
+                affected_ids.append(movie_id)
+                if options["limit"] and len(affected_ids) >= options["limit"]:
+                    break
+        return affected_ids
+
+    def _get_affected_csv_movies_queryset(self, movie_ids):
+        return Movie.objects.filter(id__in=movie_ids).only(
+            "id",
+            "imdb_id",
+            "tmdb_id",
+            "title_english",
+            "title_spanish",
+            "release_year",
+            "director",
+            "cast_members",
+            "type",
+            "image",
+            "synopsis",
+            "synopsis_es",
+            "tmdb_lookup_status",
+            "tmdb_lookup_error",
+            "tmdb_lookup_checked_at",
+        ).order_by("id")
+
+    def _valid_csv_movie_id(self, value):
+        try:
+            movie_id = int((value or "").strip())
+        except (TypeError, ValueError):
+            return None
+        return movie_id if movie_id > 0 else None
+
+    def _valid_csv_tmdb_id(self, value):
+        try:
+            tmdb_id = int(str(value or "").strip())
+        except (TypeError, ValueError):
+            return False
+        return tmdb_id > 0
+
+    def _write_affected_csv_progress(self, stats, processed, updated_images, updated_synopsis, updated_synopsis_es):
+        self.stdout.write(
+            "Progreso CSV: "
+            f"filas_validas={stats['csv_valid_rows']} "
+            f"procesados={processed} "
+            f"imagenes_actualizadas={updated_images} "
+            f"synopsis_en_actualizadas={updated_synopsis} "
+            f"synopsis_es_actualizadas={updated_synopsis_es} "
+            f"omitidos_sin_tmdb_id={stats['skipped_missing_tmdb_id']} "
+            f"movie_id_no_encontrados={stats['movie_id_not_found']} "
+            f"errores_api={stats['errors']}"
+        )
 
     def _get_movies_queryset(self, options):
         qs = Movie.objects.all().only(
