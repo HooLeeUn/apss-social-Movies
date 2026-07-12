@@ -1316,6 +1316,12 @@ class AppBranding(models.Model):
     visited_profile_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
     personal_data_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
     privacy_security_logo = models.ImageField(upload_to="branding/", blank=True, null=True)
+    poster_placeholder = models.ImageField(
+        upload_to="branding/poster_placeholders/",
+        blank=True,
+        null=True,
+        verbose_name="Imagen para poster no disponible",
+    )
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True)
 
