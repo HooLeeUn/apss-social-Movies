@@ -268,6 +268,7 @@ class AppBrandingAdmin(admin.ModelAdmin):
         "visited_profile_logo_preview",
         "personal_data_logo_preview",
         "privacy_security_logo_preview",
+        "poster_placeholder_preview",
     )
     fieldsets = (
         ("General", {"fields": ("app_name", "is_active", "updated_at")}),
@@ -286,6 +287,10 @@ class AppBrandingAdmin(admin.ModelAdmin):
                     ("privacy_security_logo", "privacy_security_logo_preview"),
                 )
             },
+        ),
+        (
+            "Poster placeholder",
+            {"fields": ("poster_placeholder", "poster_placeholder_preview")},
         ),
     )
 
@@ -339,6 +344,10 @@ class AppBrandingAdmin(admin.ModelAdmin):
     @admin.display(description="Preview")
     def privacy_security_logo_preview(self, obj):
         return self._render_image_preview(obj.privacy_security_logo)
+
+    @admin.display(description="Preview")
+    def poster_placeholder_preview(self, obj):
+        return self._render_image_preview(obj.poster_placeholder)
 
 
 @admin.register(StreamingProviderLink)

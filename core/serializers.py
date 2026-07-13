@@ -68,6 +68,7 @@ class AppBrandingSerializer(serializers.ModelSerializer):
     visited_profile_logo_url = serializers.SerializerMethodField()
     personal_data_logo_url = serializers.SerializerMethodField()
     privacy_security_logo_url = serializers.SerializerMethodField()
+    poster_placeholder = serializers.SerializerMethodField()
 
     class Meta:
         model = AppBranding
@@ -82,6 +83,7 @@ class AppBrandingSerializer(serializers.ModelSerializer):
             "visited_profile_logo_url",
             "personal_data_logo_url",
             "privacy_security_logo_url",
+            "poster_placeholder",
             "updated_at",
         ]
 
@@ -122,6 +124,9 @@ class AppBrandingSerializer(serializers.ModelSerializer):
 
     def get_privacy_security_logo_url(self, obj):
         return self._slot_or_default(obj, "privacy_security_logo")
+
+    def get_poster_placeholder(self, obj):
+        return self._absolute_media_url(obj.poster_placeholder)
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

@@ -1073,7 +1073,7 @@ class AppBrandingView(APIView):
             or AppBranding.objects.order_by("-updated_at", "-id").first()
         )
         if not branding:
-            payload = {"app_name": "MiAppSocialMovies", "default_logo_url": None}
+            payload = {"app_name": "MiAppSocialMovies", "default_logo_url": None, "poster_placeholder": None}
             cache.set(BRANDING_CACHE_KEY, payload, timeout=300)
             return Response(payload, status=status.HTTP_200_OK)
 
