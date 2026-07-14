@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from core.models import Movie
 from core.tmdb import TMDbServiceError, get_tmdb_json
+from ._csv_utils import delimiter_label, open_csv_dict_reader
 
 
 class Command(BaseCommand):
@@ -273,8 +274,8 @@ class Command(BaseCommand):
     def _read_affected_csv_movie_ids(self, options):
         affected_ids = []
         seen = set()
-        with open(options["affected_csv"], newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
+        with open_csv_dict_reader(options["affected_csv"]) as (reader, delimiter):
+            self.stdout.write(f"Detected CSV delimiter: {delimiter_label(delimiter)} ({delimiter})")
             for row in reader:
                 if (row.get("status") or "").strip() != "repaired":
                     continue
