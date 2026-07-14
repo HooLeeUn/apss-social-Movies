@@ -81,7 +81,10 @@ class Command(BaseCommand):
         self.stdout.write(f"Mode: {'apply' if apply_changes else 'dry-run'}")
         self.stdout.write(f"Batch size: {batch_size}")
 
-        duplicate_info = self._scan_duplicate_database_ids(input_path)
+        delimiter = self._detect_delimiter(input_path)
+        self.stdout.write(f"Detected delimiter: {self._delimiter_label(delimiter)} ({delimiter})")
+
+        duplicate_info = self._scan_duplicate_database_ids(input_path, delimiter)
         report_path.parent.mkdir(parents=True, exist_ok=True)
 
         counters = Counter()
@@ -91,7 +94,8 @@ class Command(BaseCommand):
         with input_path.open("r", encoding="utf-8-sig", newline="") as input_file, report_path.open(
             "w", encoding="utf-8-sig", newline=""
         ) as report_file:
-            reader = csv.DictReader(input_file)
+            reader = csv.DictReader(input_file, delimiter=delimiter)
+            reader.fieldnames = self._normalize_fieldnames(reader.fieldnames)
             self._validate_columns(reader.fieldnames)
             writer = csv.DictWriter(report_file, fieldnames=self.REPORT_FIELDNAMES)
             writer.writeheader()
@@ -191,11 +195,47 @@ class Command(BaseCommand):
         if missing:
             raise CommandError(f"Input CSV is missing required columns: {', '.join(sorted(missing))}")
 
-    def _scan_duplicate_database_ids(self, input_path):
+    @staticmethod
+    def _normalize_fieldnames(fieldnames):
+        if fieldnames is None:
+            return fieldnames
+        return [fieldname.strip().lstrip("\ufeff") for fieldname in fieldnames]
+
+    @classmethod
+    def _detect_delimiter(cls, input_path):
+        with input_path.open("r", encoding="utf-8-sig", newline="") as input_file:
+            sample = input_file.read(4096)
+
+        if not sample:
+            raise CommandError("Input CSV is empty.")
+
+        try:
+            return csv.Sniffer().sniff(sample, delimiters=",;").delimiter
+        except csv.Error:
+            header = sample.splitlines()[0] if sample.splitlines() else ""
+            if ";" in header and "," not in header:
+                return ";"
+            if "," in header and ";" not in header:
+                return ","
+            if ";" in header:
+                return ";"
+            if "," in header:
+                return ","
+            raise CommandError("Could not detect input CSV delimiter. Expected comma (,) or semicolon (;).")
+
+    @staticmethod
+    def _delimiter_label(delimiter):
+        return {
+            ";": "semicolon",
+            ",": "comma",
+        }.get(delimiter, delimiter)
+
+    def _scan_duplicate_database_ids(self, input_path, delimiter):
         seen = {}
         duplicates = {}
         with input_path.open("r", encoding="utf-8-sig", newline="") as input_file:
-            reader = csv.DictReader(input_file)
+            reader = csv.DictReader(input_file, delimiter=delimiter)
+            reader.fieldnames = self._normalize_fieldnames(reader.fieldnames)
             self._validate_columns(reader.fieldnames)
             for row in reader:
                 tmdb_id_raw = (row.get("current_tmdb_id") or "").strip()
