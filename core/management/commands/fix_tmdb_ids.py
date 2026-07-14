@@ -11,6 +11,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count
 from core.models import Movie
 from core.tmdb import TMDbServiceError, get_tmdb_json
+from ._csv_utils import delimiter_label, open_csv_dict_reader
 
 
 class Command(BaseCommand):
@@ -191,8 +192,8 @@ class Command(BaseCommand):
         batch = []
         batch_size = 500
 
-        with report_path.open(newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
+        with open_csv_dict_reader(report_path) as (reader, delimiter):
+            self.stdout.write(f"Detected CSV delimiter: {delimiter_label(delimiter)} ({delimiter})")
             missing_columns = required_columns - set(reader.fieldnames or [])
             if missing_columns:
                 raise CommandError("CSV de reparación inválido. Faltan columnas obligatorias: " + ", ".join(sorted(missing_columns)))
@@ -403,15 +404,16 @@ class Command(BaseCommand):
     def _load_completed_repair_movie_ids(self, report_path):
         if not report_path.exists():
             return set()
-        with report_path.open(newline="", encoding="utf-8") as fh:
-            return {int(row["movie_id"]) for row in csv.DictReader(fh) if row.get("movie_id")}
+        with open_csv_dict_reader(report_path) as (reader, _delimiter):
+            return {int(row["movie_id"]) for row in reader if row.get("movie_id")}
 
     def _load_affected_movie_ids(self, csv_path):
         paths = [self._resolve_path(csv_path)] if csv_path else [Path.cwd() / name for name in self.AFFECTED_REPORTS]
         for path in paths:
             if path.exists():
-                with path.open(newline="", encoding="utf-8") as fh:
-                    return [int(row["movie_id"]) for row in csv.DictReader(fh) if row.get("movie_id")]
+                with open_csv_dict_reader(path) as (reader, delimiter):
+                    self.stdout.write(f"Detected CSV delimiter: {delimiter_label(delimiter)} ({delimiter})")
+                    return [int(row["movie_id"]) for row in reader if row.get("movie_id")]
         raise CommandError("No se encontró CSV de afectados. Ejecuta primero --diagnose-duplicates o --clear-duplicates, o usa --affected-csv.")
 
     def _build_local_index(self, exports_dir, quiet=False):
