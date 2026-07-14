@@ -7,3 +7,4 @@ venv/
 *.log
 media/
 staticfiles/
+tmdb_repair_retry_desde_valido_18000_utf8.csv
