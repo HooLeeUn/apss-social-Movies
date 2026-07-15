@@ -9323,3 +9323,95 @@ class FixTmdbIdsCommandTests(TestCase):
         self.assertIn("updated: 1", output)
         self.assertEqual(unchanged.tmdb_id, 597)
         self.assertEqual(wrong_duplicate.tmdb_id, 597)
+
+class DeleteMoviesFromCsvCommandTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="delete-movies-admin", email="delete-movies-admin@example.com", password="test1234"
+        )
+
+    def _create_movie(self, title="Delete Me"):
+        return Movie.objects.create(author=self.author, title_english=title, type=Movie.MOVIE)
+
+    def _write_csv(self, tmp_dir, content, name="affected.csv"):
+        path = Path(tmp_dir) / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def _read_report(self, path):
+        with Path(path).open("r", encoding="utf-8", newline="") as report_file:
+            return list(csv.DictReader(report_file))
+
+    def test_dry_run_does_not_delete_movies(self):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, f"database_id,title_en\n{movie.id},Ignored\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            out = io.StringIO()
+            call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), stdout=out)
+
+            self.assertTrue(Movie.objects.filter(id=movie.id).exists())
+            self.assertEqual(self._read_report(report_path)[0]["status"], "would_delete")
+            self.assertIn("No se realizaron cambios", out.getvalue())
+
+    def test_apply_deletes_indicated_ids(self):
+        movie = self._create_movie()
+        keep = self._create_movie("Keep Me")
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, f"database_id\n{movie.id}\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            call_command(
+                "delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), "--apply", stdout=io.StringIO()
+            )
+
+            self.assertFalse(Movie.objects.filter(id=movie.id).exists())
+            self.assertTrue(Movie.objects.filter(id=keep.id).exists())
+            self.assertEqual(self._read_report(report_path)[0]["status"], "deleted")
+
+    def test_nonexistent_id_is_reported_as_not_found(self):
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, "database_id\n999999\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), stdout=io.StringIO())
+
+            self.assertEqual(self._read_report(report_path)[0]["status"], "not_found")
+
+    def test_repeated_id_is_processed_once(self):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, f"database_id\n{movie.id}\n{movie.id}\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            call_command(
+                "delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), "--apply", stdout=io.StringIO()
+            )
+
+            statuses = [row["status"] for row in self._read_report(report_path)]
+            self.assertEqual(statuses.count("deleted"), 1)
+            self.assertEqual(statuses.count("duplicate_in_csv"), 1)
+
+    def test_accepts_semicolon_delimited_csv(self):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, f"database_id;title_en\n{movie.id};Ignored\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), stdout=io.StringIO())
+
+            self.assertEqual(self._read_report(report_path)[0]["status"], "would_delete")
+
+    def test_accepts_tab_delimited_csv(self):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, f"database_id\ttitle_en\n{movie.id}\tIgnored\n")
+            report_path = Path(tmp_dir) / "report.csv"
+            call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), "--report-csv", str(report_path), stdout=io.StringIO())
+
+            self.assertEqual(self._read_report(report_path)[0]["status"], "would_delete")
+
+    def test_missing_database_id_column_fails_safely(self):
+        movie = self._create_movie()
+        with TemporaryDirectory() as tmp_dir:
+            csv_path = self._write_csv(tmp_dir, "title_en\nIgnored\n")
+            with self.assertRaisesMessage(CommandError, "Falta la columna obligatoria: database_id"):
+                call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), stdout=io.StringIO())
+
+        self.assertTrue(Movie.objects.filter(id=movie.id).exists())

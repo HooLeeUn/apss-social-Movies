@@ -8,6 +8,7 @@ from django.core.management.base import CommandError
 CSV_DELIMITER_LABELS = {
     ";": "semicolon",
     ",": "comma",
+    "\t": "tab",
 }
 
 
@@ -30,16 +31,18 @@ def detect_csv_delimiter(path, sample_size=4096):
         raise CommandError(f"CSV vacío: {csv_path}")
 
     try:
-        return csv.Sniffer().sniff(sample, delimiters=",;").delimiter
+        return csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter
     except csv.Error:
         header = sample.splitlines()[0] if sample.splitlines() else ""
         if ";" in header:
             return ";"
         if "," in header:
             return ","
+        if "\t" in header:
+            return "\t"
         raise CommandError(
             "No se pudo detectar el delimitador del CSV. "
-            "Se esperaba coma (,) o punto y coma (;)."
+            "Se esperaba coma (,), punto y coma (;) o tabulación."
         )
 
 
