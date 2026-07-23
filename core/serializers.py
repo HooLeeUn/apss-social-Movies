@@ -17,6 +17,7 @@ from .models import (
     MovieListItem,
     MovieRecommendationItem,
     PendingUserRegistration,
+    normalize_email_address,
     Post,
     UserVisibilityBlock,
     UserDirectorPreference,
@@ -393,6 +394,9 @@ class PersonalDataSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Birth date cannot be in the future.")
         return value
 
+    def validate_email(self, value):
+        return normalize_email_address(value)
+
     def validate(self, attrs):
         profile_data = attrs.get("profile", {})
         birth_date = profile_data.get("birth_date")
@@ -412,10 +416,12 @@ class PersonalDataSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop("profile", {})
+        # The verified address is changed only by the confirmation endpoint.
+        validated_data.pop("email", None)
         profile, _ = Profile.objects.get_or_create(user=instance)
 
         user_fields_to_update = []
-        for field in ["first_name", "last_name", "email"]:
+        for field in ["first_name", "last_name"]:
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
                 user_fields_to_update.append(field)

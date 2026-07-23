@@ -1,5 +1,6 @@
 import re
 import secrets
+import hashlib
 import unicodedata
 from datetime import timedelta
 
@@ -16,6 +17,13 @@ from django.db.models.functions import Coalesce
 from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.contrib.postgres.search import SearchVectorField
 from django.utils import timezone
+
+
+EMAIL_CONFIRMATION_TTL = timedelta(hours=24)
+
+
+def normalize_email_address(value):
+    return (value or "").strip().lower()
 
 
 def normalize_movie_search_text(value):
@@ -1082,11 +1090,54 @@ class PendingUserRegistration(models.Model):
         if not self.token:
             self.token = secrets.token_urlsafe(32)
         if not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(hours=24)
+            self.expires_at = timezone.now() + EMAIL_CONFIRMATION_TTL
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"PendingUserRegistration({self.username}, {self.email})"
+
+
+class PendingEmailChange(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="pending_email_change",
+    )
+    new_email = models.EmailField()
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    invalidated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["new_email", "expires_at"])]
+
+    @staticmethod
+    def hash_token(token):
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def new_token(cls):
+        return secrets.token_urlsafe(32)
+
+    @property
+    def is_active(self):
+        return (
+            self.confirmed_at is None
+            and self.invalidated_at is None
+            and self.expires_at > timezone.now()
+        )
+
+    def save(self, *args, **kwargs):
+        self.new_email = normalize_email_address(self.new_email)
+        if not self.expires_at:
+            self.expires_at = timezone.now() + EMAIL_CONFIRMATION_TTL
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"PendingEmailChange(user_id={self.user_id})"
 
 
 class UserVisibilityBlock(models.Model):
