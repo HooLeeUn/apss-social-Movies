@@ -1057,14 +1057,9 @@ class UserSearchView(APIView):
         if not query:
             return Response([], status=status.HTTP_200_OK)
 
-        blocked_user_ids = UserVisibilityBlock.objects.filter(
-            owner=request.user,
-        ).values_list("blocked_user_id", flat=True)
-
         queryset = (
             User.objects.filter(username__icontains=query)
             .exclude(id=request.user.id)
-            .exclude(id__in=blocked_user_ids)
         )
         queryset = filter_out_users_who_restricted_viewer(queryset, request.user).order_by("username")[: self.RESULTS_LIMIT]
         serializer = UserSearchSerializer(queryset, many=True)
@@ -1349,14 +1344,6 @@ class UserFriendsListView(ListAPIView):
         if not can_view_user_profile(target, self.request.user):
             raise PermissionDenied("You do not have permission to view this profile.")
 
-        blocked_by_viewer_ids = UserVisibilityBlock.objects.filter(
-            owner=self.request.user,
-        ).values_list("blocked_user_id", flat=True) if self.request.user.is_authenticated else []
-        blocked_viewer_subquery = UserVisibilityBlock.objects.filter(
-            owner_id=OuterRef("id"),
-            blocked_user_id=self.request.user.id,
-        ) if self.request.user.is_authenticated else UserVisibilityBlock.objects.none()
-
         queryset = (
             User.objects
             .filter(
@@ -1370,12 +1357,7 @@ class UserFriendsListView(ListAPIView):
             .distinct()
         )
         if self.request.user.is_authenticated:
-            queryset = (
-                queryset
-                .exclude(id__in=blocked_by_viewer_ids)
-                .annotate(_blocked_viewer=Exists(blocked_viewer_subquery))
-                .filter(_blocked_viewer=False)
-            )
+            queryset = filter_out_users_who_restricted_viewer(queryset, self.request.user)
         return queryset
 
 
@@ -1415,20 +1397,13 @@ class SocialFollowingListView(ListAPIView):
     serializer_class = SocialListUserSerializer
 
     def get_queryset(self):
-        blocked_by_me_ids = UserVisibilityBlock.objects.filter(
-            owner=self.request.user,
-        ).values_list("blocked_user_id", flat=True)
-        blocked_me_subquery = UserVisibilityBlock.objects.filter(
-            owner_id=OuterRef("id"),
-            blocked_user_id=self.request.user.id,
-        )
         return (
-            User.objects
-            .filter(followers__follower=self.request.user)
-            .exclude(id=self.request.user.id)
-            .exclude(id__in=blocked_by_me_ids)
-            .annotate(_blocked_me=Exists(blocked_me_subquery))
-            .filter(_blocked_me=False)
+            filter_out_users_who_restricted_viewer(
+                User.objects
+                .filter(followers__follower=self.request.user)
+                .exclude(id=self.request.user.id),
+                self.request.user,
+            )
             .select_related("profile")
             .annotate(followers_count=Count("followers", distinct=True))
             .order_by("username")
@@ -1604,23 +1579,16 @@ class SocialFriendsListView(ListAPIView):
     serializer_class = SocialListUserSerializer
 
     def get_queryset(self):
-        blocked_by_me_ids = UserVisibilityBlock.objects.filter(
-            owner=self.request.user,
-        ).values_list("blocked_user_id", flat=True)
-        blocked_me_subquery = UserVisibilityBlock.objects.filter(
-            owner_id=OuterRef("id"),
-            blocked_user_id=self.request.user.id,
-        )
-        friends_queryset = (
+        friends_queryset = filter_out_users_who_restricted_viewer(
             User.objects
             .filter(
                 Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
                 | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
-            )
-            .exclude(id=self.request.user.id)
-            .exclude(id__in=blocked_by_me_ids)
-            .annotate(_blocked_me=Exists(blocked_me_subquery))
-            .filter(_blocked_me=False)
+            ).exclude(id=self.request.user.id),
+            self.request.user,
+        )
+        friends_queryset = (
+            friends_queryset
             .select_related("profile")
             .annotate(followers_count=Count("followers", distinct=True))
             .order_by("username")
@@ -3334,6 +3302,19 @@ class ProfilePrivacyBlockedUsersView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        query = UserSearchView._normalize_query(request.query_params.get("q"))
+        if query:
+            already_restricted_ids = UserVisibilityBlock.objects.filter(
+                owner=request.user,
+            ).values_list("blocked_user_id", flat=True)
+            candidates = (
+                User.objects.filter(username__icontains=query)
+                .exclude(id=request.user.id)
+                .exclude(id__in=already_restricted_ids)
+                .order_by("username")[: UserSearchView.RESULTS_LIMIT]
+            )
+            return Response(UserSearchSerializer(candidates, many=True).data, status=status.HTTP_200_OK)
+
         blocks = UserVisibilityBlock.objects.filter(owner=request.user).select_related("blocked_user")
         return Response(UserVisibilityBlockSerializer(blocks, many=True).data, status=status.HTTP_200_OK)
 

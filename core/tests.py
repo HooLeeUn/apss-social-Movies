@@ -6707,7 +6707,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(after.data["display_rating"], before_display)
         self.assertEqual(after.data["real_ratings_count"], before_count)
 
-    def test_user_search_endpoint_returns_partial_matches_without_self_or_blocked_users(self):
+    def test_user_search_endpoint_returns_partial_matches_without_self_and_keeps_users_restricted_by_viewer(self):
         dennisse = get_user_model().objects.create_user(
             username="Dennisse",
             email="dennisse@example.com",
@@ -6735,7 +6735,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         usernames = [item["username"] for item in response.data]
         self.assertIn("dennys", usernames)
         self.assertNotIn(self.owner.username, usernames)
-        self.assertNotIn("Dennisse", usernames)
+        self.assertIn("Dennisse", usernames)
         self.assertEqual(set(response.data[0].keys()), {"id", "username", "first_name", "last_name"})
 
     def test_user_search_endpoint_is_case_insensitive(self):
@@ -9574,6 +9574,7 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.julian_hernandez.profile.is_public = False
         self.julian_hernandez.profile.save(update_fields=["visibility", "is_public"])
         Follow.objects.create(follower=self.peck, following=self.julian)
+        Follow.objects.create(follower=self.julian, following=self.peck)
         Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.julian, status=Friendship.STATUS_ACCEPTED)
         UserVisibilityBlock.objects.create(owner=self.julian, blocked_user=self.peck)
 
@@ -9595,6 +9596,12 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.client.force_authenticate(self.julian)
         response = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        following_response = self.client.get(reverse("social-following-list"))
+        friends_response = self.client.get(reverse("social-friends-list"))
+        search_response = self.client.get(reverse("user-search"), {"q": "peck"})
+        self.assertIn("Peck", [item["username"] for item in following_response.data])
+        self.assertIn("Peck", [item["username"] for item in friends_response.data])
+        self.assertIn("Peck", [item["username"] for item in search_response.data])
 
         self.client.force_authenticate(self.peck)
         following_response = self.client.get(reverse("me-following"))
@@ -9620,9 +9627,30 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.assertNotIn("Julian", usernames)
         self.assertIn("JulianHernandez", usernames)
 
+        reciprocal_search = self.client.get(reverse("profile-privacy-blocked-users"), {"q": "Juli"})
+        self.assertEqual(reciprocal_search.status_code, status.HTTP_200_OK)
+        reciprocal_usernames = [item["username"] for item in reciprocal_search.data]
+        self.assertIn("Julian", reciprocal_usernames)
+        self.assertIn("JulianHernandez", reciprocal_usernames)
+
         restrict_response = self.client.post(reverse("profile-privacy-blocked-users"), {"user_id": self.julian.id}, format="json")
         self.assertEqual(restrict_response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(UserVisibilityBlock.objects.filter(owner=self.peck, blocked_user=self.julian).exists())
+
+        self.client.force_authenticate(self.julian)
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("social-following-list")).data])
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("social-friends-list")).data])
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("user-search"), {"q": "peck"}).data])
+
+        UserVisibilityBlock.objects.filter(owner=self.peck, blocked_user=self.julian).delete()
+        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("social-following-list")).data])
+        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("social-friends-list")).data])
+        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("user-search"), {"q": "peck"}).data])
+        self.assertEqual(Follow.objects.filter(follower=self.julian, following=self.peck).count(), 1)
+        self.assertEqual(Friendship.between(self.peck, self.julian).filter(status=Friendship.STATUS_ACCEPTED).count(), 1)
+
+        self.client.force_authenticate(self.peck)
+        self.assertNotIn("Julian", [item["username"] for item in self.client.get(reverse("social-following-list")).data])
 
     def test_private_inbox_and_directed_comments_keep_history_with_restricted_current_user_flag(self):
         hidden = Comment.objects.create(author=self.julian, movie=self.movie, body="historical @Peck", visibility=Comment.VISIBILITY_MENTIONED, target_user=self.peck)
