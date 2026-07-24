@@ -9576,7 +9576,14 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         Follow.objects.create(follower=self.peck, following=self.julian)
         Follow.objects.create(follower=self.julian, following=self.peck)
         Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.julian, status=Friendship.STATUS_ACCEPTED)
+        Friendship.objects.create(requester=self.julian, user1=self.julian, user2=self.dennisse, status=Friendship.STATUS_ACCEPTED)
+        Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.dennisse, status=Friendship.STATUS_ACCEPTED)
         UserVisibilityBlock.objects.create(owner=self.julian, blocked_user=self.peck)
+
+    @staticmethod
+    def _usernames(response):
+        items = response.data.get("results", []) if isinstance(response.data, dict) else response.data
+        return [item["username"] for item in items]
 
     def test_restricted_viewer_gets_stable_403_but_private_profile_card_remains_available(self):
         self.client.force_authenticate(self.peck)
@@ -9671,3 +9678,76 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         flags = {item["other_user"]["username"]: item["other_user"]["restricted_current_user"] for item in conversations}
         self.assertTrue(flags["Julian"])
         self.assertFalse(flags["Dennisse"])
+
+    def test_message_recipient_search_is_bilateral_without_changing_social_search(self):
+        for viewer, hidden, available in (
+            (self.julian, "Peck", "Dennisse"),
+            (self.peck, "Julian", "Dennisse"),
+        ):
+            self.client.force_authenticate(viewer)
+            recipient_response = self.client.get(reverse("message-recipient-search"), {"q": hidden})
+            self.assertEqual(recipient_response.status_code, status.HTTP_200_OK)
+            self.assertNotIn(hidden, self._usernames(recipient_response))
+
+            available_response = self.client.get(reverse("message-recipient-search"), {"q": available})
+            self.assertIn(available, self._usernames(available_response))
+
+            mention_response = self.client.get(reverse("friends-list"), {"search": hidden})
+            self.assertNotIn(hidden, self._usernames(mention_response))
+
+        self.client.force_authenticate(self.julian)
+        self.assertIn("Peck", self._usernames(self.client.get(reverse("user-search"), {"q": "Peck"})))
+        self.client.force_authenticate(self.peck)
+        self.assertNotIn("Julian", self._usernames(self.client.get(reverse("user-search"), {"q": "Julian"})))
+
+    def test_directed_message_creation_rejects_both_directions_without_side_effects(self):
+        url = reverse("movie-comments", kwargs={"pk": self.movie.id})
+        initial_comments = Comment.objects.count()
+        initial_notifications = UserNotification.objects.count()
+
+        attempts = (
+            (self.julian, {"body": "Manual payload", "recipient_username": "Peck"}),
+            (self.peck, {"body": "Parsed mention @Julian"}),
+        )
+        for sender, payload in attempts:
+            self.client.force_authenticate(sender)
+            response = self.client.post(url, payload, format="json")
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+            self.assertEqual(response.data["code"], "directed_message_restricted")
+            self.assertEqual(response.data["detail"], "You cannot send a directed message to this user.")
+
+        self.assertEqual(Comment.objects.count(), initial_comments)
+        self.assertEqual(UserNotification.objects.count(), initial_notifications)
+
+        for sender in (self.julian, self.peck):
+            self.client.force_authenticate(sender)
+            response = self.client.post(
+                url,
+                {"body": "Allowed recipient", "mentioned_username": self.dennisse.username},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_removing_restriction_restores_recipient_search_and_creation(self):
+        historical = Comment.objects.create(
+            author=self.julian,
+            movie=self.movie,
+            body="Historical @Peck",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.peck,
+        )
+        UserVisibilityBlock.objects.filter(owner=self.julian, blocked_user=self.peck).delete()
+
+        for viewer, expected in ((self.julian, "Peck"), (self.peck, "Julian")):
+            self.client.force_authenticate(viewer)
+            response = self.client.get(reverse("message-recipient-search"), {"q": expected})
+            self.assertIn(expected, self._usernames(response))
+
+        self.client.force_authenticate(self.julian)
+        response = self.client.post(
+            reverse("movie-comments", kwargs={"pk": self.movie.id}),
+            {"body": "New @Peck"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Comment.objects.filter(pk=historical.pk).exists())

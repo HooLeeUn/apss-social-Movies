@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 
 from .models import Friendship, Profile, UserVisibilityBlock
 
@@ -55,6 +55,25 @@ def filter_out_users_who_restricted_viewer(queryset, viewer):
         blocked_user_id=viewer.id,
     )
     return queryset.annotate(_viewer_restricted_by_user=Exists(blocks)).filter(_viewer_restricted_by_user=False)
+
+
+def users_have_visibility_restriction(user_a, user_b):
+    if not user_a or not user_b or user_a.id == user_b.id:
+        return False
+    return UserVisibilityBlock.objects.filter(
+        Q(owner_id=user_a.id, blocked_user_id=user_b.id)
+        | Q(owner_id=user_b.id, blocked_user_id=user_a.id)
+    ).exists()
+
+
+def filter_out_users_with_any_restriction(queryset, viewer):
+    if not viewer or not getattr(viewer, "is_authenticated", False):
+        return queryset
+    blocks = UserVisibilityBlock.objects.filter(
+        Q(owner_id=viewer.id, blocked_user_id=OuterRef("id"))
+        | Q(owner_id=OuterRef("id"), blocked_user_id=viewer.id)
+    )
+    return queryset.annotate(_has_message_restriction=Exists(blocks)).filter(_has_message_restriction=False)
 
 
 def can_view_user_profile(target_user, viewer):

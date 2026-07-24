@@ -80,9 +80,11 @@ from .visibility import (
     annotate_restricted_current_user_for_users,
     can_view_user_profile,
     filter_out_authors_who_blocked_viewer,
+    filter_out_users_with_any_restriction,
     filter_out_users_who_restricted_viewer,
     has_restricted_viewer,
     restricted_profile_response,
+    users_have_visibility_restriction,
 )
 from .email_changes import (
     EmailChangeInvalid,
@@ -1560,18 +1562,26 @@ class FriendMentionListView(ListAPIView):
     serializer_class = FriendMentionSerializer
 
     def get_queryset(self):
-        friends_queryset = filter_out_users_who_restricted_viewer(
+        friends_queryset = filter_out_users_with_any_restriction(
             User.objects.filter(
                 Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
                 | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
-            ),
-            self.request.user,
+            ), self.request.user,
         )
         search = self.request.query_params.get("search")
         if search:
             friends_queryset = friends_queryset.filter(username__icontains=search.strip())
 
         return friends_queryset.select_related("profile").order_by("username").distinct()
+
+
+class MessageRecipientSearchView(FriendMentionListView):
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        query = UserSearchView._normalize_query(self.request.query_params.get("q"))
+        if query:
+            queryset = queryset.filter(username__icontains=query)
+        return queryset[: UserSearchView.RESULTS_LIMIT]
 
 
 class SocialFriendsListView(ListAPIView):
@@ -1929,6 +1939,11 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
         target_user, has_explicit_mention = self._get_mentioned_friend_from_payload(serializer.validated_data)
         if not has_explicit_mention:
             target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
+        if target_user and users_have_visibility_restriction(self.request.user, target_user):
+            raise PermissionDenied({
+                "detail": "You cannot send a directed message to this user.",
+                "code": "directed_message_restricted",
+            })
         visibility = Comment.VISIBILITY_MENTIONED if target_user else Comment.VISIBILITY_PUBLIC
         is_read = visibility != Comment.VISIBILITY_MENTIONED
         serializer.save(
