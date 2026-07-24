@@ -6506,9 +6506,8 @@ class ProfilePrivacyVisibilityTests(TestCase):
 
         self.client.force_authenticate(self.viewer)
         blocked_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
-        self.assertEqual(blocked_response.status_code, status.HTTP_200_OK)
-        self.assertFalse(blocked_response.data["can_view_full_profile"])
-        self.assertTrue(blocked_response.data["is_restricted_by_visited_user"])
+        self.assertEqual(blocked_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked_response.data["code"], "restricted_by_user")
 
         self.client.force_authenticate(self.owner)
         own_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
@@ -6725,7 +6724,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         )
         self.owner.username = "den_owner"
         self.owner.save(update_fields=["username"])
-        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=dennisse)
+        UserVisibilityBlock.objects.create(owner=dennisse, blocked_user=self.owner)
 
         self.client.force_authenticate(self.owner)
         response = self.client.get(reverse("user-search"), {"q": "den"})
@@ -9561,3 +9560,101 @@ class DeleteMoviesFromCsvCommandTests(TestCase):
                 call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), stdout=io.StringIO())
 
         self.assertTrue(Movie.objects.filter(id=movie.id).exists())
+
+
+class DirectionalUserRestrictionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.julian = User.objects.create_user(username="Julian", email="julian@example.com", password="test1234")
+        self.peck = User.objects.create_user(username="Peck", email="peck@example.com", password="test1234")
+        self.julian_a = User.objects.create_user(username="JulianA", email="juliana@example.com", password="test1234")
+        self.movie = Movie.objects.create(author=self.julian_a, title_english="Directional", type=Movie.MOVIE)
+        Follow.objects.create(follower=self.peck, following=self.julian)
+        Follow.objects.create(follower=self.julian, following=self.peck)
+        Follow.objects.create(follower=self.peck, following=self.julian_a)
+        Friendship.objects.create(
+            requester=self.julian,
+            user1=self.julian,
+            user2=self.peck,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+        self.directed = Comment.objects.create(
+            author=self.julian,
+            target_user=self.peck,
+            movie=self.movie,
+            visibility=Comment.VISIBILITY_MENTIONED,
+            body="Hola @Peck",
+        )
+        self.julian_public = Comment.objects.create(author=self.julian, movie=self.movie, body="Julian public")
+        self.peck_public = Comment.objects.create(author=self.peck, movie=self.movie, body="Peck public")
+        self.julian_rating = MovieRating.objects.create(user=self.julian, movie=self.movie, score=9)
+        self.julian_a_rating = MovieRating.objects.create(user=self.julian_a, movie=self.movie, score=8)
+        UserVisibilityBlock.objects.create(owner=self.julian, blocked_user=self.peck)
+
+    @staticmethod
+    def _usernames(response):
+        data = response.data.get("results", response.data) if isinstance(response.data, dict) else response.data
+        return {item["username"] for item in data}
+
+    def test_profile_access_is_directional_and_reciprocal_rows_remain_independent(self):
+        self.client.force_authenticate(self.peck)
+        hidden = self.client.get(reverse("user-profile", kwargs={"username": self.julian.username}))
+        self.assertEqual(hidden.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(hidden.data["code"], "restricted_by_user")
+
+        self.client.force_authenticate(self.julian)
+        visible = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
+        self.assertEqual(visible.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.peck)
+        created = self.client.post(reverse("profile-privacy-blocked-users"), {"user_id": self.julian.id}, format="json")
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(UserVisibilityBlock.objects.filter(owner=self.peck, blocked_user=self.julian).count(), 1)
+        self.client.force_authenticate(self.julian)
+        reverse_hidden = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
+        self.assertEqual(reverse_hidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_social_lists_and_search_hide_only_users_who_restricted_viewer(self):
+        self.client.force_authenticate(self.peck)
+        following = self.client.get(reverse("social-following-list"))
+        friends = self.client.get(reverse("social-friends-list"))
+        self.assertNotIn("Julian", self._usernames(following))
+        self.assertIn("JulianA", self._usernames(following))
+        self.assertNotIn("Julian", self._usernames(friends))
+
+        search = self.client.get(reverse("user-search"), {"q": "Julian"})
+        self.assertNotIn("Julian", self._usernames(search))
+        self.assertIn("JulianA", self._usernames(search))
+
+        special = self.client.get(reverse("profile-privacy-blocked-users"), {"q": "Julian"})
+        self.assertIn("Julian", self._usernames(special))
+        self.assertIn("JulianA", self._usernames(special))
+
+        self.client.force_authenticate(self.julian)
+        own_following = self.client.get(reverse("social-following-list"))
+        own_friends = self.client.get(reverse("social-friends-list"))
+        self.assertIn("Peck", self._usernames(own_following))
+        self.assertIn("Peck", self._usernames(own_friends))
+
+    def test_public_comments_activity_and_directed_history_are_directional(self):
+        self.client.force_authenticate(self.peck)
+        public = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.id}))
+        public_ids = {item["id"] for item in public.data}
+        self.assertNotIn(self.julian_public.id, public_ids)
+        self.assertIn(self.peck_public.id, public_ids)
+
+        directed = self.client.get(reverse("directed-comments"))
+        directed_item = next(item for item in directed.data if item["id"] == self.directed.id)
+        self.assertTrue(directed_item["author_restricted_current_user"])
+
+        activity = self.client.get(reverse("profile-feed-activity"), {"scope": "following"})
+        activity_ids = {item["id"] for item in activity.data["results"]}
+        self.assertNotIn(f"rating:{self.julian_rating.id}", activity_ids)
+        self.assertIn(f"rating:{self.julian_a_rating.id}", activity_ids)
+
+        self.client.force_authenticate(self.julian)
+        public_for_julian = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.id}))
+        self.assertIn(self.peck_public.id, {item["id"] for item in public_for_julian.data})
+        directed_for_julian = self.client.get(reverse("directed-comments"))
+        self.assertIn(self.directed.id, {item["id"] for item in directed_for_julian.data})

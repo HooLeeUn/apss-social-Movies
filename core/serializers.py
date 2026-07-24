@@ -33,6 +33,23 @@ from .models import (
 from .models import Follow, Profile
 
 
+def user_restricted_current_user(user, context):
+    """Whether the represented user restricted request.user, cached once per request."""
+    request = context.get("request")
+    viewer = getattr(request, "user", None)
+    if not viewer or not viewer.is_authenticated or not user or user.id == viewer.id:
+        return False
+    cache_attr = "_visibility_block_owner_ids_for_current_user"
+    owner_ids = getattr(request, cache_attr, None)
+    if owner_ids is None:
+        owner_ids = set(
+            UserVisibilityBlock.objects.filter(blocked_user_id=viewer.id)
+            .values_list("owner_id", flat=True)
+        )
+        setattr(request, cache_attr, owner_ids)
+    return user.id in owner_ids
+
+
 def calculate_age_from_birth_date(birth_date):
     if not birth_date:
         return None
@@ -889,6 +906,7 @@ class CommentSerializer(serializers.ModelSerializer):
     author_username = serializers.CharField(source="author.username", read_only=True)
     author_display_name = serializers.SerializerMethodField()
     author_avatar = serializers.SerializerMethodField()
+    author_restricted_current_user = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
@@ -896,7 +914,7 @@ class CommentSerializer(serializers.ModelSerializer):
             "id", "author", "movie", "target_user", "body", "visibility",
             "mentioned_username", "recipient_username",
             "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
-            "author_username", "author_display_name", "author_avatar",
+            "author_username", "author_display_name", "author_avatar", "author_restricted_current_user",
         ]
         read_only_fields = [
             "id", "author", "movie", "target_user", "visibility",
@@ -919,14 +937,18 @@ class CommentSerializer(serializers.ModelSerializer):
         full_name = f"{(obj.author.first_name or '').strip()} {(obj.author.last_name or '').strip()}".strip()
         return full_name or obj.author.username
 
+    def get_author_restricted_current_user(self, obj):
+        return user_restricted_current_user(obj.author, self.context)
+
 
 class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
     display_name = serializers.SerializerMethodField()
     avatar = serializers.SerializerMethodField()
+    restricted_current_user = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "display_name", "avatar"]
+        fields = ["id", "username", "display_name", "avatar", "restricted_current_user"]
 
     def get_display_name(self, obj):
         full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
@@ -938,6 +960,9 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_restricted_current_user(self, obj):
+        return user_restricted_current_user(obj, self.context)
 
 
 class DirectedMessageMovieSerializer(serializers.ModelSerializer):
@@ -1068,10 +1093,11 @@ class DirectedConversationSerializer(serializers.Serializer):
 
 class MeMessageAuthorSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField()
+    restricted_current_user = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "avatar"]
+        fields = ["id", "username", "avatar", "restricted_current_user"]
 
     def get_avatar(self, obj):
         if hasattr(obj, "profile") and obj.profile.avatar:
@@ -1079,6 +1105,9 @@ class MeMessageAuthorSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_restricted_current_user(self, obj):
+        return user_restricted_current_user(obj, self.context)
 
 
 class MeMessageMovieSerializer(DirectedMessageMovieSerializer):
