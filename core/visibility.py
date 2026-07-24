@@ -7,14 +7,54 @@ from .models import Friendship, Profile, UserVisibilityBlock
 User = get_user_model()
 
 
-def is_blocked_from_user_content(owner, viewer):
-    if owner is None:
+def has_restricted_viewer(target_user, viewer):
+    if target_user is None:
         return False
     if not viewer or not getattr(viewer, "is_authenticated", False):
         return False
-    if viewer.id == owner.id:
+    if viewer.id == target_user.id:
         return False
-    return UserVisibilityBlock.objects.filter(owner_id=owner.id, blocked_user_id=viewer.id).exists()
+    return UserVisibilityBlock.objects.filter(owner_id=target_user.id, blocked_user_id=viewer.id).exists()
+
+
+is_blocked_from_user_content = has_restricted_viewer
+
+
+def annotate_restricted_current_user(user_obj, viewer, attr_name="restricted_current_user"):
+    setattr(user_obj, attr_name, has_restricted_viewer(user_obj, viewer))
+    return user_obj
+
+
+def annotate_restricted_current_user_for_users(users, viewer, attr_name="restricted_current_user"):
+    users = [user for user in users if user is not None]
+    if not viewer or not getattr(viewer, "is_authenticated", False) or not users:
+        for user in users:
+            setattr(user, attr_name, False)
+        return users
+    user_ids = {user.id for user in users if getattr(user, "id", None) and user.id != viewer.id}
+    restricted_ids = set(UserVisibilityBlock.objects.filter(owner_id__in=user_ids, blocked_user_id=viewer.id).values_list("owner_id", flat=True))
+    for user in users:
+        setattr(user, attr_name, user.id in restricted_ids)
+    return users
+
+
+def restricted_profile_response():
+    from rest_framework import status
+    from rest_framework.response import Response
+    return Response(
+        {"detail": "This profile is not available.", "code": "restricted_by_user"},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def filter_out_users_who_restricted_viewer(queryset, viewer):
+    if not viewer or not getattr(viewer, "is_authenticated", False):
+        return queryset
+    blocks = UserVisibilityBlock.objects.filter(
+        owner_id=OuterRef("id"),
+        blocked_user_id=viewer.id,
+    )
+    return queryset.annotate(_viewer_restricted_by_user=Exists(blocks)).filter(_viewer_restricted_by_user=False)
 
 
 def can_view_user_profile(target_user, viewer):

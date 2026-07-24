@@ -923,10 +923,11 @@ class CommentSerializer(serializers.ModelSerializer):
 class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
     display_name = serializers.SerializerMethodField()
     avatar = serializers.SerializerMethodField()
+    restricted_current_user = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "display_name", "avatar"]
+        fields = ["id", "username", "display_name", "avatar", "restricted_current_user"]
 
     def get_display_name(self, obj):
         full_name = f"{(obj.first_name or '').strip()} {(obj.last_name or '').strip()}".strip()
@@ -938,6 +939,15 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_restricted_current_user(self, obj):
+        if hasattr(obj, "restricted_current_user"):
+            return bool(obj.restricted_current_user)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated or obj == user:
+            return False
+        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=user).exists()
 
 
 class DirectedMessageMovieSerializer(serializers.ModelSerializer):
@@ -1068,10 +1078,11 @@ class DirectedConversationSerializer(serializers.Serializer):
 
 class MeMessageAuthorSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField()
+    restricted_current_user = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "avatar"]
+        fields = ["id", "username", "avatar", "restricted_current_user"]
 
     def get_avatar(self, obj):
         if hasattr(obj, "profile") and obj.profile.avatar:
@@ -1079,6 +1090,15 @@ class MeMessageAuthorSerializer(serializers.ModelSerializer):
             url = obj.profile.avatar.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_restricted_current_user(self, obj):
+        if hasattr(obj, "restricted_current_user"):
+            return bool(obj.restricted_current_user)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated or obj == user:
+            return False
+        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=user).exists()
 
 
 class MeMessageMovieSerializer(DirectedMessageMovieSerializer):

@@ -9561,3 +9561,85 @@ class DeleteMoviesFromCsvCommandTests(TestCase):
                 call_command("delete_movies_from_csv", "--affected-csv", str(csv_path), stdout=io.StringIO())
 
         self.assertTrue(Movie.objects.filter(id=movie.id).exists())
+
+class DirectionalUserRestrictionVisibilityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.julian = get_user_model().objects.create_user(username="Julian", email="julian@example.com", password="test1234")
+        self.peck = get_user_model().objects.create_user(username="Peck", email="peck@example.com", password="test1234")
+        self.julian_hernandez = get_user_model().objects.create_user(username="JulianHernandez", email="julianh@example.com", password="test1234")
+        self.dennisse = get_user_model().objects.create_user(username="Dennisse", email="dennisse-directional@example.com", password="test1234")
+        self.movie = Movie.objects.create(author=self.julian, title_english="Directional Movie", type=Movie.MOVIE)
+        self.julian_hernandez.profile.visibility = Profile.Visibility.PRIVATE
+        self.julian_hernandez.profile.is_public = False
+        self.julian_hernandez.profile.save(update_fields=["visibility", "is_public"])
+        Follow.objects.create(follower=self.peck, following=self.julian)
+        Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.julian, status=Friendship.STATUS_ACCEPTED)
+        UserVisibilityBlock.objects.create(owner=self.julian, blocked_user=self.peck)
+
+    def test_restricted_viewer_gets_stable_403_but_private_profile_card_remains_available(self):
+        self.client.force_authenticate(self.peck)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.julian.username}))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["code"], "restricted_by_user")
+
+        private_response = self.client.get(reverse("user-profile", kwargs={"username": self.julian_hernandez.username}))
+        self.assertEqual(private_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(private_response.data["profile_access"], "restricted")
+        self.assertTrue(private_response.data["is_private_profile"])
+        self.assertTrue(private_response.data["can_send_friend_request"])
+        self.assertFalse(private_response.data["is_restricted_by_visited_user"])
+        self.assertNotEqual(private_response.data.get("code"), "restricted_by_user")
+
+    def test_restriction_is_directional_and_only_filters_visibility_not_relationships(self):
+        self.client.force_authenticate(self.julian)
+        response = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(self.peck)
+        following_response = self.client.get(reverse("me-following"))
+        self.assertEqual(following_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("Julian", [item["username"] for item in following_response.data])
+        friends_response = self.client.get(reverse("social-friends-list"))
+        self.assertEqual(friends_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("Julian", [item["username"] for item in friends_response.data])
+        self.assertTrue(Follow.objects.filter(follower=self.peck, following=self.julian).exists())
+        self.assertTrue(Friendship.between(self.peck, self.julian).filter(status=Friendship.STATUS_ACCEPTED).exists())
+
+        UserVisibilityBlock.objects.filter(owner=self.julian, blocked_user=self.peck).delete()
+        following_response = self.client.get(reverse("me-following"))
+        friends_response = self.client.get(reverse("social-friends-list"))
+        self.assertIn("Julian", [item["username"] for item in following_response.data])
+        self.assertIn("Julian", [item["username"] for item in friends_response.data])
+
+    def test_normal_search_hides_restricting_user_but_restriction_search_allows_reciprocal_restriction(self):
+        self.client.force_authenticate(self.peck)
+        response = self.client.get(reverse("user-search"), {"q": "Juli"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        usernames = [item["username"] for item in response.data]
+        self.assertNotIn("Julian", usernames)
+        self.assertIn("JulianHernandez", usernames)
+
+        restrict_response = self.client.post(reverse("profile-privacy-blocked-users"), {"user_id": self.julian.id}, format="json")
+        self.assertEqual(restrict_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(UserVisibilityBlock.objects.filter(owner=self.peck, blocked_user=self.julian).exists())
+
+    def test_private_inbox_and_directed_comments_keep_history_with_restricted_current_user_flag(self):
+        hidden = Comment.objects.create(author=self.julian, movie=self.movie, body="historical @Peck", visibility=Comment.VISIBILITY_MENTIONED, target_user=self.peck)
+        normal = Comment.objects.create(author=self.dennisse, movie=self.movie, body="normal @Peck", visibility=Comment.VISIBILITY_MENTIONED, target_user=self.peck)
+        self.assertTrue(hidden.has_valid_target_mention())
+        self.assertTrue(normal.has_valid_target_mention())
+
+        self.client.force_authenticate(self.peck)
+        inbox_response = self.client.get(reverse("me-messages"))
+        self.assertEqual(inbox_response.status_code, status.HTTP_200_OK)
+        counterparts = {item["counterpart"]["username"]: item["counterpart"]["restricted_current_user"] for item in inbox_response.data if item.get("counterpart")}
+        self.assertTrue(counterparts["Julian"])
+        self.assertFalse(counterparts["Dennisse"])
+
+        directed_response = self.client.get(reverse("movie-directed-comments", kwargs={"pk": self.movie.id}))
+        self.assertEqual(directed_response.status_code, status.HTTP_200_OK)
+        conversations = directed_response.data["results"] if isinstance(directed_response.data, dict) else directed_response.data
+        flags = {item["other_user"]["username"]: item["other_user"]["restricted_current_user"] for item in conversations}
+        self.assertTrue(flags["Julian"])
+        self.assertFalse(flags["Dennisse"])
