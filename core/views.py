@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from rest_framework.utils.urls import remove_query_param, replace_query_param
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import SimpleRateThrottle
 from .serializers import (
     AppBrandingSerializer,
     FriendMentionSerializer, FriendshipSerializer, UserProfileSerializer, MeSerializer, UserMiniSerializer, UserMiniWithFollowersCountSerializer,
@@ -47,6 +48,7 @@ from .models import (
     MovieListItem,
     MovieRecommendationItem,
     PendingUserRegistration,
+    normalize_email_address,
     normalize_movie_search_text,
     MovieRating,
     ProfileFavoriteMovie,
@@ -78,9 +80,27 @@ from .visibility import (
     can_view_user_profile,
     filter_out_authors_who_blocked_viewer,
 )
+from .email_changes import (
+    EmailChangeInvalid,
+    EmailChangeUnavailable,
+    confirm_email_change,
+    create_email_change,
+    send_email_change_confirmation,
+)
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
+
+
+class EmailChangeRateThrottle(SimpleRateThrottle):
+    scope = "email_change"
+    rate = "10/hour"
+
+    def get_cache_key(self, request, view):
+        if not request.user.is_authenticated:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": request.user.pk}
+
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1136,8 +1156,72 @@ class MePersonalDataView(generics.RetrieveUpdateAPIView):
     serializer_class = PersonalDataSerializer
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
+    def get_throttles(self):
+        if self.request.method in {"PUT", "PATCH"} and "email" in self.request.data:
+            return [EmailChangeRateThrottle()]
+        return []
+
     def get_object(self):
         return User.objects.select_related("profile").get(pk=self.request.user.pk)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        requested_email = serializer.validated_data.get("email")
+        self.perform_update(serializer)
+
+        email_change_pending = False
+        confirmation_sent = False
+        if requested_email is not None and normalize_email_address(requested_email) != normalize_email_address(instance.email):
+            try:
+                pending, token = create_email_change(user=instance, new_email=requested_email)
+            except EmailChangeUnavailable:
+                raise ValidationError({"email": "The requested email cannot be used."})
+            if pending:
+                try:
+                    send_email_change_confirmation(request=request, pending=pending, token=token)
+                except Exception:
+                    return Response(
+                        {"detail": "Personal data was saved, but the confirmation email could not be sent. Try again later."},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+                email_change_pending = True
+                confirmation_sent = True
+
+        data = dict(serializer.data)
+        data["detail"] = (
+            "Personal data was saved. The email change is pending confirmation; "
+            "the current email remains active until confirmation."
+            if email_change_pending
+            else "Personal data was saved."
+        )
+        data["email_change_pending"] = email_change_pending
+        data["confirmation_email_sent"] = confirmation_sent
+        return Response(data)
+
+
+class ConfirmEmailChangeView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, token):
+        try:
+            user = confirm_email_change(token)
+        except EmailChangeUnavailable:
+            return Response(
+                {"detail": "This email change can no longer be completed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except EmailChangeInvalid:
+            return Response(
+                {"detail": "This email change link is invalid or expired."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {"detail": "Email changed successfully.", "email": user.email},
+            status=status.HTTP_200_OK,
+        )
     
 class FollowToggleView(APIView):
     permission_classes = [IsAuthenticated]

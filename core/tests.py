@@ -43,6 +43,7 @@ from core.models import (
     MovieRating,
     StreamingProviderLink,
     PendingUserRegistration,
+    PendingEmailChange,
     UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
@@ -167,6 +168,151 @@ class PendingUserRegistrationTests(TestCase):
         self.assertEqual(response["Location"], "http://localhost:3000/login?verified=expired")
         self.assertFalse(get_user_model().objects.filter(username="expiredconfirm").exists())
         self.assertFalse(PendingUserRegistration.objects.filter(pk=pending_registration.pk).exists())
+
+
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    BACKEND_BASE_URL="http://testserver",
+)
+class PendingEmailChangeTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            username="emailowner", email="owner@example.com", password="test1234"
+        )
+        self.personal_url = reverse("me-personal-data")
+        self.client.force_authenticate(self.user)
+
+    def request_change(self, email="new@example.com", **extra):
+        response = self.client.patch(self.personal_url, {"email": email, **extra}, format="json")
+        token = None
+        if mail.outbox:
+            match = re.search(r"/api/me/confirm-email-change/([^/]+)/", mail.outbox[-1].body)
+            token = match.group(1) if match else None
+        return response, token
+
+    def confirm(self, token):
+        return self.client.get(reverse("confirm-email-change", kwargs={"token": token}))
+
+    def test_saving_personal_data_without_email_change_sends_no_mail(self):
+        response = self.client.patch(self.personal_url, {"first_name": "Updated"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["email_change_pending"])
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertFalse(PendingEmailChange.objects.filter(user=self.user).exists())
+
+    def test_available_email_remains_pending_until_confirmed(self):
+        response, token = self.request_change(first_name="Saved")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["email_change_pending"])
+        self.assertTrue(response.data["confirmation_email_sent"])
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "owner@example.com")
+        self.assertEqual(self.user.first_name, "Saved")
+        pending = PendingEmailChange.objects.get(user=self.user)
+        self.assertNotEqual(pending.token_hash, token)
+        self.assertEqual(pending.token_hash, PendingEmailChange.hash_token(token))
+
+    def test_confirmation_changes_email_and_is_single_use(self):
+        _, token = self.request_change()
+        response = self.confirm(token)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "new@example.com")
+        replay = self.confirm(token)
+        self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expired_link_never_changes_current_email_and_is_invalidated(self):
+        _, token = self.request_change()
+        pending = PendingEmailChange.objects.get(user=self.user)
+        PendingEmailChange.objects.filter(pk=pending.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        response = self.confirm(token)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        pending.refresh_from_db()
+        self.assertEqual(self.user.email, "owner@example.com")
+        self.assertIsNotNone(pending.invalidated_at)
+
+    def test_second_request_replaces_first_and_invalidates_old_link(self):
+        _, old_token = self.request_change("first@example.com")
+        _, new_token = self.request_change("second@example.com")
+        self.assertEqual(PendingEmailChange.objects.filter(user=self.user).count(), 1)
+        self.assertEqual(self.confirm(old_token).status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.confirm(new_token).status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "second@example.com")
+
+    def test_registered_email_is_rejected_case_insensitively(self):
+        get_user_model().objects.create_user(
+            username="otheremail", email="Occupied@Example.com", password="test1234"
+        )
+        response, _ = self.request_change(" occupied@example.COM ")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(len(mail.outbox), 0)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "owner@example.com")
+
+    def test_case_only_change_is_a_noop(self):
+        response, _ = self.request_change(" OWNER@EXAMPLE.COM ")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["email_change_pending"])
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_email_taken_after_request_rejects_confirmation(self):
+        _, token = self.request_change("late@example.com")
+        get_user_model().objects.create_user(
+            username="lateclaim", email="LATE@example.com", password="test1234"
+        )
+        response = self.confirm(token)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "owner@example.com")
+        self.assertIsNotNone(PendingEmailChange.objects.get(user=self.user).invalidated_at)
+
+    def test_repeated_confirmation_cannot_apply_twice(self):
+        _, token = self.request_change()
+        self.assertEqual(self.confirm(token).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.confirm(token).status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("core.email_changes.send_mail", side_effect=RuntimeError("SMTP unavailable"))
+    def test_mail_failure_removes_request_but_keeps_other_saved_data(self, _send_mail):
+        response, _ = self.request_change(first_name="Still Saved")
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "owner@example.com")
+        self.assertEqual(self.user.first_name, "Still Saved")
+        self.assertFalse(PendingEmailChange.objects.filter(user=self.user).exists())
+
+    def test_unauthenticated_user_cannot_start_change(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.patch(self.personal_url, {"email": "anon@example.com"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_personal_endpoint_always_targets_authenticated_user(self):
+        other = get_user_model().objects.create_user(
+            username="targetuser", email="target@example.com", password="test1234"
+        )
+        response, _ = self.request_change("mine@example.com", id=other.pk, user_id=other.pk)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(PendingEmailChange.objects.get(user=self.user).new_email, "mine@example.com")
+        self.assertFalse(PendingEmailChange.objects.filter(user=other).exists())
+
+    def test_signup_confirmation_still_creates_user(self):
+        registration = PendingUserRegistration.objects.create(
+            username="regressionuser",
+            email="regression@example.com",
+            first_name="Regression",
+            last_name="User",
+            birth_date="2000-01-01",
+            password=make_password("strongpass123"),
+            expires_at=timezone.now() + timedelta(hours=24),
+        )
+        response = self.client.get(
+            reverse("register-confirm-email", kwargs={"token": registration.token})
+        )
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertTrue(get_user_model().objects.filter(username="regressionuser").exists())
 
 from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer
 from core.services import (

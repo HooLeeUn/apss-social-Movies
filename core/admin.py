@@ -2,6 +2,7 @@ from django.contrib import admin
 from django import forms
 from django.utils.html import format_html
 from django.db.models import Avg, Count
+from django.utils import timezone
 from .models import (
     AppBranding,
     Post,
@@ -12,6 +13,7 @@ from .models import (
     Movie,
     MovieRating,
     PendingUserRegistration,
+    PendingEmailChange,
     Profile,
     UserVisibilityBlock,
     UserTasteProfile,
@@ -242,6 +244,25 @@ class PendingUserRegistrationAdmin(admin.ModelAdmin):
             return "Confirmado"
         if obj.is_expired():
             return "Expirado"
+        return "Pendiente"
+
+
+@admin.register(PendingEmailChange)
+class PendingEmailChangeAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "new_email", "created_at", "expires_at", "status")
+    search_fields = ("user__username", "new_email")
+    list_filter = ("created_at", "expires_at", "confirmed_at", "invalidated_at")
+    readonly_fields = (
+        "user", "new_email", "token_hash", "created_at", "expires_at",
+        "confirmed_at", "invalidated_at",
+    )
+
+    @admin.display(description="Estado")
+    def status(self, obj):
+        if obj.confirmed_at:
+            return "Confirmado"
+        if obj.invalidated_at or obj.expires_at <= timezone.now():
+            return "Inválido"
         return "Pendiente"
 
 
