@@ -3787,6 +3787,23 @@ class FriendsListEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["username"] for item in response.data["results"]], ["julian_friend"])
 
+    def test_supports_search_filter_by_friend_name(self):
+        self.friend_one.first_name = "Dennisse"
+        self.friend_one.last_name = "Jamaica"
+        self.friend_one.save(update_fields=["first_name", "last_name"])
+        Friendship.objects.create(
+            requester=self.user,
+            user1=self.user,
+            user2=self.friend_one,
+            status=Friendship.STATUS_ACCEPTED,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"search": "den"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["username"] for item in response.data["results"]], ["julian_friend"])
+
 
 class CommentReactionAPITests(TestCase):
     def setUp(self):
@@ -9660,6 +9677,38 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         reverse_filtered = self.client.get(reverse("friends-list"), {"search": "J"})
         self.assertNotIn("Julian", [item["username"] for item in reverse_filtered.data["results"]])
 
+    def test_privacy_search_is_global_and_matches_names_without_social_visibility_filtering(self):
+        unrelated = get_user_model().objects.create_user(
+            username="unrelated-account",
+            first_name="Dennisse",
+            last_name="Jamaica",
+            email="unrelated-directional@example.com",
+            password="test1234",
+        )
+        full_name_match = get_user_model().objects.create_user(
+            username="another-unrelated-account",
+            first_name="Maria",
+            last_name="Donald",
+            email="full-name-directional@example.com",
+            password="test1234",
+        )
+        self.client.force_authenticate(self.peck)
+
+        by_first_name = self.client.get(reverse("profile-privacy-blocked-users"), {"q": "denni"})
+        by_full_name = self.client.get(reverse("profile-privacy-blocked-users"), {"q": "Maria Don"})
+
+        self.assertEqual(by_first_name.status_code, status.HTTP_200_OK)
+        self.assertIn(unrelated.username, [item["username"] for item in by_first_name.data])
+        self.assertIn(full_name_match.username, [item["username"] for item in by_full_name.data])
+        self.assertNotIn(self.peck.username, [item["username"] for item in by_first_name.data])
+        self.assertFalse(Friendship.between(self.peck, unrelated).exists())
+        self.assertFalse(
+            Follow.objects.filter(
+                Q(follower=self.peck, following=unrelated)
+                | Q(follower=unrelated, following=self.peck)
+            ).exists()
+        )
+
     def test_restricted_directed_comment_is_rejected_before_persistence_and_unrestricted_one_works(self):
         self.client.force_authenticate(self.julian)
         comments_before = Comment.objects.count()
@@ -9687,6 +9736,22 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.assertIn("Peck", [item["username"] for item in restored.data["results"]])
         self.assertEqual(Follow.objects.filter(follower=self.julian, following=self.peck).count(), 1)
         self.assertEqual(Friendship.between(self.julian, self.peck).count(), 1)
+
+    def test_restricted_movie_directed_create_is_rejected_before_persistence(self):
+        self.client.force_authenticate(self.peck)
+        comments_before = Comment.objects.count()
+        notifications_before = UserNotification.objects.count()
+
+        rejected = self.client.post(
+            reverse("movie-directed-comments", kwargs={"pk": self.movie.id}),
+            {"body": "hello @Julian", "mentioned_username": "Julian"},
+            format="json",
+        )
+
+        self.assertEqual(rejected.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(rejected.data["code"], "directed_message_restricted")
+        self.assertEqual(Comment.objects.count(), comments_before)
+        self.assertEqual(UserNotification.objects.count(), notifications_before)
 
     def test_private_inbox_and_directed_comments_keep_history_with_restricted_current_user_flag(self):
         hidden = Comment.objects.create(author=self.julian, movie=self.movie, body="historical @Peck", visibility=Comment.VISIBILITY_MENTIONED, target_user=self.peck)

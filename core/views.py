@@ -10,7 +10,7 @@ from django.core.cache import cache
 from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, Concat
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
@@ -1571,7 +1571,12 @@ class FriendMentionListView(ListAPIView):
         )
         search = self.request.query_params.get("search")
         if search:
-            friends_queryset = friends_queryset.filter(username__icontains=search.strip())
+            normalized_search = search.strip()
+            friends_queryset = friends_queryset.filter(
+                Q(username__icontains=normalized_search)
+                | Q(first_name__icontains=normalized_search)
+                | Q(last_name__icontains=normalized_search)
+            )
 
         return friends_queryset.select_related("profile").order_by("username").distinct()
 
@@ -2739,6 +2744,11 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
             target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
         if target_user is None:
             raise ValidationError({"mentioned_username": "Directed comments require a valid friend mention."})
+        if users_have_any_restriction(self.request.user, target_user):
+            raise PermissionDenied({
+                "code": "directed_message_restricted",
+                "detail": "You cannot send a directed message to this user.",
+            })
 
         serializer.save(
             author=self.request.user,
@@ -3318,7 +3328,15 @@ class ProfilePrivacyBlockedUsersView(APIView):
                 owner=request.user,
             ).values_list("blocked_user_id", flat=True)
             candidates = (
-                User.objects.filter(username__icontains=query)
+                User.objects.annotate(
+                    privacy_search_full_name=Concat("first_name", Value(" "), "last_name"),
+                )
+                .filter(
+                    Q(username__icontains=query)
+                    | Q(first_name__icontains=query)
+                    | Q(last_name__icontains=query)
+                    | Q(privacy_search_full_name__icontains=query)
+                )
                 .exclude(id=request.user.id)
                 .exclude(id__in=already_restricted_ids)
                 .order_by("username")[: UserSearchView.RESULTS_LIMIT]
