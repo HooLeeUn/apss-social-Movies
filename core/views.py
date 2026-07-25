@@ -1577,16 +1577,23 @@ class FriendMentionListView(ListAPIView):
 
 class MessageRecipientSearchView(FriendMentionListView):
     def get_queryset(self):
+        # Recipient autocomplete is deliberately scoped to accepted friends.  Do
+        # not replace this with the global user-search queryset: an empty query
+        # must return the initial set of eligible recipients.
         queryset = filter_out_users_with_any_restriction(
             User.objects.filter(
                 Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
                 | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
-            ),
+            ).exclude(pk=self.request.user.pk),
             self.request.user,
         )
         query = UserSearchView._normalize_query(self.request.query_params.get("q"))
         if query:
-            queryset = queryset.filter(username__icontains=query)
+            queryset = queryset.filter(
+                Q(username__icontains=query)
+                | Q(first_name__icontains=query)
+                | Q(last_name__icontains=query)
+            )
         return queryset.select_related("profile").order_by("username").distinct()[: UserSearchView.RESULTS_LIMIT]
 
 

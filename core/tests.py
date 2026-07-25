@@ -9568,8 +9568,8 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.julian = get_user_model().objects.create_user(username="Julian", email="julian@example.com", password="test1234")
         self.peck = get_user_model().objects.create_user(username="Peck", email="peck@example.com", password="test1234")
         self.julian_hernandez = get_user_model().objects.create_user(username="JulianHernandez", email="julianh@example.com", password="test1234")
-        self.dennisse = get_user_model().objects.create_user(username="Dennisse", email="dennisse-directional@example.com", password="test1234")
-        self.pato_donald = get_user_model().objects.create_user(username="PatoDonald", email="pato-directional@example.com", password="test1234")
+        self.dennisse = get_user_model().objects.create_user(username="Dennisse", first_name="Denise", email="dennisse-directional@example.com", password="test1234")
+        self.pato_donald = get_user_model().objects.create_user(username="PatoDonald", last_name="Duck", email="pato-directional@example.com", password="test1234")
         self.movie = Movie.objects.create(author=self.julian, title_english="Directional Movie", type=Movie.MOVIE)
         self.julian_hernandez.profile.visibility = Profile.Visibility.PRIVATE
         self.julian_hernandez.profile.is_public = False
@@ -9709,17 +9709,28 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
             with self.subTest(params=params):
                 response = self.client.get(reverse("message-recipient-search"), params)
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertIsInstance(response.data, dict)
                 usernames = self._usernames(response)
-                self.assertIn("Dennisse", usernames)
-                self.assertIn("PatoDonald", usernames)
+                self.assertEqual(usernames, ["Dennisse", "PatoDonald"])
                 self.assertNotIn("Peck", usernames)
 
-        dennisse_response = self.client.get(reverse("message-recipient-search"), {"q": "de"})
+        dennisse_response = self.client.get(reverse("message-recipient-search"), {"q": "De"})
         self.assertEqual(self._usernames(dennisse_response), ["Dennisse"])
 
-        pato_response = self.client.get(reverse("message-recipient-search"), {"q": "P"})
-        self.assertIn("PatoDonald", self._usernames(pato_response))
-        self.assertNotIn("Peck", self._usernames(pato_response))
+        pato_response = self.client.get(reverse("message-recipient-search"), {"q": "Pato"})
+        self.assertEqual(self._usernames(pato_response), ["PatoDonald"])
+
+        restricted_response = self.client.get(reverse("message-recipient-search"), {"q": "Peck"})
+        self.assertEqual(self._usernames(restricted_response), [])
+
+        self.assertEqual(
+            self._usernames(self.client.get(reverse("message-recipient-search"), {"q": "Denise"})),
+            ["Dennisse"],
+        )
+        self.assertEqual(
+            self._usernames(self.client.get(reverse("message-recipient-search"), {"q": "Duck"})),
+            ["PatoDonald"],
+        )
 
         self.client.force_authenticate(self.peck)
         peck_response = self.client.get(reverse("message-recipient-search"), {"q": "@"})
@@ -9766,7 +9777,7 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
 
         for viewer, expected in ((self.julian, "Peck"), (self.peck, "Julian")):
             self.client.force_authenticate(viewer)
-            response = self.client.get(reverse("message-recipient-search"), {"q": expected})
+            response = self.client.get(reverse("message-recipient-search"), {"q": ""})
             self.assertIn(expected, self._usernames(response))
 
         self.client.force_authenticate(self.julian)
