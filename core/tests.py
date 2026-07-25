@@ -9569,6 +9569,7 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.peck = get_user_model().objects.create_user(username="Peck", email="peck@example.com", password="test1234")
         self.julian_hernandez = get_user_model().objects.create_user(username="JulianHernandez", email="julianh@example.com", password="test1234")
         self.dennisse = get_user_model().objects.create_user(username="Dennisse", email="dennisse-directional@example.com", password="test1234")
+        self.pato_donald = get_user_model().objects.create_user(username="PatoDonald", email="pato-directional@example.com", password="test1234")
         self.movie = Movie.objects.create(author=self.julian, title_english="Directional Movie", type=Movie.MOVIE)
         self.julian_hernandez.profile.visibility = Profile.Visibility.PRIVATE
         self.julian_hernandez.profile.is_public = False
@@ -9577,6 +9578,7 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         Follow.objects.create(follower=self.julian, following=self.peck)
         Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.julian, status=Friendship.STATUS_ACCEPTED)
         Friendship.objects.create(requester=self.julian, user1=self.julian, user2=self.dennisse, status=Friendship.STATUS_ACCEPTED)
+        Friendship.objects.create(requester=self.julian, user1=self.julian, user2=self.pato_donald, status=Friendship.STATUS_ACCEPTED)
         Friendship.objects.create(requester=self.peck, user1=self.peck, user2=self.dennisse, status=Friendship.STATUS_ACCEPTED)
         UserVisibilityBlock.objects.create(owner=self.julian, blocked_user=self.peck)
 
@@ -9699,6 +9701,30 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.assertIn("Peck", self._usernames(self.client.get(reverse("user-search"), {"q": "Peck"})))
         self.client.force_authenticate(self.peck)
         self.assertNotIn("Julian", self._usernames(self.client.get(reverse("user-search"), {"q": "Julian"})))
+
+    def test_message_recipient_search_returns_eligible_friends_for_empty_terms(self):
+        self.client.force_authenticate(self.julian)
+
+        for params in ({}, {"q": ""}, {"q": "@"}, {"q": "  @  "}, {"q": "@", "search": "@"}):
+            with self.subTest(params=params):
+                response = self.client.get(reverse("message-recipient-search"), params)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                usernames = self._usernames(response)
+                self.assertIn("Dennisse", usernames)
+                self.assertIn("PatoDonald", usernames)
+                self.assertNotIn("Peck", usernames)
+
+        dennisse_response = self.client.get(reverse("message-recipient-search"), {"q": "de"})
+        self.assertEqual(self._usernames(dennisse_response), ["Dennisse"])
+
+        pato_response = self.client.get(reverse("message-recipient-search"), {"q": "P"})
+        self.assertIn("PatoDonald", self._usernames(pato_response))
+        self.assertNotIn("Peck", self._usernames(pato_response))
+
+        self.client.force_authenticate(self.peck)
+        peck_response = self.client.get(reverse("message-recipient-search"), {"q": "@"})
+        self.assertIn("Dennisse", self._usernames(peck_response))
+        self.assertNotIn("Julian", self._usernames(peck_response))
 
     def test_directed_message_creation_rejects_both_directions_without_side_effects(self):
         url = reverse("movie-comments", kwargs={"pk": self.movie.id})

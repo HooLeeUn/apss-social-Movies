@@ -1577,11 +1577,17 @@ class FriendMentionListView(ListAPIView):
 
 class MessageRecipientSearchView(FriendMentionListView):
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = filter_out_users_with_any_restriction(
+            User.objects.filter(
+                Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
+                | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
+            ),
+            self.request.user,
+        )
         query = UserSearchView._normalize_query(self.request.query_params.get("q"))
         if query:
             queryset = queryset.filter(username__icontains=query)
-        return queryset[: UserSearchView.RESULTS_LIMIT]
+        return queryset.select_related("profile").order_by("username").distinct()[: UserSearchView.RESULTS_LIMIT]
 
 
 class SocialFriendsListView(ListAPIView):
