@@ -12,3 +12,4 @@ tmdb_repair_retry_desde_valido_18000_utf8.csv
 movies_without_tmdb_id.csv
 tmdb_repair_cleared_report.csv
 tmdb_exports/
+staticfiles/
