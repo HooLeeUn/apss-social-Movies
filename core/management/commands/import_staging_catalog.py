@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from django.contrib.auth import get_user_model
 from django.core import serializers
 from django.core.management.base import BaseCommand, CommandError
 from django.core.management.color import no_style
@@ -22,14 +23,28 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("file", help="Path to the JSON catalog to import.")
         parser.add_argument(
+            "--author-username",
+            required=True,
+            help="Username of the existing user to assign to every imported movie.",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="Validate and report changes without writing to the database.",
         )
 
     def handle(self, *args, **options):
+        author_username = options["author_username"]
+        user_model = get_user_model()
+        try:
+            author = user_model.objects.get(username=author_username)
+        except user_model.DoesNotExist as exc:
+            raise CommandError(
+                f'El usuario "{author_username}" no existe en la base de datos destino.'
+            ) from exc
+
         document = self._read_document(options["file"])
-        objects = self._validate_document(document)
+        objects = self._validate_document(document, author)
         ids = [obj.pk for obj in objects]
         existing_ids = set(Movie.objects.filter(pk__in=ids).values_list("pk", flat=True))
         created = len(ids) - len(existing_ids)
@@ -54,7 +69,9 @@ class Command(BaseCommand):
             except DatabaseError as exc:
                 raise CommandError(f"No se pudo importar el catálogo: {exc}") from exc
 
-        self._write_summary(objects, created, updated, options["dry_run"])
+        self._write_summary(
+            objects, created, updated, options["dry_run"], author_username
+        )
 
     @staticmethod
     def _read_document(filename):
@@ -69,7 +86,7 @@ class Command(BaseCommand):
         except (OSError, UnicodeError) as exc:
             raise CommandError(f"No se pudo leer {path}: {exc}") from exc
 
-    def _validate_document(self, document):
+    def _validate_document(self, document, author):
         if not isinstance(document, dict):
             raise CommandError("El JSON debe contener un objeto en el nivel superior.")
         if document.get("schema_version") != self.SCHEMA_VERSION:
@@ -118,6 +135,11 @@ class Command(BaseCommand):
             raise CommandError(f"Hay campos incompatibles con Movie: {exc}") from exc
         objects = [item.object for item in deserialized]
 
+        # The exported foreign key belongs to the source database. Replace it
+        # before model validation so it never has to exist in the destination.
+        for obj in objects:
+            obj.author = author
+
         movie_count = sum(obj.type == Movie.MOVIE for obj in objects)
         series_count = sum(obj.type == Movie.SERIES for obj in objects)
         if movie_count != self.MOVIE_COUNT or series_count != self.SERIES_COUNT:
@@ -138,12 +160,13 @@ class Command(BaseCommand):
             for statement in statements:
                 cursor.execute(statement)
 
-    def _write_summary(self, objects, created, updated, dry_run):
+    def _write_summary(self, objects, created, updated, dry_run, author_username):
         prefix = "Dry-run completado" if dry_run else "Importación completada"
         self.stdout.write(self.style.SUCCESS(prefix))
         self.stdout.write(f"Registros procesados: {len(objects)}")
         self.stdout.write(f"Creados: {created}")
         self.stdout.write(f"Actualizados: {updated}")
+        self.stdout.write(f"Autor asignado: {author_username}")
         self.stdout.write(f"Películas: {sum(obj.type == Movie.MOVIE for obj in objects)}")
         self.stdout.write(f"Series: {sum(obj.type == Movie.SERIES for obj in objects)}")
         self.stdout.write(f"IDs mínimo y máximo: {min(obj.pk for obj in objects)}–{max(obj.pk for obj in objects)}")
