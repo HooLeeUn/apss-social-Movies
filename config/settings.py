@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -67,6 +68,7 @@ INSTALLED_APPS = [
     'core.apps.CoreConfig',
     'rest_framework.authtoken',
     'corsheaders',
+    'storages',
 ]
 
 MIDDLEWARE = [
@@ -164,6 +166,15 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+R2_SETTINGS = {
+    "access_key": os.environ.get("R2_ACCESS_KEY_ID", "").strip(),
+    "secret_key": os.environ.get("R2_SECRET_ACCESS_KEY", "").strip(),
+    "bucket_name": os.environ.get("R2_BUCKET_NAME", "").strip(),
+    "endpoint_url": os.environ.get("R2_ENDPOINT_URL", "").strip(),
+    "public_base_url": os.environ.get("R2_PUBLIC_BASE_URL", "").strip(),
+}
+R2_ENABLED = all(R2_SETTINGS.values())
+
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -173,8 +184,29 @@ STORAGES = {
     },
 }
 
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+if R2_ENABLED:
+    public_url = R2_SETTINGS["public_base_url"].rstrip("/")
+    parsed_public_url = urlparse(public_url)
+    custom_domain = f"{parsed_public_url.netloc}{parsed_public_url.path}".strip("/")
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "access_key": R2_SETTINGS["access_key"],
+            "secret_key": R2_SETTINGS["secret_key"],
+            "bucket_name": R2_SETTINGS["bucket_name"],
+            "endpoint_url": R2_SETTINGS["endpoint_url"],
+            "region_name": "auto",
+            "default_acl": None,
+            "querystring_auth": False,
+            "file_overwrite": False,
+            "addressing_style": "path",
+            "custom_domain": custom_domain,
+        },
+    }
+    MEDIA_URL = f"{public_url}/"
+else:
+    MEDIA_URL = "/media/"
+    MEDIA_ROOT = BASE_DIR / "media"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
