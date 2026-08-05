@@ -920,6 +920,11 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         return bool(user and user.is_authenticated and (user.is_staff or obj.user_id == user.id))
 
+
+class VideoCommentUploadSerializer(serializers.Serializer):
+    video = serializers.FileField(write_only=True)
+
+
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     target_user = serializers.PrimaryKeyRelatedField(read_only=True)

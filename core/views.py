@@ -36,7 +36,7 @@ from .serializers import (
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
-    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer,
+    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer,
 )
 from .models import (
     AppBranding,
@@ -1955,6 +1955,11 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = VideoCommentSerializer
     parser_classes = [MultiPartParser, FormParser]
 
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return VideoCommentUploadSerializer
+        return VideoCommentSerializer
+
     def get_permissions(self):
         if self.request.method in permissions.SAFE_METHODS:
             return [permissions.IsAuthenticated()]
@@ -1971,13 +1976,14 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
-        uploaded_file = request.FILES.get("video")
+        upload_serializer = self.get_serializer(data=request.data)
+        upload_serializer.is_valid(raise_exception=True)
+        uploaded_file = upload_serializer.validated_data["video"]
         metadata = validate_video_upload(uploaded_file)
-        serializer = self.get_serializer(data={})
-        serializer.is_valid(raise_exception=True)
-        instance = serializer.save(user=request.user, movie=movie, video=uploaded_file, **metadata)
-        headers = self.get_success_headers(serializer.data)
-        return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED, headers=headers)
+        instance = VideoComment.objects.create(user=request.user, movie=movie, video=uploaded_file, **metadata)
+        output_serializer = VideoCommentSerializer(instance, context=self.get_serializer_context())
+        headers = self.get_success_headers(output_serializer.data)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 
 class VideoCommentDetailView(generics.RetrieveDestroyAPIView):

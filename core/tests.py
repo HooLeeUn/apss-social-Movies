@@ -315,7 +315,7 @@ class PendingEmailChangeTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
         self.assertTrue(get_user_model().objects.filter(username="regressionuser").exists())
 
-from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer
+from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer, VideoCommentSerializer, VideoCommentUploadSerializer
 from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
@@ -9794,6 +9794,33 @@ class VideoCommentEndpointTests(TestCase):
     def _ffprobe(self, duration=10, fmt="mov,mp4,m4a,3gp,3g2,mj2", streams=True):
         data = {"format": {"duration": str(duration), "format_name": fmt}, "streams": ([{"codec_type": "video", "duration": str(duration)}] if streams else [])}
         return patch("core.video_comments.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr=""))
+
+    def test_upload_serializer_exposes_writable_video_field(self):
+        serializer = VideoCommentUploadSerializer()
+        self.assertIn("video", serializer.fields)
+        self.assertFalse(serializer.fields["video"].read_only)
+        self.assertTrue(serializer.fields["video"].write_only)
+
+    def test_response_serializer_does_not_expose_writable_video_field(self):
+        serializer = VideoCommentSerializer()
+        self.assertNotIn("video", serializer.fields)
+        self.assertIn("video_url", serializer.fields)
+        self.assertTrue(all(field.read_only for field in serializer.fields.values()))
+
+    def test_browsable_api_form_has_video_upload_field(self):
+        from core.views import MovieVideoCommentsListCreateView
+        factory_request = SimpleNamespace(method="POST")
+        view = MovieVideoCommentsListCreateView()
+        view.request = factory_request
+        serializer = view.get_serializer_class()()
+        self.assertIn("video", serializer.fields)
+        self.assertFalse(serializer.fields["video"].read_only)
+
+    def test_post_without_video_returns_400_on_video_field(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("video", response.data)
 
     def test_authenticated_user_can_upload_valid_video(self):
         self.client.force_authenticate(user=self.user)
