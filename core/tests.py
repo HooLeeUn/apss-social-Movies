@@ -16,6 +16,7 @@ from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
 from django.core.management import call_command
@@ -55,6 +56,7 @@ from core.models import (
     UserTypePreference,
     UserDailyFeedPool,
     UserNotification,
+    VideoComment,
 )
 
 
@@ -314,7 +316,7 @@ class PendingEmailChangeTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
         self.assertTrue(get_user_model().objects.filter(username="regressionuser").exists())
 
-from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer
+from core.serializers import CommentSerializer, MovieAutocompleteSerializer, MovieSearchLightSerializer, MovieSearchResultSerializer, VideoCommentSerializer, VideoCommentUploadSerializer
 from core.services import (
     remove_user_preferences_for_movie_rating,
     update_user_preferences_for_movie_rating,
@@ -9707,3 +9709,280 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         flags = {item["other_user"]["username"]: item["other_user"]["restricted_current_user"] for item in conversations}
         self.assertTrue(flags["Julian"])
         self.assertFalse(flags["Dennisse"])
+
+@override_settings(MEDIA_ROOT="/tmp/apss-test-media", VIDEO_COMMENT_MAX_SIZE_MB=1)
+class MoviePublicCommentOrderingTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = get_user_model().objects.create_user(username="owner_order", password="x")
+        self.catherine = get_user_model().objects.create_user(username="catherine_order", password="x")
+        self.julian = get_user_model().objects.create_user(username="julian_order", password="x")
+        self.zero = get_user_model().objects.create_user(username="zero_order", password="x")
+        self.movie = Movie.objects.create(author=self.owner, title_english="Order Movie", type=Movie.MOVIE, release_year=2024)
+        self.url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
+        self.client.force_authenticate(user=self.owner)
+
+    def _comment(self, user, body, created_at):
+        comment = Comment.objects.create(author=user, movie=self.movie, body=body)
+        Comment.objects.filter(pk=comment.pk).update(created_at=created_at)
+        comment.refresh_from_db()
+        return comment
+
+    def _ids(self, page_size=None):
+        url = self.url if page_size is None else f"{self.url}?page_size={page_size}"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return [item["id"] for item in response.data["results"]]
+
+    def test_author_with_more_followers_appears_first_even_when_older(self):
+        old = timezone.now() - timedelta(days=2)
+        new = timezone.now()
+        c = self._comment(self.catherine, "older popular", old)
+        j = self._comment(self.julian, "newer less popular", new)
+        Follow.objects.create(follower=self.owner, following=self.catherine)
+        Follow.objects.create(follower=self.zero, following=self.catherine)
+        Follow.objects.create(follower=self.catherine, following=self.julian)
+        self.assertEqual(self._ids()[:2], [c.id, j.id])
+
+    def test_tie_followers_uses_created_at_desc(self):
+        older = self._comment(self.catherine, "older", timezone.now() - timedelta(hours=1))
+        newer = self._comment(self.julian, "newer", timezone.now())
+        self.assertEqual(self._ids()[:2], [newer.id, older.id])
+
+    def test_tie_followers_and_created_at_uses_id_desc(self):
+        when = timezone.now()
+        first = self._comment(self.catherine, "first", when)
+        second = self._comment(self.julian, "second", when)
+        Comment.objects.filter(pk__in=[first.pk, second.pk]).update(created_at=when)
+        self.assertEqual(self._ids()[:2], [second.id, first.id])
+
+    def test_user_without_followers_still_appears(self):
+        comment = self._comment(self.zero, "no followers", timezone.now())
+        self.assertIn(comment.id, self._ids())
+
+    def test_order_is_applied_before_pagination(self):
+        popular = self._comment(self.catherine, "popular", timezone.now() - timedelta(days=10))
+        self._comment(self.julian, "recent", timezone.now())
+        Follow.objects.create(follower=self.owner, following=self.catherine)
+        self.assertEqual(self._ids(page_size=1), [popular.id])
+
+    def test_directed_comments_keep_existing_structure_and_order(self):
+        friend = self.julian
+        Friendship.objects.create(requester=self.owner, user1=self.owner, user2=friend, status=Friendship.STATUS_ACCEPTED)
+        older = Comment.objects.create(author=self.owner, target_user=friend, movie=self.movie, body=f"hola @{friend.username}", visibility=Comment.VISIBILITY_MENTIONED)
+        newer = Comment.objects.create(author=friend, target_user=self.owner, movie=self.movie, body=f"hola @{self.owner.username}", visibility=Comment.VISIBILITY_MENTIONED)
+        response = self.client.get(reverse("movie-directed-conversation-messages", kwargs={"pk": self.movie.pk, "username": friend.username}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(response.data["results"]), 2)
+        self.assertIn("id", response.data["results"][0])
+        self.assertEqual([item["id"] for item in response.data["results"][:2]], [newer.id, older.id])
+
+
+@override_settings(MEDIA_ROOT="/tmp/apss-test-media", VIDEO_COMMENT_MAX_SIZE_MB=1)
+class VideoCommentEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(username="video_owner", password="x")
+        self.other = get_user_model().objects.create_user(username="video_other", password="x")
+        self.staff = get_user_model().objects.create_user(username="video_staff", password="x", is_staff=True)
+        self.movie = Movie.objects.create(author=self.user, title_english="Video Movie", type=Movie.MOVIE, release_year=2025)
+        self.other_movie = Movie.objects.create(author=self.user, title_english="Other Video Movie", type=Movie.MOVIE, release_year=2025)
+        self.url = reverse("movie-video-comments", kwargs={"pk": self.movie.pk})
+
+    def _upload(self, name="clip.mp4", content=b"video", content_type="video/mp4"):
+        return SimpleUploadedFile(name, content, content_type=content_type)
+
+    def _ffprobe(self, duration=10, fmt="mov,mp4,m4a,3gp,3g2,mj2", streams=True):
+        data = {"format": {"duration": str(duration), "format_name": fmt}, "streams": ([{"codec_type": "video", "duration": str(duration)}] if streams else [])}
+        return patch("core.video_comments.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr=""))
+
+    def test_upload_serializer_exposes_writable_video_field(self):
+        serializer = VideoCommentUploadSerializer()
+        self.assertIn("video", serializer.fields)
+        self.assertFalse(serializer.fields["video"].read_only)
+        self.assertTrue(serializer.fields["video"].write_only)
+
+    def test_response_serializer_does_not_expose_writable_video_field(self):
+        serializer = VideoCommentSerializer()
+        self.assertNotIn("video", serializer.fields)
+        self.assertIn("video_url", serializer.fields)
+        self.assertTrue(all(field.read_only for field in serializer.fields.values()))
+
+    def test_browsable_api_form_has_video_upload_field(self):
+        from core.views import MovieVideoCommentsListCreateView
+        factory_request = SimpleNamespace(method="POST")
+        view = MovieVideoCommentsListCreateView()
+        view.request = factory_request
+        serializer = view.get_serializer_class()()
+        self.assertIn("video", serializer.fields)
+        self.assertFalse(serializer.fields["video"].read_only)
+
+    def test_post_without_video_returns_400_on_video_field(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("video", response.data)
+
+    def test_authenticated_user_can_upload_valid_video(self):
+        self.client.force_authenticate(user=self.user)
+        with self._ffprobe():
+            response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(VideoComment.objects.count(), 1)
+        self.assertEqual(response.data["user"]["id"], self.user.id)
+
+    def test_anonymous_upload_returns_401(self):
+        response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_payload_user_cannot_impersonate_author(self):
+        self.client.force_authenticate(user=self.user)
+        with self._ffprobe():
+            response = self.client.post(self.url, {"user": self.other.id, "video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(VideoComment.objects.get().user_id, self.user.id)
+
+    def test_missing_movie_returns_404_before_file_validation(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(reverse("movie-video-comments", kwargs={"pk": 999999}), {"video": self._upload(b"bad")}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_long_video_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        with self._ffprobe(duration=21):
+            response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_empty_file_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {"video": self._upload(content=b"")}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_file_without_video_track_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        with self._ffprobe(streams=False):
+            response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_mime_or_extension_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {"video": self._upload(name="clip.txt", content_type="text/plain")}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_file_over_size_limit_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {"video": self._upload(content=b"x" * (1024 * 1024 + 1))}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_validation_error_leaves_no_record_or_file(self):
+        self.client.force_authenticate(user=self.user)
+        before = set(Path("/tmp/apss-test-media").glob("video_comments/**/*")) if Path("/tmp/apss-test-media").exists() else set()
+        response = self.client.post(self.url, {"video": self._upload(content=b"")}, format="multipart")
+        after = set(Path("/tmp/apss-test-media").glob("video_comments/**/*")) if Path("/tmp/apss-test-media").exists() else set()
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(VideoComment.objects.count(), 0)
+        self.assertEqual(before, after)
+
+    def test_listing_filters_by_movie(self):
+        VideoComment.objects.create(user=self.user, movie=self.movie, video="video_comments/a.mp4", duration_seconds=1, mime_type="video/mp4", file_size=1)
+        VideoComment.objects.create(user=self.user, movie=self.other_movie, video="video_comments/b.mp4", duration_seconds=1, mime_type="video/mp4", file_size=1)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(len(response.data["results"]), 1)
+
+    def test_videos_order_by_followers_date_and_id_before_pagination(self):
+        older_popular = VideoComment.objects.create(user=self.other, movie=self.movie, video="video_comments/a.mp4", duration_seconds=1, mime_type="video/mp4", file_size=1)
+        newer = VideoComment.objects.create(user=self.user, movie=self.movie, video="video_comments/b.mp4", duration_seconds=1, mime_type="video/mp4", file_size=1)
+        VideoComment.objects.filter(pk=older_popular.pk).update(created_at=timezone.now() - timedelta(days=1))
+        Follow.objects.create(follower=self.user, following=self.other)
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"{self.url}?page_size=1")
+        self.assertEqual([item["id"] for item in response.data["results"]], [older_popular.id])
+
+    def test_only_author_or_staff_can_delete_and_file_is_deleted(self):
+        self.client.force_authenticate(user=self.user)
+        with self._ffprobe():
+            response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        obj = VideoComment.objects.get()
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk})).status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(user=self.staff)
+        delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(VideoComment.objects.count(), 0)
+
+    def test_page_serialization_avoids_n_plus_one(self):
+        for idx in range(3):
+            VideoComment.objects.create(user=self.user, movie=self.movie, video=f"video_comments/{idx}.mp4", duration_seconds=1, mime_type="video/mp4", file_size=1)
+        self.client.force_authenticate(user=self.user)
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertLessEqual(len(ctx), 6)
+
+    def test_parse_realistic_ffprobe_output(self):
+        from core.video_comments import parse_ffprobe_metadata
+        metadata = parse_ffprobe_metadata(json.dumps({"format": {"duration": "12.34", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": [{"codec_type": "video"}]}))
+        self.assertEqual(metadata["duration_seconds"], 12.34)
+
+    def _create_admin_video_comment(self, name="admin_clip.mp4"):
+        video_comment = VideoComment(
+            user=self.user,
+            movie=self.movie,
+            duration_seconds=1,
+            mime_type="video/mp4",
+            file_size=5,
+        )
+        video_comment.video.save(name, ContentFile(b"video"), save=True)
+        return video_comment
+
+    def test_video_comment_registered_in_admin(self):
+        from django.contrib import admin as django_admin
+        from core.admin import VideoCommentAdmin
+        self.assertIsInstance(django_admin.site._registry[VideoComment], VideoCommentAdmin)
+
+    def test_video_comment_admin_changelist_loads(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video", email="admin-video@example.com", password="x")
+        self.client.force_login(admin_user)
+        self._create_admin_video_comment()
+        response = self.client.get(reverse("admin:core_videocomment_changelist"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "video/mp4")
+
+    def test_video_comment_admin_individual_delete_removes_file(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video_delete", email="admin-video-delete@example.com", password="x")
+        self.client.force_login(admin_user)
+        video_comment = self._create_admin_video_comment("admin_single.mp4")
+        storage = video_comment.video.storage
+        name = video_comment.video.name
+        self.assertTrue(storage.exists(name))
+        response = self.client.post(
+            reverse("admin:core_videocomment_delete", args=[video_comment.pk]),
+            {"post": "yes"},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(VideoComment.objects.filter(pk=video_comment.pk).exists())
+        self.assertFalse(storage.exists(name))
+
+    def test_video_comment_admin_bulk_delete_removes_files(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video_bulk", email="admin-video-bulk@example.com", password="x")
+        self.client.force_login(admin_user)
+        first = self._create_admin_video_comment("admin_bulk_1.mp4")
+        second = self._create_admin_video_comment("admin_bulk_2.mp4")
+        first_name = first.video.name
+        second_name = second.video.name
+        storage = first.video.storage
+        response = self.client.post(
+            reverse("admin:core_videocomment_changelist"),
+            {
+                "action": "delete_selected",
+                "_selected_action": [str(first.pk), str(second.pk)],
+                "post": "yes",
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(VideoComment.objects.filter(pk__in=[first.pk, second.pk]).exists())
+        self.assertFalse(storage.exists(first_name))
+        self.assertFalse(storage.exists(second_name))

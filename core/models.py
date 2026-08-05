@@ -1,4 +1,6 @@
+import os
 import re
+import uuid
 import secrets
 import hashlib
 import unicodedata
@@ -57,6 +59,15 @@ def build_genre_key(value):
     if not genres:
         return None
     return "|".join(genres)
+
+
+def video_comment_upload_to(instance, filename):
+    extension = os.path.splitext(filename or "")[1].lower()
+    if extension not in {".mp4", ".mov", ".webm"}:
+        extension = ".mp4"
+    movie_id = instance.movie_id or "unassigned_movie"
+    user_id = instance.user_id or "unassigned_user"
+    return f"video_comments/{movie_id}/{user_id}/{uuid.uuid4().hex}{extension}"
 
 class PostQuerySet(models.QuerySet):
 
@@ -415,6 +426,8 @@ class Movie(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
+            models.Index(fields=["type", "release_year", "id"], name="movie_type_year_id_idx"),
+            models.Index(fields=["genre_key", "type", "release_year", "id"], name="movie_genre_type_year_id_idx"),
             models.Index(fields=["title_english", "release_year", "id"], name="movie_title_en_auto_idx"),
             models.Index(fields=["title_spanish", "release_year", "id"], name="movie_title_es_auto_idx"),
             models.Index(fields=["release_year", "id"], name="movie_year_auto_idx"),
@@ -536,6 +549,9 @@ class MovieRating(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["user", "movie"], name="unique_rating_per_user_per_movie")
+        ]
+        indexes = [
+            models.Index(fields=["movie", "user"], name="movierating_movie_user_idx"),
         ]
 
     def __str__(self):
@@ -777,8 +793,8 @@ class UserDailyFeedPool(models.Model):
             models.UniqueConstraint(fields=["user", "pool_date"], name="unique_user_daily_feed_pool"),
         ]
         indexes = [
-            models.Index(fields=["user", "pool_date"]),
-            models.Index(fields=["expires_at"]),
+            models.Index(fields=["user", "pool_date"], name="core_userda_user_id_e3c496_idx"),
+            models.Index(fields=["expires_at"], name="core_userda_expires_46e93d_idx"),
         ]
 
     def __str__(self):
@@ -801,9 +817,9 @@ class UserDailyFeedCandidate(models.Model):
             models.UniqueConstraint(fields=["pool", "movie"], name="unique_movie_per_daily_pool"),
         ]
         indexes = [
-            models.Index(fields=["pool", "base_rank"]),
-            models.Index(fields=["pool", "-base_score"]),
-            models.Index(fields=["movie"]),
+            models.Index(fields=["pool", "base_rank"], name="core_userda_pool_id_640629_idx"),
+            models.Index(fields=["pool", "-base_score"], name="core_userda_pool_id_5cc5e7_idx"),
+            models.Index(fields=["movie"], name="core_userda_movie_i_148044_idx"),
         ]
 
     def __str__(self):
@@ -1074,8 +1090,8 @@ class PendingUserRegistration(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["username", "expires_at"]),
-            models.Index(fields=["email", "expires_at"]),
+            models.Index(fields=["username", "expires_at"], name="core_pendin_usernam_7af75a_idx"),
+            models.Index(fields=["email", "expires_at"], name="core_pendin_email_002753_idx"),
         ]
         ordering = ["-created_at", "-id"]
 
@@ -1112,7 +1128,7 @@ class PendingEmailChange(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
-        indexes = [models.Index(fields=["new_email", "expires_at"])]
+        indexes = [models.Index(fields=["new_email", "expires_at"], name="core_pendin_new_ema_1210a5_idx")]
 
     @staticmethod
     def hash_token(token):
@@ -1261,6 +1277,36 @@ class Comment(models.Model):
             if match.group("username").lower() == target_username:
                 return True
         return False
+
+
+class VideoComment(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="video_comments")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="video_comments")
+    video = models.FileField(upload_to=video_comment_upload_to)
+    duration_seconds = models.FloatField()
+    mime_type = models.CharField(max_length=100)
+    file_size = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["movie", "-created_at", "-id"], name="video_comment_movie_order_idx"),
+            models.Index(fields=["user", "-created_at"], name="video_comment_user_order_idx"),
+        ]
+
+    def delete(self, *args, **kwargs):
+        storage = self.video.storage if self.video else None
+        name = self.video.name if self.video else None
+        result = super().delete(*args, **kwargs)
+        if storage and name and storage.exists(name):
+            storage.delete(name)
+        return result
+
+    def __str__(self):
+        return f"VideoComment({self.user_id} -> {self.movie_id})"
+
 
 class CommentReaction(models.Model):
     REACT_LIKE = "like"

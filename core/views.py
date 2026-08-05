@@ -36,7 +36,7 @@ from .serializers import (
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
-    MovieCreditsSerializer, TMDbPersonBriefSerializer,
+    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer,
 )
 from .models import (
     AppBranding,
@@ -63,8 +63,10 @@ from .models import (
     UserVisibilityBlock,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
+    VideoComment,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
+from .video_comments import validate_video_upload
 from .tmdb import TMDbServiceError
 from .tmdb_credits import build_local_credits_payload, build_minimal_person_payload, get_movie_credits_payload, get_person_payload
 from .trailers import get_movie_trailer_payload
@@ -1868,7 +1870,8 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at", "-id")
+            .annotate(followers_count=Count("author__followers", distinct=True))
+            .order_by("-followers_count", "-created_at", "-id")
         )
         queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
         return annotate_comments_for_user(queryset, self.request.user)
@@ -1946,6 +1949,56 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
             is_read=is_read,
         )
 
+
+
+class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
+    serializer_class = VideoCommentSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return VideoCommentUploadSerializer
+        return VideoCommentSerializer
+
+    def get_permissions(self):
+        if self.request.method in permissions.SAFE_METHODS:
+            return [permissions.IsAuthenticated()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        queryset = (
+            VideoComment.objects.filter(movie_id=self.kwargs["pk"])
+            .select_related("user", "user__profile", "movie")
+            .annotate(followers_count=Count("user__followers", distinct=True))
+            .order_by("-followers_count", "-created_at", "-id")
+        )
+        return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
+
+    def create(self, request, *args, **kwargs):
+        movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
+        upload_serializer = self.get_serializer(data=request.data)
+        upload_serializer.is_valid(raise_exception=True)
+        uploaded_file = upload_serializer.validated_data["video"]
+        metadata = validate_video_upload(uploaded_file)
+        instance = VideoComment.objects.create(user=request.user, movie=movie, video=uploaded_file, **metadata)
+        output_serializer = VideoCommentSerializer(instance, context=self.get_serializer_context())
+        headers = self.get_success_headers(output_serializer.data)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
+    serializer_class = VideoCommentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = VideoComment.objects.select_related("user", "user__profile", "movie")
+        return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
+
+    def perform_destroy(self, instance):
+        if not (self.request.user.is_staff or instance.user_id == self.request.user.id):
+            raise PermissionDenied("You cannot delete this video comment.")
+        instance.delete()
 
 class PostCommentsListCreateView(MovieCommentsListCreateView):
     deprecated_warning = '299 - "Deprecated endpoint. Use /api/movies/<pk>/comments/ instead."'
