@@ -1,6 +1,8 @@
 import re
 import secrets
 import hashlib
+import os
+import uuid
 import unicodedata
 from datetime import timedelta
 
@@ -524,6 +526,12 @@ class StreamingProviderLink(models.Model):
 
     def __str__(self):
         return f"{self.provider_name} ({self.country_code})"
+
+
+def video_comment_upload_to(instance, filename):
+    _, extension = os.path.splitext(filename or "")
+    extension = (extension or ".bin").lower()
+    return f"video_comments/{instance.movie_id}/{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
 class MovieRating(models.Model):
@@ -1174,6 +1182,35 @@ class UserVisibilityBlock(models.Model):
         self.full_clean()
         return super().save(*args, **kwargs)
 
+
+
+class VideoComment(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="video_comments")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="video_comments")
+    video = models.FileField(upload_to=video_comment_upload_to)
+    duration_seconds = models.DecimalField(max_digits=6, decimal_places=3)
+    mime_type = models.CharField(max_length=100)
+    file_size = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["movie", "-created_at", "-id"], name="video_comment_movie_order_idx"),
+            models.Index(fields=["user", "-created_at", "-id"], name="video_comment_user_order_idx"),
+        ]
+
+    def delete(self, *args, **kwargs):
+        storage = self.video.storage if self.video else None
+        name = self.video.name if self.video else None
+        result = super().delete(*args, **kwargs)
+        if storage and name:
+            storage.delete(name)
+        return result
+
+    def __str__(self):
+        return f"VideoComment(user={self.user_id}, movie={self.movie_id})"
 
 
 class CommentQuerySet(models.QuerySet):

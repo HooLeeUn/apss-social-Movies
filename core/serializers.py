@@ -1,4 +1,10 @@
 from datetime import date
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -16,6 +22,7 @@ from .models import (
     Movie,
     MovieListItem,
     MovieRecommendationItem,
+    VideoComment,
     PendingUserRegistration,
     normalize_email_address,
     Post,
@@ -877,6 +884,137 @@ class RegisterSerializer(serializers.ModelSerializer):
             **validated_data,
             password=make_password(password),
         )
+
+class VideoCommentAuthorSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "avatar"]
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class VideoCommentSerializer(serializers.ModelSerializer):
+    user = VideoCommentAuthorSerializer(read_only=True)
+    video_url = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VideoComment
+        fields = ["id", "user", "movie", "video", "video_url", "duration_seconds", "mime_type", "file_size", "created_at", "updated_at", "can_delete"]
+        read_only_fields = ["id", "user", "movie", "video_url", "duration_seconds", "mime_type", "file_size", "created_at", "updated_at", "can_delete"]
+        extra_kwargs = {"video": {"write_only": True, "required": True}}
+
+    def get_video_url(self, obj):
+        if not obj.video:
+            return None
+        request = self.context.get("request")
+        url = obj.video.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_can_delete(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return bool(user and user.is_authenticated and (user.is_staff or obj.user_id == user.id))
+
+    def validate_video(self, uploaded_file):
+        return validate_video_comment_upload(uploaded_file)
+
+    def validate(self, attrs):
+        video = attrs.get("video")
+        if video is not None:
+            attrs["video_metadata"] = video.video_metadata
+        return attrs
+
+    def create(self, validated_data):
+        metadata = validated_data.pop("video_metadata")
+        return VideoComment.objects.create(
+            **validated_data,
+            duration_seconds=metadata["duration_seconds"],
+            mime_type=metadata["mime_type"],
+            file_size=metadata["file_size"],
+        )
+
+
+def validate_video_comment_upload(uploaded_file):
+    if not uploaded_file or uploaded_file.size == 0:
+        raise serializers.ValidationError("El archivo de video está vacío o no se pudo leer.")
+
+    max_size = settings.VIDEO_COMMENT_MAX_SIZE_MB * 1024 * 1024
+    if uploaded_file.size > max_size:
+        raise serializers.ValidationError(f"El video no puede superar {settings.VIDEO_COMMENT_MAX_SIZE_MB} MB.")
+
+    extension = os.path.splitext(uploaded_file.name or "")[1].lower()
+    if extension not in settings.VIDEO_COMMENT_ALLOWED_EXTENSIONS:
+        raise serializers.ValidationError("La extensión del video no está permitida.")
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension or ".video") as tmp:
+            for chunk in uploaded_file.chunks():
+                tmp.write(chunk)
+            temp_path = tmp.name
+
+        ffprobe = shutil.which(settings.VIDEO_COMMENT_FFPROBE_PATH) or settings.VIDEO_COMMENT_FFPROBE_PATH
+        command = [
+            ffprobe, "-v", "error", "-print_format", "json",
+            "-show_format", "-show_streams", temp_path,
+        ]
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+        except FileNotFoundError:
+            raise serializers.ValidationError("No se pudo validar la duración del video porque ffprobe no está disponible en el servidor.")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
+            raise serializers.ValidationError("El archivo no es un video válido o está corrupto.")
+
+        try:
+            probe = json.loads(result.stdout)
+            streams = probe.get("streams", [])
+            video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+            duration_raw = (video_stream or {}).get("duration") or probe.get("format", {}).get("duration")
+            format_name = probe.get("format", {}).get("format_name", "")
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("No se pudo leer la metadata del video.")
+
+        if not video_stream:
+            raise serializers.ValidationError("El archivo debe contener una pista de video.")
+        if duration_raw in (None, "N/A"):
+            raise serializers.ValidationError("No se pudo determinar la duración del video.")
+
+        duration = Decimal(str(duration_raw))
+        max_duration = Decimal(str(settings.VIDEO_COMMENT_MAX_DURATION_SECONDS)) + Decimal(str(settings.VIDEO_COMMENT_DURATION_TOLERANCE_SECONDS))
+        if duration > max_duration:
+            raise serializers.ValidationError(f"El video no puede durar más de {settings.VIDEO_COMMENT_MAX_DURATION_SECONDS} segundos.")
+
+        detected_mime = _mime_type_from_ffprobe(format_name, extension)
+        if detected_mime not in settings.VIDEO_COMMENT_ALLOWED_MIME_TYPES:
+            raise serializers.ValidationError("El formato real del video no está permitido.")
+
+        uploaded_file.seek(0)
+        uploaded_file.video_metadata = {"duration_seconds": duration, "mime_type": detected_mime, "file_size": uploaded_file.size}
+        return uploaded_file
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _mime_type_from_ffprobe(format_name, extension):
+    formats = {part.strip().lower() for part in (format_name or "").split(",") if part.strip()}
+    if "mp4" in formats or "mov" in formats or "quicktime" in formats:
+        return "video/quicktime" if extension == ".mov" else "video/mp4"
+    if "matroska" in formats or "webm" in formats:
+        return "video/webm"
+    return ""
+
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)

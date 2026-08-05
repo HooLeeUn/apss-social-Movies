@@ -26,7 +26,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.test import APIClient
 
 from core.feed_pool import DailyFeedPoolService
@@ -55,6 +55,7 @@ from core.models import (
     UserTypePreference,
     UserDailyFeedPool,
     UserNotification,
+    VideoComment,
 )
 
 
@@ -9707,3 +9708,149 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         flags = {item["other_user"]["username"]: item["other_user"]["restricted_current_user"] for item in conversations}
         self.assertTrue(flags["Julian"])
         self.assertFalse(flags["Dennisse"])
+
+
+
+class MoviePublicCommentOrderingTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="order_owner", password="x")
+        self.popular = User.objects.create_user(username="order_popular", password="x")
+        self.recent = User.objects.create_user(username="order_recent", password="x")
+        self.tie_a = User.objects.create_user(username="order_tie_a", password="x")
+        self.tie_b = User.objects.create_user(username="order_tie_b", password="x")
+        self.target = User.objects.create_user(username="order_target", password="x")
+        self.movie = Movie.objects.create(author=self.owner, title_english="Ordering", type=Movie.MOVIE)
+        self.url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
+
+    def _comment(self, author, body, created_at, visibility=Comment.VISIBILITY_PUBLIC, target_user=None):
+        comment = Comment.objects.create(author=author, movie=self.movie, body=body, visibility=visibility, target_user=target_user)
+        Comment.objects.filter(pk=comment.pk).update(created_at=created_at)
+        comment.refresh_from_db()
+        return comment
+
+    def test_more_followers_wins_even_when_older(self):
+        for index in range(3):
+            follower = get_user_model().objects.create_user(username=f"popular_follower_{index}", password="x")
+            Follow.objects.create(follower=follower, following=self.popular)
+        old = self._comment(self.popular, "popular", timezone.now() - timedelta(days=4))
+        self._comment(self.recent, "recent", timezone.now())
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], old.id)
+
+    def test_ties_use_created_at_then_id_and_keep_users_without_followers(self):
+        older = self._comment(self.tie_a, "older", timezone.now() - timedelta(hours=1))
+        newer = self._comment(self.tie_b, "newer", timezone.now())
+        same_time = timezone.now() - timedelta(days=1)
+        low_id = self._comment(self.recent, "low", same_time)
+        high_id = self._comment(self.owner, "high", same_time)
+
+        response = self.client.get(self.url)
+        ids = [item["id"] for item in response.data["results"]]
+
+        self.assertLess(ids.index(newer.id), ids.index(older.id))
+        self.assertLess(ids.index(high_id.id), ids.index(low_id.id))
+        self.assertIn(older.id, ids)
+
+    @override_settings(REST_FRAMEWORK={"DEFAULT_PAGINATION_CLASS": "core.pagination.DefaultPagination", "PAGE_SIZE": 1})
+    def test_order_is_applied_before_pagination(self):
+        follower = get_user_model().objects.create_user(username="first_page_follower", password="x")
+        Follow.objects.create(follower=follower, following=self.popular)
+        expected = self._comment(self.popular, "expected", timezone.now() - timedelta(days=2))
+        self._comment(self.recent, "latest", timezone.now())
+
+        response = self.client.get(self.url, {"page_size": 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], expected.id)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_directed_comments_keep_existing_order(self):
+        older = self._comment(self.owner, "older directed", timezone.now() - timedelta(days=1), Comment.VISIBILITY_MENTIONED, self.target)
+        newer = self._comment(self.target, "newer directed", timezone.now(), Comment.VISIBILITY_MENTIONED, self.owner)
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(reverse("movie-directed-comments", kwargs={"pk": self.movie.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(newer.id, response.data["results"][0]["message_ids"])
+
+
+@override_settings(DEFAULT_FILE_STORAGE="django.core.files.storage.FileSystemStorage", MEDIA_ROOT="/tmp/qnext-video-comment-tests")
+class VideoCommentEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(username="video_author", password="x")
+        self.other = User.objects.create_user(username="video_other", password="x")
+        self.movie = Movie.objects.create(author=self.user, title_english="Video Movie", type=Movie.MOVIE)
+        self.url = reverse("movie-video-comments", kwargs={"pk": self.movie.pk})
+
+    def _upload(self, name="clip.mp4", size=16):
+        return SimpleUploadedFile(name, b"0" * size, content_type="application/octet-stream")
+
+    def _valid_metadata(self, uploaded_file):
+        uploaded_file.video_metadata = {"duration_seconds": 10, "mime_type": "video/mp4", "file_size": uploaded_file.size}
+        return uploaded_file
+
+    @patch("core.serializers.validate_video_comment_upload")
+    def test_authenticated_user_uploads_valid_video_and_payload_user_is_ignored(self, validate_upload):
+        validate_upload.side_effect = self._valid_metadata
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {"user": self.other.pk, "video": self._upload()}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        video_comment = VideoComment.objects.get()
+        self.assertEqual(video_comment.user, self.user)
+        self.assertEqual(response.data["user"]["id"], self.user.id)
+
+    def test_unauthenticated_upload_is_rejected(self):
+        response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_movie_returns_404(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(reverse("movie-video-comments", kwargs={"pk": 999999}), {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch("core.serializers.validate_video_comment_upload")
+    def test_validation_error_leaves_no_record(self, validate_upload):
+        validate_upload.side_effect = serializers.ValidationError("El archivo no es un video válido o está corrupto.")
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(VideoComment.objects.count(), 0)
+
+    @patch("core.serializers.validate_video_comment_upload")
+    def test_listing_filters_movie_orders_and_paginates(self, validate_upload):
+        validate_upload.side_effect = self._valid_metadata
+        other_movie = Movie.objects.create(author=self.user, title_english="Other Video Movie", type=Movie.MOVIE)
+        popular = get_user_model().objects.create_user(username="video_popular", password="x")
+        follower = get_user_model().objects.create_user(username="video_follower", password="x")
+        Follow.objects.create(follower=follower, following=popular)
+        vc1 = VideoComment.objects.create(user=self.user, movie=self.movie, video="video_comments/a.mp4", duration_seconds=10, mime_type="video/mp4", file_size=10)
+        vc2 = VideoComment.objects.create(user=popular, movie=self.movie, video="video_comments/b.mp4", duration_seconds=10, mime_type="video/mp4", file_size=10)
+        VideoComment.objects.create(user=popular, movie=other_movie, video="video_comments/c.mp4", duration_seconds=10, mime_type="video/mp4", file_size=10)
+
+        response = self.client.get(self.url, {"page_size": 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], vc2.id)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_only_author_can_delete_and_file_is_removed(self):
+        storage_name = "video_comments/delete_me.mp4"
+        vc = VideoComment.objects.create(user=self.user, movie=self.movie, video=storage_name, duration_seconds=10, mime_type="video/mp4", file_size=10)
+        self.client.force_authenticate(user=self.other)
+        response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": vc.pk}))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.user)
+        with patch.object(vc.video.storage, "delete") as storage_delete:
+            response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": vc.pk}))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        storage_delete.assert_called_once_with(storage_name)

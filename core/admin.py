@@ -21,6 +21,7 @@ from .models import (
     UserTypePreference,
     UserDirectorPreference,
     StreamingProviderLink,
+    VideoComment,
 )
 
 
@@ -400,3 +401,12 @@ class StreamingProviderLinkAdmin(admin.ModelAdmin):
         "movie__title_spanish",
     )
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(VideoComment)
+class VideoCommentAdmin(admin.ModelAdmin):
+    list_display = ("id", "movie", "user", "duration_seconds", "mime_type", "file_size", "created_at")
+    search_fields = ("user__username", "movie__title_english", "movie__title_spanish")
+    list_filter = ("mime_type", "created_at")
+    autocomplete_fields = ("movie", "user")
+    list_select_related = ("movie", "user")

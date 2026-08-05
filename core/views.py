@@ -34,6 +34,7 @@ from .serializers import (
     ProfileFavoriteMovieSerializer, UserTasteProfileInspectSerializer, WeeklyRecommendationItemSerializer,
     PrivacySettingsSerializer, UserVisibilityBlockSerializer, CreateUserVisibilityBlockSerializer, UserSearchSerializer,
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
+    VideoCommentSerializer,
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
     MovieCreditsSerializer, TMDbPersonBriefSerializer,
@@ -61,6 +62,7 @@ from .models import (
     UserTypePreference,
     UserNotification,
     UserVisibilityBlock,
+    VideoComment,
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
 )
@@ -1868,7 +1870,8 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
-            .order_by("-created_at", "-id")
+            .annotate(followers_count=Count("author__followers", distinct=True))
+            .order_by("-followers_count", "-created_at", "-id")
         )
         queryset = filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="author")
         return annotate_comments_for_user(queryset, self.request.user)
@@ -1945,6 +1948,49 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
             visibility=visibility,
             is_read=is_read,
         )
+
+
+class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
+    serializer_class = VideoCommentSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get_queryset(self):
+        get_object_or_404(Movie, pk=self.kwargs["pk"])
+        queryset = (
+            VideoComment.objects.filter(movie_id=self.kwargs["pk"])
+            .select_related("user", "user__profile", "movie")
+            .annotate(followers_count=Count("user__followers", distinct=True))
+            .order_by("-followers_count", "-created_at", "-id")
+        )
+        return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
+
+    def perform_create(self, serializer):
+        movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
+        serializer.save(user=self.request.user, movie=movie)
+
+
+class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
+    serializer_class = VideoCommentSerializer
+    http_method_names = ["get", "delete", "head", "options"]
+
+    def get_permissions(self):
+        if self.request.method == "DELETE":
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get_queryset(self):
+        queryset = VideoComment.objects.select_related("user", "user__profile", "movie")
+        return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
+
+    def perform_destroy(self, instance):
+        if not (self.request.user.is_staff or instance.user_id == self.request.user.id):
+            raise PermissionDenied("Solo el autor puede eliminar este video comentario.")
+        instance.delete()
 
 
 class PostCommentsListCreateView(MovieCommentsListCreateView):
