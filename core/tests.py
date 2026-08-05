@@ -16,6 +16,7 @@ from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
 from django.core.management import call_command
@@ -9923,3 +9924,65 @@ class VideoCommentEndpointTests(TestCase):
         from core.video_comments import parse_ffprobe_metadata
         metadata = parse_ffprobe_metadata(json.dumps({"format": {"duration": "12.34", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": [{"codec_type": "video"}]}))
         self.assertEqual(metadata["duration_seconds"], 12.34)
+
+    def _create_admin_video_comment(self, name="admin_clip.mp4"):
+        video_comment = VideoComment(
+            user=self.user,
+            movie=self.movie,
+            duration_seconds=1,
+            mime_type="video/mp4",
+            file_size=5,
+        )
+        video_comment.video.save(name, ContentFile(b"video"), save=True)
+        return video_comment
+
+    def test_video_comment_registered_in_admin(self):
+        from django.contrib import admin as django_admin
+        from core.admin import VideoCommentAdmin
+        self.assertIsInstance(django_admin.site._registry[VideoComment], VideoCommentAdmin)
+
+    def test_video_comment_admin_changelist_loads(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video", email="admin-video@example.com", password="x")
+        self.client.force_login(admin_user)
+        self._create_admin_video_comment()
+        response = self.client.get(reverse("admin:core_videocomment_changelist"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "video/mp4")
+
+    def test_video_comment_admin_individual_delete_removes_file(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video_delete", email="admin-video-delete@example.com", password="x")
+        self.client.force_login(admin_user)
+        video_comment = self._create_admin_video_comment("admin_single.mp4")
+        storage = video_comment.video.storage
+        name = video_comment.video.name
+        self.assertTrue(storage.exists(name))
+        response = self.client.post(
+            reverse("admin:core_videocomment_delete", args=[video_comment.pk]),
+            {"post": "yes"},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(VideoComment.objects.filter(pk=video_comment.pk).exists())
+        self.assertFalse(storage.exists(name))
+
+    def test_video_comment_admin_bulk_delete_removes_files(self):
+        admin_user = get_user_model().objects.create_superuser(username="admin_video_bulk", email="admin-video-bulk@example.com", password="x")
+        self.client.force_login(admin_user)
+        first = self._create_admin_video_comment("admin_bulk_1.mp4")
+        second = self._create_admin_video_comment("admin_bulk_2.mp4")
+        first_name = first.video.name
+        second_name = second.video.name
+        storage = first.video.storage
+        response = self.client.post(
+            reverse("admin:core_videocomment_changelist"),
+            {
+                "action": "delete_selected",
+                "_selected_action": [str(first.pk), str(second.pk)],
+                "post": "yes",
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(VideoComment.objects.filter(pk__in=[first.pk, second.pk]).exists())
+        self.assertFalse(storage.exists(first_name))
+        self.assertFalse(storage.exists(second_name))
