@@ -21,6 +21,7 @@ from .models import (
     UserTypePreference,
     UserDirectorPreference,
     StreamingProviderLink,
+    VideoComment,
 )
 
 
@@ -369,6 +370,41 @@ class AppBrandingAdmin(admin.ModelAdmin):
     @admin.display(description="Preview")
     def poster_placeholder_preview(self, obj):
         return self._render_image_preview(obj.poster_placeholder)
+
+
+@admin.register(VideoComment)
+class VideoCommentAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "movie",
+        "duration_seconds",
+        "mime_type",
+        "file_size",
+        "created_at",
+    )
+    list_filter = ("mime_type", "created_at")
+    search_fields = ("user__username", "movie__title_spanish", "movie__title_english")
+    readonly_fields = (
+        "user",
+        "movie",
+        "created_at",
+        "updated_at",
+        "file_size",
+        "duration_seconds",
+        "mime_type",
+    )
+    list_select_related = ("user", "movie")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("user", "movie")
+
+    def delete_model(self, request, obj):
+        obj.delete()
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset.select_related("user", "movie"):
+            obj.delete()
 
 
 @admin.register(StreamingProviderLink)
