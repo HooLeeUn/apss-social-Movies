@@ -9723,6 +9723,7 @@ class MoviePublicCommentOrderingTests(TestCase):
         self.target = User.objects.create_user(username="order_target", password="x")
         self.movie = Movie.objects.create(author=self.owner, title_english="Ordering", type=Movie.MOVIE)
         self.url = reverse("movie-comments", kwargs={"pk": self.movie.pk})
+        self.client.force_authenticate(user=self.owner)
 
     def _comment(self, author, body, created_at, visibility=Comment.VISIBILITY_PUBLIC, target_user=None):
         comment = Comment.objects.create(author=author, movie=self.movie, body=body, visibility=visibility, target_user=target_user)
@@ -9750,6 +9751,8 @@ class MoviePublicCommentOrderingTests(TestCase):
         high_id = self._comment(self.owner, "high", same_time)
 
         response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         ids = [item["id"] for item in response.data["results"]]
 
         self.assertLess(ids.index(newer.id), ids.index(older.id))
@@ -9770,9 +9773,21 @@ class MoviePublicCommentOrderingTests(TestCase):
         self.assertIsNotNone(response.data["next"])
 
     def test_directed_comments_keep_existing_order(self):
-        older = self._comment(self.owner, "older directed", timezone.now() - timedelta(days=1), Comment.VISIBILITY_MENTIONED, self.target)
-        newer = self._comment(self.target, "newer directed", timezone.now(), Comment.VISIBILITY_MENTIONED, self.owner)
-        self.client.force_authenticate(user=self.owner)
+        Friendship.objects.create(requester=self.owner, user1=self.owner, user2=self.target, status=Friendship.STATUS_ACCEPTED)
+        older = self._comment(
+            self.owner,
+            "older directed @order_target",
+            timezone.now() - timedelta(days=1),
+            Comment.VISIBILITY_MENTIONED,
+            self.target,
+        )
+        newer = self._comment(
+            self.target,
+            "newer directed @order_owner",
+            timezone.now(),
+            Comment.VISIBILITY_MENTIONED,
+            self.owner,
+        )
 
         response = self.client.get(reverse("movie-directed-comments", kwargs={"pk": self.movie.pk}))
 
@@ -9810,7 +9825,7 @@ class VideoCommentEndpointTests(TestCase):
 
     def test_unauthenticated_upload_is_rejected(self):
         response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_missing_movie_returns_404(self):
         self.client.force_authenticate(user=self.user)

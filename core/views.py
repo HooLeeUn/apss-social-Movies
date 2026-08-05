@@ -1954,6 +1954,10 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = VideoCommentSerializer
     parser_classes = [MultiPartParser, FormParser]
 
+    def create(self, request, *args, **kwargs):
+        get_object_or_404(Movie, pk=self.kwargs["pk"])
+        return super().create(request, *args, **kwargs)
+
     def get_permissions(self):
         if self.request.method == "POST":
             return [permissions.IsAuthenticated()]
