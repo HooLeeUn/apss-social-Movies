@@ -426,6 +426,8 @@ class Movie(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
+            models.Index(fields=["type", "release_year", "id"], name="movie_type_year_id_idx"),
+            models.Index(fields=["genre_key", "type", "release_year", "id"], name="movie_genre_type_year_id_idx"),
             models.Index(fields=["title_english", "release_year", "id"], name="movie_title_en_auto_idx"),
             models.Index(fields=["title_spanish", "release_year", "id"], name="movie_title_es_auto_idx"),
             models.Index(fields=["release_year", "id"], name="movie_year_auto_idx"),
@@ -547,6 +549,9 @@ class MovieRating(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["user", "movie"], name="unique_rating_per_user_per_movie")
+        ]
+        indexes = [
+            models.Index(fields=["movie", "user"], name="movierating_movie_user_idx"),
         ]
 
     def __str__(self):
@@ -788,8 +793,8 @@ class UserDailyFeedPool(models.Model):
             models.UniqueConstraint(fields=["user", "pool_date"], name="unique_user_daily_feed_pool"),
         ]
         indexes = [
-            models.Index(fields=["user", "pool_date"]),
-            models.Index(fields=["expires_at"]),
+            models.Index(fields=["user", "pool_date"], name="core_userda_user_id_e3c496_idx"),
+            models.Index(fields=["expires_at"], name="core_userda_expires_46e93d_idx"),
         ]
 
     def __str__(self):
@@ -812,9 +817,9 @@ class UserDailyFeedCandidate(models.Model):
             models.UniqueConstraint(fields=["pool", "movie"], name="unique_movie_per_daily_pool"),
         ]
         indexes = [
-            models.Index(fields=["pool", "base_rank"]),
-            models.Index(fields=["pool", "-base_score"]),
-            models.Index(fields=["movie"]),
+            models.Index(fields=["pool", "base_rank"], name="core_userda_pool_id_640629_idx"),
+            models.Index(fields=["pool", "-base_score"], name="core_userda_pool_id_5cc5e7_idx"),
+            models.Index(fields=["movie"], name="core_userda_movie_i_148044_idx"),
         ]
 
     def __str__(self):
@@ -1085,8 +1090,8 @@ class PendingUserRegistration(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["username", "expires_at"]),
-            models.Index(fields=["email", "expires_at"]),
+            models.Index(fields=["username", "expires_at"], name="core_pendin_usernam_7af75a_idx"),
+            models.Index(fields=["email", "expires_at"], name="core_pendin_email_002753_idx"),
         ]
         ordering = ["-created_at", "-id"]
 
@@ -1123,7 +1128,7 @@ class PendingEmailChange(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
-        indexes = [models.Index(fields=["new_email", "expires_at"])]
+        indexes = [models.Index(fields=["new_email", "expires_at"], name="core_pendin_new_ema_1210a5_idx")]
 
     @staticmethod
     def hash_token(token):
@@ -1330,12 +1335,10 @@ class UserNotification(models.Model):
     TYPE_PRIVATE_MESSAGE = "private_message"
     TYPE_PUBLIC_COMMENT_REACTION = "public_comment_reaction"
     TYPE_PRIVATE_COMMENT_REACTION = "private_comment_reaction"
-    TYPE_FRIEND_REQUEST_RECEIVED = "friend_request_received"
     TYPE_CHOICES = [
         (TYPE_PRIVATE_MESSAGE, "Private message"),
         (TYPE_PUBLIC_COMMENT_REACTION, "Public comment reaction"),
         (TYPE_PRIVATE_COMMENT_REACTION, "Private comment reaction"),
-        (TYPE_FRIEND_REQUEST_RECEIVED, "Friend request received"),
     ]
 
     TARGET_ACTIVITY = "activity"
