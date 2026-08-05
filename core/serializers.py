@@ -25,6 +25,7 @@ from .models import (
     UserTasteProfile,
     UserTypePreference,
     WeeklyRecommendationItem,
+    VideoComment,
 )
 
 # Importas tus modelos solo si los necesitas aquí.
@@ -877,6 +878,47 @@ class RegisterSerializer(serializers.ModelSerializer):
             **validated_data,
             password=make_password(password),
         )
+
+
+class VideoCommentUserSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "avatar"]
+
+    def get_avatar(self, obj):
+        if hasattr(obj, "profile") and obj.profile.avatar:
+            request = self.context.get("request")
+            url = obj.profile.avatar.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+
+class VideoCommentSerializer(serializers.ModelSerializer):
+    user = VideoCommentUserSerializer(read_only=True)
+    video_url = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VideoComment
+        fields = [
+            "id", "user", "video_url", "duration_seconds", "mime_type",
+            "file_size", "created_at", "updated_at", "can_delete",
+        ]
+        read_only_fields = fields
+
+    def get_video_url(self, obj):
+        if not obj.video:
+            return None
+        request = self.context.get("request")
+        url = obj.video.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_can_delete(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return bool(user and user.is_authenticated and (user.is_staff or obj.user_id == user.id))
 
 class CommentSerializer(serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)

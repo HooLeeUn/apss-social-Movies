@@ -1,4 +1,6 @@
+import os
 import re
+import uuid
 import secrets
 import hashlib
 import unicodedata
@@ -57,6 +59,15 @@ def build_genre_key(value):
     if not genres:
         return None
     return "|".join(genres)
+
+
+def video_comment_upload_to(instance, filename):
+    extension = os.path.splitext(filename or "")[1].lower()
+    if extension not in {".mp4", ".mov", ".webm"}:
+        extension = ".mp4"
+    movie_id = instance.movie_id or "unassigned_movie"
+    user_id = instance.user_id or "unassigned_user"
+    return f"video_comments/{movie_id}/{user_id}/{uuid.uuid4().hex}{extension}"
 
 class PostQuerySet(models.QuerySet):
 
@@ -1261,6 +1272,36 @@ class Comment(models.Model):
             if match.group("username").lower() == target_username:
                 return True
         return False
+
+
+class VideoComment(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="video_comments")
+    movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="video_comments")
+    video = models.FileField(upload_to=video_comment_upload_to)
+    duration_seconds = models.FloatField()
+    mime_type = models.CharField(max_length=100)
+    file_size = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["movie", "-created_at", "-id"], name="video_comment_movie_order_idx"),
+            models.Index(fields=["user", "-created_at"], name="video_comment_user_order_idx"),
+        ]
+
+    def delete(self, *args, **kwargs):
+        storage = self.video.storage if self.video else None
+        name = self.video.name if self.video else None
+        result = super().delete(*args, **kwargs)
+        if storage and name and storage.exists(name):
+            storage.delete(name)
+        return result
+
+    def __str__(self):
+        return f"VideoComment({self.user_id} -> {self.movie_id})"
+
 
 class CommentReaction(models.Model):
     REACT_LIKE = "like"
