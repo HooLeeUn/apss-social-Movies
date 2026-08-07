@@ -1996,7 +1996,7 @@ class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
         return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
 
     def perform_destroy(self, instance):
-        if not (self.request.user.is_staff or instance.user_id == self.request.user.id):
+        if instance.user_id != self.request.user.id:
             raise PermissionDenied("You cannot delete this video comment.")
         instance.delete()
 

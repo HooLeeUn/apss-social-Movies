@@ -918,7 +918,7 @@ class VideoCommentSerializer(serializers.ModelSerializer):
     def get_can_delete(self, obj):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        return bool(user and user.is_authenticated and (user.is_staff or obj.user_id == user.id))
+        return bool(user and user.is_authenticated and obj.user_id == user.id)
 
 
 class VideoCommentUploadSerializer(serializers.Serializer):
