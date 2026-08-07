@@ -5,7 +5,7 @@
 - `GET /api/movies/<pk>/video-comments/`: lists paginated video comments for one movie/series with `next`, `previous`, `count`, and `results`.
 - `POST /api/movies/<pk>/video-comments/`: authenticated multipart upload. The backend resolves the movie first, uses `request.user`, ignores any submitted `user`, and returns `201` on success.
 - `GET /api/video-comments/<pk>/`: retrieves one video comment visible to the authenticated user.
-- `DELETE /api/video-comments/<pk>/`: deletes only when the requester is the author or staff; the stored media object is deleted with the model record.
+- `DELETE /api/video-comments/<pk>/`: deletes only when the requester is the author; the stored media object is deleted with the model record.
 
 ## Upload limits and formats
 
