@@ -28,7 +28,7 @@ from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 
 from core.feed_pool import DailyFeedPoolService
 from core.tmdb import TMDbServiceError
@@ -9899,17 +9899,55 @@ class VideoCommentEndpointTests(TestCase):
         response = self.client.get(f"{self.url}?page_size=1")
         self.assertEqual([item["id"] for item in response.data["results"]], [older_popular.id])
 
-    def test_only_author_or_staff_can_delete_and_file_is_deleted(self):
+    def test_owner_sees_can_delete_and_delete_removes_record_and_file(self):
         self.client.force_authenticate(user=self.user)
         with self._ffprobe():
             response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
         obj = VideoComment.objects.get()
-        self.client.force_authenticate(user=self.other)
-        self.assertEqual(self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk})).status_code, status.HTTP_403_FORBIDDEN)
-        self.client.force_authenticate(user=self.staff)
+        stored_name = obj.video.name
+        storage = obj.video.storage
+        self.assertTrue(storage.exists(stored_name))
+
+        get_response = self.client.get(self.url)
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(get_response.data["results"][0]["can_delete"])
+
         delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(VideoComment.objects.count(), 0)
+        self.assertFalse(VideoComment.objects.filter(pk=obj.pk).exists())
+        self.assertFalse(storage.exists(stored_name))
+
+    def test_other_authenticated_user_cannot_delete_record_or_file(self):
+        obj = self._create_admin_video_comment()
+        stored_name = obj.video.name
+        storage = obj.video.storage
+        self.client.force_authenticate(user=self.other)
+
+        get_response = self.client.get(self.url)
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(get_response.data["results"][0]["can_delete"])
+
+        delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
+        self.assertEqual(delete_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(VideoComment.objects.filter(pk=obj.pk).exists())
+        self.assertTrue(storage.exists(stored_name))
+
+    def test_staff_user_cannot_delete_another_users_video_comment(self):
+        obj = self._create_admin_video_comment()
+        self.client.force_authenticate(user=self.staff)
+        delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
+        self.assertEqual(delete_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(VideoComment.objects.filter(pk=obj.pk).exists())
+
+    def test_anonymous_user_cannot_delete_and_can_delete_serializes_false(self):
+        obj = self._create_admin_video_comment()
+        request = APIRequestFactory().get(self.url)
+        request.user = AnonymousUser()
+        self.assertFalse(VideoCommentSerializer(obj, context={"request": request}).data["can_delete"])
+
+        delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
+        self.assertEqual(delete_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertTrue(VideoComment.objects.filter(pk=obj.pk).exists())
 
     def test_page_serialization_avoids_n_plus_one(self):
         for idx in range(3):
