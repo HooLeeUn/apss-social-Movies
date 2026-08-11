@@ -1980,13 +1980,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
         upload_serializer.is_valid(raise_exception=True)
         uploaded_file = upload_serializer.validated_data["video"]
         metadata = validate_video_upload(uploaded_file)
-        instance = VideoComment.objects.create(
-            user=request.user,
-            movie=movie,
-            video=uploaded_file,
-            orientation_timeline=upload_serializer.validated_data.get("orientation_timeline"),
-            **metadata,
-        )
+        instance = VideoComment.objects.create(user=request.user, movie=movie, video=uploaded_file, **metadata)
         output_serializer = VideoCommentSerializer(instance, context=self.get_serializer_context())
         headers = self.get_success_headers(output_serializer.data)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)

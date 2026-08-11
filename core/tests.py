@@ -9801,12 +9801,14 @@ class VideoCommentEndpointTests(TestCase):
         self.assertIn("video", serializer.fields)
         self.assertFalse(serializer.fields["video"].read_only)
         self.assertTrue(serializer.fields["video"].write_only)
+        self.assertNotIn("orientation_timeline", serializer.fields)
 
     def test_response_serializer_does_not_expose_writable_video_field(self):
         serializer = VideoCommentSerializer()
         self.assertNotIn("video", serializer.fields)
         self.assertIn("video_url", serializer.fields)
         self.assertTrue(all(field.read_only for field in serializer.fields.values()))
+        self.assertNotIn("orientation_timeline", serializer.fields)
 
     def test_browsable_api_form_has_video_upload_field(self):
         from core.views import MovieVideoCommentsListCreateView
@@ -9830,95 +9832,6 @@ class VideoCommentEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(VideoComment.objects.count(), 1)
         self.assertEqual(response.data["user"]["id"], self.user.id)
-
-    def test_create_video_with_valid_orientation_timeline(self):
-        timeline = [
-            {"start": 0.0, "end": 4.8, "orientation": "portrait"},
-            {"start": 4.8, "end": 10.0, "orientation": "landscape"},
-        ]
-        self.client.force_authenticate(user=self.user)
-        with self._ffprobe():
-            response = self.client.post(
-                self.url,
-                {"video": self._upload(), "orientation_timeline": json.dumps(timeline)},
-                format="multipart",
-            )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["orientation_timeline"], timeline)
-        self.assertEqual(VideoComment.objects.get().orientation_timeline, timeline)
-
-    def test_create_video_without_orientation_timeline(self):
-        self.client.force_authenticate(user=self.user)
-        with self._ffprobe():
-            response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIsNone(response.data["orientation_timeline"])
-        self.assertIsNone(VideoComment.objects.get().orientation_timeline)
-
-    def test_list_returns_orientation_timeline(self):
-        timeline = [{"start": 0.0, "end": 10.2, "orientation": "portrait"}]
-        VideoComment.objects.create(
-            user=self.user, movie=self.movie, video="video_comments/a.mp4",
-            duration_seconds=10.2, mime_type="video/mp4", file_size=1,
-            orientation_timeline=timeline,
-        )
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get(self.url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["results"][0]["orientation_timeline"], timeline)
-
-    def test_rejects_invalid_orientation(self):
-        timeline = [{"start": 0, "end": 5, "orientation": "square"}]
-        response = self._post_timeline(timeline)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("orientation_timeline", response.data)
-
-    def test_rejects_invalid_timeline_start_and_end(self):
-        invalid_timelines = [
-            [{"start": -1, "end": 5, "orientation": "portrait"}],
-            [{"start": 2, "end": 2, "orientation": "portrait"}],
-            [{"start": 3, "end": 2, "orientation": "portrait"}],
-            [{"start": "0", "end": 2, "orientation": "portrait"}],
-        ]
-        for timeline in invalid_timelines:
-            with self.subTest(timeline=timeline):
-                response = self._post_timeline(timeline)
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertIn("orientation_timeline", response.data)
-
-    def test_rejects_overlapping_timeline_segments(self):
-        timeline = [
-            {"start": 0, "end": 5, "orientation": "portrait"},
-            {"start": 4.9, "end": 8, "orientation": "landscape"},
-        ]
-        response = self._post_timeline(timeline)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("overlap", str(response.data["orientation_timeline"]).lower())
-
-    def test_rejects_timeline_segments_not_ordered_by_start(self):
-        timeline = [
-            {"start": 5, "end": 7, "orientation": "portrait"},
-            {"start": 0, "end": 2, "orientation": "landscape"},
-        ]
-        response = self._post_timeline(timeline)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("ordered", str(response.data["orientation_timeline"]).lower())
-
-    def test_legacy_video_without_timeline_serializes_as_null(self):
-        legacy = VideoComment.objects.create(
-            user=self.user, movie=self.movie, video="video_comments/legacy.mp4",
-            duration_seconds=1, mime_type="video/mp4", file_size=1,
-        )
-        self.assertIsNone(VideoCommentSerializer(legacy).data["orientation_timeline"])
-
-    def _post_timeline(self, timeline):
-        self.client.force_authenticate(user=self.user)
-        with self._ffprobe():
-            return self.client.post(
-                self.url,
-                {"video": self._upload(), "orientation_timeline": json.dumps(timeline)},
-                format="multipart",
-            )
 
     def test_anonymous_upload_returns_401(self):
         response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
@@ -9988,10 +9901,12 @@ class VideoCommentEndpointTests(TestCase):
         response = self.client.get(f"{self.url}?page_size=1")
         self.assertEqual([item["id"] for item in response.data["results"]], [older_popular.id])
 
-    def test_owner_sees_can_delete_and_delete_removes_record_and_file(self):
+    def test_regression_create_list_and_delete_without_orientation_timeline(self):
         self.client.force_authenticate(user=self.user)
         with self._ffprobe():
             response = self.client.post(self.url, {"video": self._upload()}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn("orientation_timeline", response.data)
         obj = VideoComment.objects.get()
         stored_name = obj.video.name
         storage = obj.video.storage
@@ -9999,6 +9914,7 @@ class VideoCommentEndpointTests(TestCase):
 
         get_response = self.client.get(self.url)
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("orientation_timeline", get_response.data["results"][0])
         self.assertTrue(get_response.data["results"][0]["can_delete"])
 
         delete_response = self.client.delete(reverse("video-comment-detail", kwargs={"pk": obj.pk}))
