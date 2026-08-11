@@ -1,4 +1,3 @@
-import math
 from datetime import date
 
 from django.conf import settings
@@ -905,7 +904,7 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         model = VideoComment
         fields = [
             "id", "user", "video_url", "duration_seconds", "mime_type",
-            "file_size", "orientation_timeline", "created_at", "updated_at", "can_delete",
+            "file_size", "created_at", "updated_at", "can_delete",
         ]
         read_only_fields = fields
 
@@ -924,58 +923,6 @@ class VideoCommentSerializer(serializers.ModelSerializer):
 
 class VideoCommentUploadSerializer(serializers.Serializer):
     video = serializers.FileField(write_only=True)
-    orientation_timeline = serializers.JSONField(required=False, allow_null=True)
-
-    def validate_orientation_timeline(self, value):
-        if value is None:
-            return value
-        if not isinstance(value, list):
-            raise serializers.ValidationError("Must be a list of orientation segments.")
-
-        previous_start = None
-        previous_end = None
-        for index, segment in enumerate(value):
-            if not isinstance(segment, dict):
-                raise serializers.ValidationError(f"Segment {index} must be an object.")
-            required_keys = {"start", "end", "orientation"}
-            if set(segment) != required_keys:
-                raise serializers.ValidationError(
-                    f"Segment {index} must contain only start, end and orientation."
-                )
-
-            orientation = segment["orientation"]
-            if orientation not in {"portrait", "landscape"}:
-                raise serializers.ValidationError(
-                    f"Segment {index} orientation must be portrait or landscape."
-                )
-
-            start = segment["start"]
-            end = segment["end"]
-            if (
-                isinstance(start, bool)
-                or not isinstance(start, (int, float))
-                or not math.isfinite(start)
-                or start < 0
-            ):
-                raise serializers.ValidationError(
-                    f"Segment {index} start must be a finite number greater than or equal to 0."
-                )
-            if (
-                isinstance(end, bool)
-                or not isinstance(end, (int, float))
-                or not math.isfinite(end)
-                or end <= start
-            ):
-                raise serializers.ValidationError(
-                    f"Segment {index} end must be a finite number greater than start."
-                )
-            if previous_start is not None and start < previous_start:
-                raise serializers.ValidationError("Segments must be ordered by start.")
-            if previous_end is not None and start < previous_end:
-                raise serializers.ValidationError("Segments must not overlap.")
-            previous_start = start
-            previous_end = end
-        return value
 
 
 class CommentSerializer(serializers.ModelSerializer):
