@@ -1286,6 +1286,7 @@ class VideoComment(models.Model):
     duration_seconds = models.FloatField()
     mime_type = models.CharField(max_length=100)
     file_size = models.PositiveBigIntegerField()
+    orientation_timeline = models.JSONField(null=True, blank=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
