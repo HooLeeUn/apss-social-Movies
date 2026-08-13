@@ -22,6 +22,41 @@ Reaction responses use the following shape, and the same three reaction fields a
 
 `my_reaction` is `"like"`, `"dislike"`, or `null`. Counts and the current user's reaction are computed in the list query, so clients do not need a request per video.
 
+## Profile activity
+
+`GET /api/profile-feed/activity/?scope=me` derives current video-reaction activity directly from `VideoCommentReaction`. A reaction received from another user has `activity_type: "video_reaction_received"`; a reaction the authenticated user gave to another user's video has `activity_type: "video_reaction_given"`. Both use the standard activity envelope and include these reaction-specific fields:
+
+```json
+{
+  "id": "video_reaction_received:7",
+  "activity_type": "video_reaction_received",
+  "type": "video_reaction_received",
+  "created_at": "2026-08-13T18:00:00Z",
+  "updated_at": "2026-08-13T18:00:00Z",
+  "activity_at": "2026-08-13T18:00:00Z",
+  "actor": {"id": 9, "username": "CatherineFX", "avatar": null},
+  "movie": {"id": 42, "title_english": "Example", "title_spanish": null},
+  "payload": {
+    "reaction_id": 7,
+    "reaction_type": "like",
+    "reaction_value": "like",
+    "video_comment_id": 12,
+    "video_owner": {"id": 3, "username": "owner"},
+    "is_received_reaction": true,
+    "is_given_reaction": false
+  },
+  "reaction_id": 7,
+  "reaction_type": "like",
+  "reaction_value": "like",
+  "video_comment_id": 12,
+  "video_owner": {"id": 3, "username": "owner"},
+  "is_received_reaction": true,
+  "is_given_reaction": false
+}
+```
+
+For `video_reaction_given`, the same shape uses `is_received_reaction: false` and `is_given_reaction: true`. Reactions to one's own video are omitted rather than duplicated. Switching a reaction updates this single derived item, while removing the reaction or its video removes the activity automatically.
+
 ## Upload limits and formats
 
 Video comments accept only `.mp4`, `.mov`, and `.webm` files with compatible MIME types: `video/mp4`, `video/quicktime`, and `video/webm`. The default maximum size is 50 MB and can be configured with `VIDEO_COMMENT_MAX_SIZE_MB`.

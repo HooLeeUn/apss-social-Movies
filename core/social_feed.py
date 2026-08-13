@@ -5,7 +5,16 @@ from typing import Iterable, Literal, cast
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 
-from .models import Comment, CommentReaction, Follow, Friendship, Movie, MovieRating, UserVisibilityBlock
+from .models import (
+    Comment,
+    CommentReaction,
+    Follow,
+    Friendship,
+    Movie,
+    MovieRating,
+    UserVisibilityBlock,
+    VideoCommentReaction,
+)
 
 
 SocialFeedScope = Literal["following", "friends", "me"]
@@ -17,6 +26,8 @@ class SocialActivityFeedService:
     ACTIVITY_PRIVATE_MESSAGE = "private_message"
     ACTIVITY_PUBLIC_COMMENT_REACTION = "public_comment_reaction"
     ACTIVITY_PRIVATE_COMMENT_REACTION = "private_comment_reaction"
+    ACTIVITY_VIDEO_REACTION_RECEIVED = "video_reaction_received"
+    ACTIVITY_VIDEO_REACTION_GIVEN = "video_reaction_given"
 
     SCOPE_ME: SocialFeedScope = "me"
     SCOPE_FOLLOWING: SocialFeedScope = "following"
@@ -31,6 +42,8 @@ class SocialActivityFeedService:
         ACTIVITY_PUBLIC_COMMENT: 2,
         ACTIVITY_PUBLIC_COMMENT_REACTION: 1,
         ACTIVITY_PRIVATE_COMMENT_REACTION: 1,
+        ACTIVITY_VIDEO_REACTION_RECEIVED: 1,
+        ACTIVITY_VIDEO_REACTION_GIVEN: 1,
     }
 
     @classmethod
@@ -70,6 +83,7 @@ class SocialActivityFeedService:
                 [
                     *cls._serialize_private_message_activities(actor_ids=actor_ids, viewer=user),
                     *cls._serialize_private_comment_reaction_activities(actor_ids=actor_ids, viewer=user),
+                    *cls._serialize_video_reaction_activities(viewer=user),
                 ]
             )
 
@@ -101,6 +115,7 @@ class SocialActivityFeedService:
                 [
                     *cls._serialize_private_message_activities(actor_ids=actor_ids, viewer=viewer),
                     *cls._serialize_private_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer),
+                    *cls._serialize_video_reaction_activities(viewer=viewer),
                 ]
             )
         activities.sort(
@@ -454,6 +469,107 @@ class SocialActivityFeedService:
             }
             for reaction in valid_reactions
         ]
+
+    @classmethod
+    def _serialize_video_reaction_activities(cls, *, viewer) -> Iterable[dict]:
+        """Build current-state video reaction activity for the authenticated user."""
+        movie_display_rating_subquery = cls._movie_display_rating_subquery(
+            movie_id_ref="video_comment__movie_id"
+        )
+        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+            viewer=viewer,
+            movie_id_ref="video_comment__movie_id",
+        )
+        queryset = (
+            VideoCommentReaction.objects.filter(
+                Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
+            )
+            # A reaction to one's own video would otherwise be both given and received.
+            .exclude(user_id=F("video_comment__user_id"))
+            .exclude(
+                video_comment__user__visibility_blocks__blocked_user_id=viewer.id,
+            )
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .select_related(
+                "user",
+                "user__profile",
+                "video_comment",
+                "video_comment__user",
+                "video_comment__user__profile",
+                "video_comment__movie",
+            )
+            .annotate(
+                movie_display_rating=Subquery(
+                    movie_display_rating_subquery,
+                    output_field=FloatField(),
+                ),
+                viewer_movie_rating=Subquery(
+                    viewer_rating_subquery,
+                    output_field=IntegerField(),
+                ),
+                movie_following_avg_rating=Subquery(
+                    cls._viewer_following_avg_rating_subquery(
+                        viewer=viewer,
+                        movie_id_ref="video_comment__movie_id",
+                    ),
+                    output_field=FloatField(),
+                ),
+                movie_following_ratings_count=Coalesce(
+                    Subquery(
+                        cls._viewer_following_ratings_count_subquery(
+                            viewer=viewer,
+                            movie_id_ref="video_comment__movie_id",
+                        ),
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
+            )
+            .order_by("-updated_at", "-id")
+        )
+
+        activities = []
+        for reaction in queryset:
+            is_received = reaction.video_comment.user_id == viewer.id
+            activity_type = (
+                cls.ACTIVITY_VIDEO_REACTION_RECEIVED
+                if is_received
+                else cls.ACTIVITY_VIDEO_REACTION_GIVEN
+            )
+            activities.append(
+                {
+                    "id": f"{activity_type}:{reaction.id}",
+                    "activity_type": activity_type,
+                    "created_at": reaction.created_at,
+                    "updated_at": reaction.updated_at,
+                    "activity_at": cls._resolve_activity_at(
+                        created_at=reaction.created_at,
+                        updated_at=reaction.updated_at,
+                    ),
+                    "_sort_entity_id": reaction.id,
+                    "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
+                    "actor": cls._serialize_actor(reaction.user),
+                    "movie": cls._serialize_movie(
+                        reaction.video_comment.movie,
+                        display_rating=reaction.movie_display_rating,
+                        my_rating=reaction.viewer_movie_rating,
+                        following_avg_rating=reaction.movie_following_avg_rating,
+                        following_ratings_count=reaction.movie_following_ratings_count,
+                    ),
+                    "payload": {
+                        "reaction_id": reaction.id,
+                        "reaction_type": reaction.reaction_type,
+                        "reaction_value": reaction.reaction_type,
+                        "video_comment_id": reaction.video_comment_id,
+                        "video_owner": cls._serialize_compact_user(
+                            reaction.video_comment.user
+                        ),
+                        "is_received_reaction": is_received,
+                        "is_given_reaction": not is_received,
+                    },
+                }
+            )
+        return activities
 
     @classmethod
     def _serialize_compact_user(cls, user) -> dict:
