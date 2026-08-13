@@ -1279,6 +1279,32 @@ class Comment(models.Model):
         return False
 
 
+class VideoCommentQuerySet(models.QuerySet):
+    def with_reaction_stats(self, user):
+        queryset = self.annotate(
+            likes_count=Count(
+                "reactions",
+                filter=Q(reactions__reaction_type="like"),
+                distinct=True,
+            ),
+            dislikes_count=Count(
+                "reactions",
+                filter=Q(reactions__reaction_type="dislike"),
+                distinct=True,
+            ),
+        )
+        if not user or not user.is_authenticated:
+            return queryset.annotate(my_reaction=Value(None, output_field=CharField()))
+        return queryset.annotate(
+            my_reaction=Subquery(
+                VideoCommentReaction.objects.filter(
+                    video_comment_id=OuterRef("pk"),
+                    user_id=user.id,
+                ).values("reaction_type")[:1]
+            )
+        )
+
+
 class VideoComment(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="video_comments")
     movie = models.ForeignKey("Movie", on_delete=models.CASCADE, related_name="video_comments")
@@ -1288,6 +1314,8 @@ class VideoComment(models.Model):
     file_size = models.PositiveBigIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = VideoCommentQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -1306,6 +1334,43 @@ class VideoComment(models.Model):
 
     def __str__(self):
         return f"VideoComment({self.user_id} -> {self.movie_id})"
+
+
+class VideoCommentReaction(models.Model):
+    REACT_LIKE = "like"
+    REACT_DISLIKE = "dislike"
+    REACTION_CHOICES = [
+        (REACT_LIKE, "Like"),
+        (REACT_DISLIKE, "Dislike"),
+    ]
+
+    video_comment = models.ForeignKey(
+        VideoComment,
+        on_delete=models.CASCADE,
+        related_name="reactions",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="video_comment_reactions",
+    )
+    reaction_type = models.CharField(max_length=10, choices=REACTION_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["video_comment", "user"],
+                name="unique_video_comment_reaction_per_user",
+            )
+        ]
+
+    def __str__(self):
+        return (
+            f"VideoCommentReaction(video_comment={self.video_comment_id}, "
+            f"user={self.user_id}, reaction={self.reaction_type})"
+        )
 
 
 class CommentReaction(models.Model):

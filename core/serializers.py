@@ -26,6 +26,7 @@ from .models import (
     UserTypePreference,
     WeeklyRecommendationItem,
     VideoComment,
+    VideoCommentReaction,
 )
 
 # Importas tus modelos solo si los necesitas aquí.
@@ -899,12 +900,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
     user = VideoCommentUserSerializer(read_only=True)
     video_url = serializers.SerializerMethodField()
     can_delete = serializers.SerializerMethodField()
+    likes_count = serializers.IntegerField(read_only=True, default=0)
+    dislikes_count = serializers.IntegerField(read_only=True, default=0)
+    my_reaction = serializers.CharField(read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = VideoComment
         fields = [
             "id", "user", "video_url", "duration_seconds", "mime_type",
             "file_size", "created_at", "updated_at", "can_delete",
+            "likes_count", "dislikes_count", "my_reaction",
         ]
         read_only_fields = fields
 
@@ -923,6 +928,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
 
 class VideoCommentUploadSerializer(serializers.Serializer):
     video = serializers.FileField(write_only=True)
+
+
+class VideoCommentReactionSerializer(serializers.Serializer):
+    reaction = serializers.ChoiceField(choices=VideoCommentReaction.REACTION_CHOICES)
+
+    def to_internal_value(self, data):
+        payload = data.copy()
+        if "reaction" not in payload and "reaction_type" in payload:
+            payload["reaction"] = payload["reaction_type"]
+        return super().to_internal_value(payload)
 
 
 class CommentSerializer(serializers.ModelSerializer):

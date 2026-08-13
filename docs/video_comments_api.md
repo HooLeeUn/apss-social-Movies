@@ -6,6 +6,21 @@
 - `POST /api/movies/<pk>/video-comments/`: authenticated multipart upload. The backend resolves the movie first, uses `request.user`, ignores any submitted `user`, and returns `201` on success.
 - `GET /api/video-comments/<pk>/`: retrieves one video comment visible to the authenticated user.
 - `DELETE /api/video-comments/<pk>/`: deletes only when the requester is the author; the stored media object is deleted with the model record.
+- `PUT /api/video-comments/<pk>/reaction/`: toggles an authenticated user's reaction. Send `{"reaction": "like"}` or `{"reaction": "dislike"}`. Sending the current reaction removes it; sending the other reaction switches it.
+- `DELETE /api/video-comments/<pk>/reaction/`: explicitly removes the authenticated user's reaction, if any.
+
+Reaction responses use the following shape, and the same three reaction fields are included on every item returned by the list and detail endpoints:
+
+```json
+{
+  "video_comment_id": 42,
+  "likes_count": 4,
+  "dislikes_count": 1,
+  "my_reaction": "like"
+}
+```
+
+`my_reaction` is `"like"`, `"dislike"`, or `null`. Counts and the current user's reaction are computed in the list query, so clients do not need a request per video.
 
 ## Upload limits and formats
 
