@@ -36,7 +36,7 @@ from .serializers import (
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
-    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer,
+    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
 )
 from .models import (
     AppBranding,
@@ -64,6 +64,7 @@ from .models import (
     WeeklyRecommendationItem,
     WeeklyRecommendationSnapshot,
     VideoComment,
+    VideoCommentReaction,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .video_comments import validate_video_upload
@@ -1969,6 +1970,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
         queryset = (
             VideoComment.objects.filter(movie_id=self.kwargs["pk"])
             .select_related("user", "user__profile", "movie")
+            .with_reaction_stats(self.request.user)
             .annotate(followers_count=Count("user__followers", distinct=True))
             .order_by("-followers_count", "-created_at", "-id")
         )
@@ -1981,6 +1983,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
         uploaded_file = upload_serializer.validated_data["video"]
         metadata = validate_video_upload(uploaded_file)
         instance = VideoComment.objects.create(user=request.user, movie=movie, video=uploaded_file, **metadata)
+        instance = VideoComment.objects.with_reaction_stats(request.user).get(pk=instance.pk)
         output_serializer = VideoCommentSerializer(instance, context=self.get_serializer_context())
         headers = self.get_success_headers(output_serializer.data)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
@@ -1992,13 +1995,68 @@ class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
     http_method_names = ["get", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = VideoComment.objects.select_related("user", "user__profile", "movie")
+        queryset = VideoComment.objects.select_related("user", "user__profile", "movie").with_reaction_stats(self.request.user)
         return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
 
     def perform_destroy(self, instance):
         if instance.user_id != self.request.user.id:
             raise PermissionDenied("You cannot delete this video comment.")
         instance.delete()
+
+
+class VideoCommentReactionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_video_comment(self, pk):
+        queryset = filter_out_authors_who_blocked_viewer(
+            VideoComment.objects.all(),
+            self.request.user,
+            author_field="user",
+        )
+        return get_object_or_404(queryset, pk=pk)
+
+    def response_data(self, video_comment):
+        annotated = VideoComment.objects.with_reaction_stats(self.request.user).get(
+            pk=video_comment.pk
+        )
+        return {
+            "video_comment_id": video_comment.id,
+            "my_reaction": annotated.my_reaction,
+            "likes_count": annotated.likes_count,
+            "dislikes_count": annotated.dislikes_count,
+        }
+
+    def put(self, request, pk):
+        video_comment = self.get_video_comment(pk)
+        serializer = VideoCommentReactionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reaction_type = serializer.validated_data["reaction"]
+
+        with transaction.atomic():
+            existing = VideoCommentReaction.objects.select_for_update().filter(
+                video_comment=video_comment,
+                user=request.user,
+            ).first()
+            if existing and existing.reaction_type == reaction_type:
+                existing.delete()
+            elif existing:
+                existing.reaction_type = reaction_type
+                existing.save(update_fields=["reaction_type", "updated_at"])
+            else:
+                VideoCommentReaction.objects.create(
+                    video_comment=video_comment,
+                    user=request.user,
+                    reaction_type=reaction_type,
+                )
+        return Response(self.response_data(video_comment), status=status.HTTP_200_OK)
+
+    def delete(self, request, pk):
+        video_comment = self.get_video_comment(pk)
+        VideoCommentReaction.objects.filter(
+            video_comment=video_comment,
+            user=request.user,
+        ).delete()
+        return Response(self.response_data(video_comment), status=status.HTTP_200_OK)
 
 class PostCommentsListCreateView(MovieCommentsListCreateView):
     deprecated_warning = '299 - "Deprecated endpoint. Use /api/movies/<pk>/comments/ instead."'

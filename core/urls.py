@@ -13,7 +13,7 @@ from .views import (
     DirectedCommentsListView, ReceivedDirectedCommentsView, SentDirectedCommentsView, MeMessagesView, MeMessagesSummaryView, MeMessagesMarkAsReadView,
     MeNotificationsView, MeNotificationsMarkReadView, MeNotificationsMarkAllReadView, MeNotificationsMarkReadBatchView,
     MeNotificationsMarkContextReadView,
-    MovieListView, MovieSearchView, MovieDetailView, MovieCreditsView, MovieTrailerView, MovieWatchProvidersView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView, MovieVideoCommentsListCreateView, VideoCommentDetailView,
+    MovieListView, MovieSearchView, MovieDetailView, MovieCreditsView, MovieTrailerView, MovieWatchProvidersView, MovieDirectedCommentsListView, DirectedConversationMessagesView, MovieRatingView, MeTasteProfileView, FeedMoviesView, WeeklyRecommendationsView, MovieVideoCommentsListCreateView, VideoCommentDetailView, VideoCommentReactionView,
     MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, UserMovieRecommendationsView, MovieRecommendationToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView, LegalPoliciesView, TMDbPersonDetailView,
@@ -103,5 +103,6 @@ urlpatterns = [
     path("posts/<int:pk>/comments/", PostCommentsListCreateView.as_view(), name="post-comments"),
     path("comments/<int:pk>/", CommentDetailView.as_view(), name="comment-detail"),
     path("video-comments/<int:pk>/", VideoCommentDetailView.as_view(), name="video-comment-detail"),
+    path("video-comments/<int:pk>/reaction/", VideoCommentReactionView.as_view(), name="video-comment-reaction"),
     path("comments/<int:pk>/reaction/", CommentReactionView.as_view(), name="comment-reaction"),
 ]

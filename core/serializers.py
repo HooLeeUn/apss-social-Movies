@@ -26,6 +26,7 @@ from .models import (
     UserTypePreference,
     WeeklyRecommendationItem,
     VideoComment,
+    VideoCommentReaction,
 )
 
 # Importas tus modelos solo si los necesitas aquí.
@@ -592,6 +593,8 @@ class SocialActivitySerializer(serializers.Serializer):
         "public_comment_reaction",
         "private_message",
         "private_comment_reaction",
+        "video_reaction_received",
+        "video_reaction_given",
     ])
     type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
@@ -608,6 +611,8 @@ class SocialActivitySerializer(serializers.Serializer):
     reaction_type = serializers.SerializerMethodField()
     reaction_value = serializers.SerializerMethodField()
     reaction_id = serializers.SerializerMethodField()
+    video_comment_id = serializers.SerializerMethodField()
+    video_owner = serializers.SerializerMethodField()
     sender = serializers.SerializerMethodField()
     recipient = serializers.SerializerMethodField()
     counterpart = serializers.SerializerMethodField()
@@ -621,6 +626,8 @@ class SocialActivitySerializer(serializers.Serializer):
             "public_comment_reaction": "public_comment_reaction",
             "private_message": "private_message",
             "private_comment_reaction": "private_comment_reaction",
+            "video_reaction_received": "video_reaction_received",
+            "video_reaction_given": "video_reaction_given",
         }
         return mapping.get(obj.get("activity_type"), obj.get("activity_type"))
 
@@ -650,6 +657,12 @@ class SocialActivitySerializer(serializers.Serializer):
 
     def get_reaction_id(self, obj):
         return (obj.get("payload") or {}).get("reaction_id")
+
+    def get_video_comment_id(self, obj):
+        return (obj.get("payload") or {}).get("video_comment_id")
+
+    def get_video_owner(self, obj):
+        return (obj.get("payload") or {}).get("video_owner")
 
     def get_sender(self, obj):
         return (obj.get("payload") or {}).get("sender")
@@ -899,12 +912,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
     user = VideoCommentUserSerializer(read_only=True)
     video_url = serializers.SerializerMethodField()
     can_delete = serializers.SerializerMethodField()
+    likes_count = serializers.IntegerField(read_only=True, default=0)
+    dislikes_count = serializers.IntegerField(read_only=True, default=0)
+    my_reaction = serializers.CharField(read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = VideoComment
         fields = [
             "id", "user", "video_url", "duration_seconds", "mime_type",
             "file_size", "created_at", "updated_at", "can_delete",
+            "likes_count", "dislikes_count", "my_reaction",
         ]
         read_only_fields = fields
 
@@ -923,6 +940,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
 
 class VideoCommentUploadSerializer(serializers.Serializer):
     video = serializers.FileField(write_only=True)
+
+
+class VideoCommentReactionSerializer(serializers.Serializer):
+    reaction = serializers.ChoiceField(choices=VideoCommentReaction.REACTION_CHOICES)
+
+    def to_internal_value(self, data):
+        payload = data.copy()
+        if "reaction" not in payload and "reaction_type" in payload:
+            payload["reaction"] = payload["reaction_type"]
+        return super().to_internal_value(payload)
 
 
 class CommentSerializer(serializers.ModelSerializer):

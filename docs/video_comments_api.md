@@ -6,6 +6,56 @@
 - `POST /api/movies/<pk>/video-comments/`: authenticated multipart upload. The backend resolves the movie first, uses `request.user`, ignores any submitted `user`, and returns `201` on success.
 - `GET /api/video-comments/<pk>/`: retrieves one video comment visible to the authenticated user.
 - `DELETE /api/video-comments/<pk>/`: deletes only when the requester is the author; the stored media object is deleted with the model record.
+- `PUT /api/video-comments/<pk>/reaction/`: toggles an authenticated user's reaction. Send `{"reaction": "like"}` or `{"reaction": "dislike"}`. Sending the current reaction removes it; sending the other reaction switches it.
+- `DELETE /api/video-comments/<pk>/reaction/`: explicitly removes the authenticated user's reaction, if any.
+
+Reaction responses use the following shape, and the same three reaction fields are included on every item returned by the list and detail endpoints:
+
+```json
+{
+  "video_comment_id": 42,
+  "likes_count": 4,
+  "dislikes_count": 1,
+  "my_reaction": "like"
+}
+```
+
+`my_reaction` is `"like"`, `"dislike"`, or `null`. Counts and the current user's reaction are computed in the list query, so clients do not need a request per video.
+
+## Profile activity
+
+`GET /api/profile-feed/activity/?scope=me` derives current video-reaction activity directly from `VideoCommentReaction`. A reaction received from another user has `activity_type: "video_reaction_received"`; a reaction the authenticated user gave to another user's video has `activity_type: "video_reaction_given"`. Both use the standard activity envelope and include these reaction-specific fields:
+
+```json
+{
+  "id": "video_reaction_received:7",
+  "activity_type": "video_reaction_received",
+  "type": "video_reaction_received",
+  "created_at": "2026-08-13T18:00:00Z",
+  "updated_at": "2026-08-13T18:00:00Z",
+  "activity_at": "2026-08-13T18:00:00Z",
+  "actor": {"id": 9, "username": "CatherineFX", "avatar": null},
+  "movie": {"id": 42, "title_english": "Example", "title_spanish": null},
+  "payload": {
+    "reaction_id": 7,
+    "reaction_type": "like",
+    "reaction_value": "like",
+    "video_comment_id": 12,
+    "video_owner": {"id": 3, "username": "owner"},
+    "is_received_reaction": true,
+    "is_given_reaction": false
+  },
+  "reaction_id": 7,
+  "reaction_type": "like",
+  "reaction_value": "like",
+  "video_comment_id": 12,
+  "video_owner": {"id": 3, "username": "owner"},
+  "is_received_reaction": true,
+  "is_given_reaction": false
+}
+```
+
+For `video_reaction_given`, the same shape uses `is_received_reaction: false` and `is_given_reaction: true`. Reactions to one's own video are omitted rather than duplicated. Switching a reaction updates this single derived item, while removing the reaction or its video removes the activity automatically.
 
 ## Upload limits and formats
 
