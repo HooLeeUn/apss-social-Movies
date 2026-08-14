@@ -589,6 +589,7 @@ class SocialActivityFeedService:
         queryset = (
             VideoComment.objects.filter(user_id=viewer.id)
             .select_related("user", "user__profile", "movie")
+            .with_reaction_stats(viewer)
             .annotate(
                 movie_display_rating=Subquery(
                     movie_display_rating_subquery,
@@ -642,6 +643,9 @@ class SocialActivityFeedService:
                 "payload": {
                     "video_comment_id": video.id,
                     "video_url": video.video.url if video.video else None,
+                    "likes_count": video.likes_count,
+                    "dislikes_count": video.dislikes_count,
+                    "my_reaction": video.my_reaction,
                 },
             }
             for video in queryset
