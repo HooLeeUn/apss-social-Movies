@@ -63,15 +63,22 @@ class VideoReactionProfileActivityTests(TestCase):
             if item["reaction_id"] == reaction.id
         )
 
+    def summary_for(self, response, video=None):
+        return next(
+            item for item in response.data["results"]
+            if item["activity_type"] == "video_reactions_received_summary"
+            and item["video_comment_id"] == (video or self.video).id
+        )
+
     def test_received_like_contains_actor_owner_movie_and_video(self):
         reaction = self.make_reaction(reaction_type="like")
 
-        item = self.item_for(self.activity(self.owner), reaction)
+        item = self.summary_for(self.activity(self.owner))
 
-        self.assertEqual(item["activity_type"], "video_reaction_received")
-        self.assertEqual(item["reaction_type"], "like")
-        self.assertEqual(item["actor"]["id"], self.reactor.id)
-        self.assertEqual(item["video_owner"]["id"], self.owner.id)
+        self.assertEqual(item["activity_type"], "video_reactions_received_summary")
+        self.assertEqual(item["likes_count"], 1)
+        self.assertEqual(item["users_who_liked"][0]["id"], self.reactor.id)
+        self.assertEqual(item["owner"]["id"], self.owner.id)
         self.assertEqual(item["movie"]["id"], self.movie.id)
         self.assertEqual(item["video_comment_id"], self.video.id)
         self.assertTrue(item["is_received_reaction"])
@@ -80,10 +87,9 @@ class VideoReactionProfileActivityTests(TestCase):
     def test_received_dislike_uses_explicit_type(self):
         reaction = self.make_reaction(reaction_type="dislike")
 
-        item = self.item_for(self.activity(self.owner), reaction)
+        item = self.summary_for(self.activity(self.owner))
 
-        self.assertEqual(item["activity_type"], "video_reaction_received")
-        self.assertEqual(item["reaction_value"], "dislike")
+        self.assertEqual(item["dislikes_count"], 1)
 
     def test_given_like_contains_reactor_and_video_owner(self):
         reaction = self.make_reaction(reaction_type="like")
@@ -110,10 +116,10 @@ class VideoReactionProfileActivityTests(TestCase):
         reaction.save(update_fields=["reaction_type", "updated_at"])
 
         response = self.activity(self.owner)
-        items = [item for item in response.data["results"] if item["reaction_id"] == reaction.id]
+        items = [item for item in response.data["results"] if item["activity_type"] == "video_reactions_received_summary"]
 
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["reaction_type"], "dislike")
+        self.assertEqual(items[0]["dislikes_count"], 1)
 
     def test_deleted_reaction_and_deleted_video_remove_activity(self):
         removed_reaction = self.make_reaction()
@@ -136,11 +142,12 @@ class VideoReactionProfileActivityTests(TestCase):
 
         items = [
             item for item in self.activity(self.owner).data["results"]
-            if item["activity_type"] == "video_reaction_received"
+            if item["activity_type"] == "video_reactions_received_summary"
         ]
 
-        self.assertEqual({item["reaction_id"] for item in items}, {first.id, second.id})
-        self.assertEqual(len(items), 2)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["likes_count"], 1)
+        self.assertEqual(items[0]["dislikes_count"], 1)
 
     def test_reaction_to_own_video_is_not_duplicated(self):
         reaction = self.make_reaction(user=self.owner)
@@ -164,7 +171,7 @@ class VideoReactionProfileActivityTests(TestCase):
         response = self.activity(self.owner, page_size=1)
 
         self.assertEqual(response.data["count"], 3)
-        self.assertEqual(response.data["results"][0]["reaction_id"], reaction.id)
+        self.assertEqual(response.data["results"][0]["activity_type"], "video_reactions_received_summary")
         self.assertIsNotNone(response.data["next"])
 
     def test_query_count_does_not_grow_per_video_reaction(self):

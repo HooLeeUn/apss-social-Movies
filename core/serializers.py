@@ -596,6 +596,8 @@ class SocialActivitySerializer(serializers.Serializer):
         "video_reaction_received",
         "video_reaction_given",
         "video_reaction_created",
+        "comment_reactions_received_summary",
+        "video_reactions_received_summary",
     ])
     type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
@@ -621,6 +623,13 @@ class SocialActivitySerializer(serializers.Serializer):
     counterpart = serializers.SerializerMethodField()
     is_received_reaction = serializers.SerializerMethodField()
     is_given_reaction = serializers.SerializerMethodField()
+    owner = serializers.SerializerMethodField()
+    likes_count = serializers.SerializerMethodField()
+    dislikes_count = serializers.SerializerMethodField()
+    users_who_liked = serializers.SerializerMethodField()
+    users_who_disliked = serializers.SerializerMethodField()
+    latest_reaction_at = serializers.SerializerMethodField()
+    object_created_at = serializers.SerializerMethodField()
 
     def get_type(self, obj):
         mapping = {
@@ -632,8 +641,21 @@ class SocialActivitySerializer(serializers.Serializer):
             "video_reaction_received": "video_reaction_received",
             "video_reaction_given": "video_reaction_given",
             "video_reaction_created": "video_reaction_created",
+            "comment_reactions_received_summary": "comment_reactions_received_summary",
+            "video_reactions_received_summary": "video_reactions_received_summary",
         }
         return mapping.get(obj.get("activity_type"), obj.get("activity_type"))
+
+    def _payload_value(self, obj, key):
+        return (obj.get("payload") or {}).get(key)
+
+    def get_owner(self, obj): return self._payload_value(obj, "owner")
+    def get_likes_count(self, obj): return self._payload_value(obj, "likes_count")
+    def get_dislikes_count(self, obj): return self._payload_value(obj, "dislikes_count")
+    def get_users_who_liked(self, obj): return self._payload_value(obj, "users_who_liked")
+    def get_users_who_disliked(self, obj): return self._payload_value(obj, "users_who_disliked")
+    def get_latest_reaction_at(self, obj): return self._payload_value(obj, "latest_reaction_at")
+    def get_object_created_at(self, obj): return self._payload_value(obj, "object_created_at")
 
     def get_score(self, obj):
         return (obj.get("payload") or {}).get("score")
