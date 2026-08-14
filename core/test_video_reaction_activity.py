@@ -246,6 +246,61 @@ class VideoReactionCreatedProfileActivityTests(TestCase):
         self.assertEqual(item["timestamp"], item["created_at"])
         self.assertEqual(item["activity_at"], item["created_at"])
 
+    def test_created_video_activity_contains_zero_reaction_stats(self):
+        video = self.make_video()
+
+        item = self.created_item(self.activity(), video)
+
+        self.assertEqual(item["payload"]["likes_count"], 0)
+        self.assertEqual(item["payload"]["dislikes_count"], 0)
+        self.assertIsNone(item["payload"]["my_reaction"])
+
+    def test_created_video_activity_contains_counts_and_owners_reaction(self):
+        video = self.make_video()
+        first_disliker = self.make_user("first_disliker")
+        second_disliker = self.make_user("second_disliker")
+        VideoCommentReaction.objects.create(
+            user=first_disliker,
+            video_comment=video,
+            reaction_type=VideoCommentReaction.REACT_DISLIKE,
+        )
+        VideoCommentReaction.objects.create(
+            user=second_disliker,
+            video_comment=video,
+            reaction_type=VideoCommentReaction.REACT_DISLIKE,
+        )
+        VideoCommentReaction.objects.create(
+            user=self.owner,
+            video_comment=video,
+            reaction_type=VideoCommentReaction.REACT_LIKE,
+        )
+
+        item = self.created_item(self.activity(), video)
+
+        self.assertEqual(item["payload"]["likes_count"], 1)
+        self.assertEqual(item["payload"]["dislikes_count"], 2)
+        self.assertEqual(item["payload"]["my_reaction"], "like")
+
+    def test_created_video_activity_uses_each_authenticated_users_reaction(self):
+        owner_video = self.make_video()
+        other_video = self.make_video(owner=self.other, filename="other.mp4")
+        VideoCommentReaction.objects.create(
+            user=self.owner,
+            video_comment=owner_video,
+            reaction_type=VideoCommentReaction.REACT_DISLIKE,
+        )
+        VideoCommentReaction.objects.create(
+            user=self.other,
+            video_comment=other_video,
+            reaction_type=VideoCommentReaction.REACT_LIKE,
+        )
+
+        owner_item = self.created_item(self.activity(self.owner), owner_video)
+        other_item = self.created_item(self.activity(self.other), other_video)
+
+        self.assertEqual(owner_item["payload"]["my_reaction"], "dislike")
+        self.assertEqual(other_item["payload"]["my_reaction"], "like")
+
     def test_created_video_is_mixed_chronologically_before_pagination(self):
         video = self.make_video()
         rating = MovieRating.objects.create(user=self.owner, movie=self.movie, score=8)
@@ -295,3 +350,20 @@ class VideoReactionCreatedProfileActivityTests(TestCase):
             self.activity(page_size=50)
 
         self.assertEqual(len(five_video_queries), len(one_video_queries))
+
+    def test_query_count_does_not_grow_per_created_video_reaction(self):
+        video = self.make_video()
+        with CaptureQueriesContext(connection) as no_reaction_queries:
+            self.activity(page_size=50)
+
+        for index in range(4):
+            VideoCommentReaction.objects.create(
+                user=self.make_user(f"created_query_reactor_{index}"),
+                video_comment=video,
+                reaction_type=VideoCommentReaction.REACT_DISLIKE,
+            )
+
+        with CaptureQueriesContext(connection) as four_reaction_queries:
+            self.activity(page_size=50)
+
+        self.assertEqual(len(four_reaction_queries), len(no_reaction_queries))
