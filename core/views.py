@@ -759,6 +759,10 @@ def build_notification_message(notification):
         if notification.reaction_type == CommentReaction.REACT_DISLIKE:
             return f"A {actor_username} no le gustó tu mensaje"
         return f"A {actor_username} le gustó tu mensaje"
+    if notification.type == UserNotification.TYPE_VIDEO_COMMENT_REACTION:
+        if notification.reaction_type == VideoCommentReaction.REACT_DISLIKE:
+            return f"A {actor_username} no le gustó tu video"
+        return f"A {actor_username} le gustó tu video"
     return "Tienes una notificación"
 
 
@@ -837,24 +841,38 @@ def get_current_reaction_notifications_queryset(user):
     reaction_types = {
         UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
         UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+        UserNotification.TYPE_VIDEO_COMMENT_REACTION,
     }
     result_ids = []
     seen_keys = set()
     for notification in base_queryset.order_by("-updated_at", "-id"):
         if notification.type in reaction_types:
-            if not notification.comment_id or not notification.actor_id:
+            if not notification.actor_id:
                 continue
-            current_reaction_exists = CommentReaction.objects.filter(
-                comment_id=notification.comment_id,
-                user_id=notification.actor_id,
-                reaction_type=notification.reaction_type,
-            ).exists()
+            if notification.type == UserNotification.TYPE_VIDEO_COMMENT_REACTION:
+                if not notification.video_comment_id:
+                    continue
+                current_reaction_exists = VideoCommentReaction.objects.filter(
+                    video_comment_id=notification.video_comment_id,
+                    user_id=notification.actor_id,
+                    reaction_type=notification.reaction_type,
+                ).exists()
+                object_id = notification.video_comment_id
+            else:
+                if not notification.comment_id:
+                    continue
+                current_reaction_exists = CommentReaction.objects.filter(
+                    comment_id=notification.comment_id,
+                    user_id=notification.actor_id,
+                    reaction_type=notification.reaction_type,
+                ).exists()
+                object_id = notification.comment_id
             if not current_reaction_exists:
                 continue
             key = (
                 notification.recipient_id,
                 notification.actor_id,
-                notification.comment_id,
+                object_id,
                 notification.type,
             )
             if key in seen_keys:
@@ -2043,10 +2061,27 @@ class VideoCommentReactionView(APIView):
                 existing.reaction_type = reaction_type
                 existing.save(update_fields=["reaction_type", "updated_at"])
             else:
-                VideoCommentReaction.objects.create(
+                existing = VideoCommentReaction.objects.create(
                     video_comment=video_comment,
                     user=request.user,
                     reaction_type=reaction_type,
+                )
+            current = VideoCommentReaction.objects.filter(
+                video_comment=video_comment, user=request.user
+            ).first()
+            if request.user.id != video_comment.user_id and current:
+                UserNotification.objects.update_or_create(
+                    recipient=video_comment.user,
+                    actor=request.user,
+                    video_comment=video_comment,
+                    type=UserNotification.TYPE_VIDEO_COMMENT_REACTION,
+                    defaults={
+                        "movie": video_comment.movie,
+                        "target_tab": UserNotification.TARGET_ACTIVITY,
+                        "reaction_type": current.reaction_type,
+                        "is_read": False,
+                        "read_at": None,
+                    },
                 )
         return Response(self.response_data(video_comment), status=status.HTTP_200_OK)
 
@@ -2310,6 +2345,7 @@ class MeNotificationsView(APIView):
             type__in=[
                 UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
                 UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                UserNotification.TYPE_VIDEO_COMMENT_REACTION,
             ],
         ).count()
 
@@ -2351,11 +2387,15 @@ class MeNotificationsView(APIView):
             type__in=[
                 UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
                 UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                UserNotification.TYPE_VIDEO_COMMENT_REACTION,
             ]
         )
         if not include_read:
             reaction_notifications = reaction_notifications.filter(is_read=False)
-        reaction_notifications = reaction_notifications.select_related("actor", "actor__profile", "movie", "comment").order_by("-created_at", "-id")
+        reaction_notifications = reaction_notifications.select_related(
+            "actor", "actor__profile", "movie", "comment", "video_comment",
+            "video_comment__user", "video_comment__user__profile",
+        ).order_by("-created_at", "-id")
         reaction_items = [
             {
                 "id": item.id,
@@ -2371,6 +2411,7 @@ class MeNotificationsView(APIView):
                     item.type in {
                         UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
                         UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                        UserNotification.TYPE_VIDEO_COMMENT_REACTION,
                     }
                 ),
                 "is_given_reaction": False,
@@ -2378,7 +2419,9 @@ class MeNotificationsView(APIView):
                 "is_read": item.is_read,
                 "object": {
                     "comment_id": item.comment_id,
+                    "video_comment_id": item.video_comment_id,
                     "comment_author": build_actor_payload(item.comment.author, request) if item.comment else None,
+                    "video_owner": build_actor_payload(item.video_comment.user, request) if item.video_comment else None,
                     "movie": (
                         {
                             "id": item.movie.id,
@@ -2725,7 +2768,10 @@ class MeNotificationsMarkContextReadView(APIView):
                 ]
             )
         elif context == UserNotification.TARGET_ACTIVITY:
-            notifications_qs = notifications_qs.filter(type=UserNotification.TYPE_PUBLIC_COMMENT_REACTION)
+            notifications_qs = notifications_qs.filter(type__in=[
+                UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
+                UserNotification.TYPE_VIDEO_COMMENT_REACTION,
+            ])
 
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
         friend_requests_updated = 0

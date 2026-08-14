@@ -1401,11 +1401,13 @@ class UserNotification(models.Model):
     TYPE_PUBLIC_COMMENT_REACTION = "public_comment_reaction"
     TYPE_PRIVATE_COMMENT_REACTION = "private_comment_reaction"
     TYPE_FRIEND_REQUEST_RECEIVED = "friend_request_received"
+    TYPE_VIDEO_COMMENT_REACTION = "video_comment_reaction"
     TYPE_CHOICES = [
         (TYPE_PRIVATE_MESSAGE, "Private message"),
         (TYPE_PUBLIC_COMMENT_REACTION, "Public comment reaction"),
         (TYPE_PRIVATE_COMMENT_REACTION, "Private comment reaction"),
         (TYPE_FRIEND_REQUEST_RECEIVED, "Friend request received"),
+        (TYPE_VIDEO_COMMENT_REACTION, "Video comment reaction"),
     ]
 
     TARGET_ACTIVITY = "activity"
@@ -1429,6 +1431,13 @@ class UserNotification(models.Model):
     )
     comment = models.ForeignKey(
         "Comment",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    video_comment = models.ForeignKey(
+        "VideoComment",
         on_delete=models.CASCADE,
         related_name="notifications",
         null=True,
@@ -1460,6 +1469,11 @@ class UserNotification(models.Model):
             models.UniqueConstraint(
                 fields=["recipient", "actor", "comment", "type"],
                 name="unique_user_notification_per_actor_comment_type",
+            ),
+            models.UniqueConstraint(
+                fields=["recipient", "actor", "video_comment", "type"],
+                condition=models.Q(video_comment__isnull=False),
+                name="unique_user_notification_per_actor_video_type",
             ),
         ]
 

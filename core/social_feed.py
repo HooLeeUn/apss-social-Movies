@@ -30,6 +30,8 @@ class SocialActivityFeedService:
     ACTIVITY_VIDEO_REACTION_RECEIVED = "video_reaction_received"
     ACTIVITY_VIDEO_REACTION_GIVEN = "video_reaction_given"
     ACTIVITY_VIDEO_REACTION_CREATED = "video_reaction_created"
+    ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY = "comment_reactions_received_summary"
+    ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY = "video_reactions_received_summary"
 
     SCOPE_ME: SocialFeedScope = "me"
     SCOPE_FOLLOWING: SocialFeedScope = "following"
@@ -47,6 +49,8 @@ class SocialActivityFeedService:
         ACTIVITY_VIDEO_REACTION_RECEIVED: 1,
         ACTIVITY_VIDEO_REACTION_GIVEN: 1,
         ACTIVITY_VIDEO_REACTION_CREATED: 2,
+        ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY: 1,
+        ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY: 1,
     }
 
     @classmethod
@@ -90,6 +94,7 @@ class SocialActivityFeedService:
                     *cls._serialize_video_reaction_activities(viewer=user),
                 ]
             )
+            activities = cls._consolidate_received_reactions(activities)
 
         # Orden global unificado entre modelos distintos con desempate estable
         # por `id` para paginación por páginas (infinite scroll).
@@ -102,6 +107,70 @@ class SocialActivityFeedService:
             reverse=True,
         )
         return activities
+
+    @classmethod
+    def _consolidate_received_reactions(cls, activities: list[dict]) -> list[dict]:
+        """Replace received reaction events with one current-state item per object."""
+        families = {
+            cls.ACTIVITY_PUBLIC_COMMENT_REACTION: (
+                cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, "comment_id"
+            ),
+            cls.ACTIVITY_PRIVATE_COMMENT_REACTION: (
+                cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, "comment_id"
+            ),
+            cls.ACTIVITY_VIDEO_REACTION_RECEIVED: (
+                cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, "video_comment_id"
+            ),
+        }
+        kept = []
+        groups = {}
+        for activity in activities:
+            payload = activity.get("payload") or {}
+            family = families.get(activity["activity_type"])
+            if not family or not payload.get("is_received_reaction"):
+                kept.append(activity)
+                continue
+            summary_type, object_key = family
+            key = (summary_type, payload[object_key])
+            group = groups.setdefault(key, [])
+            group.append(activity)
+
+        for (summary_type, object_id), reactions in groups.items():
+            latest = max(reactions, key=lambda item: (item["activity_at"], item["_sort_entity_id"]))
+            first_payload = reactions[0]["payload"]
+            liked = [item["actor"] for item in reactions if item["payload"]["reaction_type"] == CommentReaction.REACT_LIKE]
+            disliked = [item["actor"] for item in reactions if item["payload"]["reaction_type"] == CommentReaction.REACT_DISLIKE]
+            object_key = "comment_id" if summary_type == cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY else "video_comment_id"
+            payload = {
+                object_key: object_id,
+                "owner": first_payload.get("comment_author") or first_payload.get("video_owner"),
+                "likes_count": len(liked),
+                "dislikes_count": len(disliked),
+                "users_who_liked": liked,
+                "users_who_disliked": disliked,
+                "latest_reaction_at": latest["activity_at"],
+                "object_created_at": first_payload["object_created_at"],
+                "is_received_reaction": True,
+                "is_given_reaction": False,
+            }
+            if first_payload.get("video_url") is not None:
+                payload["video_url"] = first_payload["video_url"]
+            kept.append({
+                "id": f"{summary_type}:{object_id}",
+                "activity_type": summary_type,
+                # The feed's established paginator sorts on ``created_at``;
+                # summaries use their latest reaction there while preserving
+                # the object's visual date explicitly in the payload.
+                "created_at": latest["activity_at"],
+                "updated_at": latest["activity_at"],
+                "activity_at": latest["activity_at"],
+                "_sort_entity_id": object_id,
+                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[summary_type],
+                "actor": first_payload.get("comment_author") or first_payload.get("video_owner"),
+                "movie": latest["movie"],
+                "payload": payload,
+            })
+        return kept
 
     @classmethod
     def build_feed_for_actor(cls, *, viewer, actor) -> list[dict]:
@@ -421,11 +490,12 @@ class SocialActivityFeedService:
                     "comment_id": reaction.comment_id,
                     "reaction_id": reaction.id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
-                    "comment_author": cls._serialize_compact_user(reaction.comment.author),
+                    "comment_author": cls._serialize_actor(reaction.comment.author),
                     "reaction_value": reaction.reaction_type,
                     "reaction_type": reaction.reaction_type,
                     "is_given_reaction": viewer and reaction.user_id == viewer.id,
                     "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
+                    "object_created_at": reaction.comment.created_at,
                 },
             }
             for reaction in queryset
@@ -465,11 +535,12 @@ class SocialActivityFeedService:
                     "comment_id": reaction.comment_id,
                     "reaction_id": reaction.id,
                     "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
-                    "comment_author": cls._serialize_compact_user(reaction.comment.author),
+                    "comment_author": cls._serialize_actor(reaction.comment.author),
                     "reaction_type": reaction.reaction_type,
                     "reaction_value": reaction.reaction_type,
                     "is_given_reaction": viewer and reaction.user_id == viewer.id,
                     "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
+                    "object_created_at": reaction.comment.created_at,
                 },
             }
             for reaction in valid_reactions
@@ -566,11 +637,13 @@ class SocialActivityFeedService:
                         "reaction_type": reaction.reaction_type,
                         "reaction_value": reaction.reaction_type,
                         "video_comment_id": reaction.video_comment_id,
-                        "video_owner": cls._serialize_compact_user(
+                        "video_owner": cls._serialize_actor(
                             reaction.video_comment.user
                         ),
                         "is_received_reaction": is_received,
                         "is_given_reaction": not is_received,
+                        "object_created_at": reaction.video_comment.created_at,
+                        "video_url": reaction.video_comment.video.url if reaction.video_comment.video else None,
                     },
                 }
             )

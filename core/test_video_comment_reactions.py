@@ -7,7 +7,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import Movie, VideoComment, VideoCommentReaction
+from core.models import Movie, UserNotification, VideoComment, VideoCommentReaction
 
 
 class VideoCommentReactionAPITests(TestCase):
@@ -108,6 +108,46 @@ class VideoCommentReactionAPITests(TestCase):
         self.assertIsNone(response.data["my_reaction"])
         self.assertEqual(response.data["likes_count"], 0)
 
+    def test_received_video_reaction_uses_existing_notification_lifecycle(self):
+        self.react(VideoCommentReaction.REACT_DISLIKE)
+        notification = UserNotification.objects.get(
+            type=UserNotification.TYPE_VIDEO_COMMENT_REACTION,
+            recipient=self.owner,
+        )
+        self.assertEqual(notification.video_comment_id, self.video_comment.id)
+        self.assertEqual(notification.movie_id, self.movie.id)
+        self.assertFalse(notification.is_read)
+
+        self.client.force_authenticate(self.owner)
+        inbox = self.client.get(reverse("me-notifications"))
+        self.assertEqual(inbox.data["total_unread"], 1)
+        item = inbox.data["items"][0]
+        self.assertEqual(item["object"]["video_comment_id"], self.video_comment.id)
+        self.assertEqual(item["object"]["movie"]["id"], self.movie.id)
+        self.assertIn("no le gustó tu video", item["message"])
+
+        marked = self.client.post(reverse("me-notifications-mark-read"), {"id": notification.id}, format="json")
+        self.assertEqual(marked.data["updated_notifications"], 1)
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
+        notification.is_read = False
+        notification.save(update_fields=["is_read"])
+        cleared = self.client.post(reverse("notifications-mark-all-read"), {}, format="json")
+        self.assertEqual(cleared.data["updated_notifications"], 1)
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
+    def test_switching_video_reaction_updates_notification_without_duplication(self):
+        self.react(VideoCommentReaction.REACT_LIKE)
+        self.react(VideoCommentReaction.REACT_DISLIKE)
+        notifications = UserNotification.objects.filter(
+            type=UserNotification.TYPE_VIDEO_COMMENT_REACTION,
+            recipient=self.owner,
+        )
+        self.assertEqual(notifications.count(), 1)
+        self.assertEqual(notifications.get().reaction_type, VideoCommentReaction.REACT_DISLIKE)
+
     def test_unauthenticated_user_cannot_react(self):
         self.client.force_authenticate(None)
 
@@ -142,4 +182,3 @@ class VideoCommentReactionAPITests(TestCase):
             list(response.data["results"])
 
         self.assertEqual(len(five_video_queries), len(one_video_queries))
-
