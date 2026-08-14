@@ -163,7 +163,7 @@ class VideoReactionProfileActivityTests(TestCase):
 
         response = self.activity(self.owner, page_size=1)
 
-        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(response.data["count"], 3)
         self.assertEqual(response.data["results"][0]["reaction_id"], reaction.id)
         self.assertIsNotNone(response.data["next"])
 
@@ -180,3 +180,118 @@ class VideoReactionProfileActivityTests(TestCase):
             self.activity(self.owner, page_size=50)
 
         self.assertEqual(len(five_reaction_queries), len(one_reaction_queries))
+
+
+class VideoReactionCreatedProfileActivityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = self.make_user("video_creator")
+        self.other = self.make_user("other_video_creator")
+        self.movie = Movie.objects.create(
+            author=self.owner,
+            title_english="Inside Out 2",
+            title_spanish="Intensa mente 2",
+            type=Movie.MOVIE,
+            genre="Action, Animation, Comedy",
+            release_year=2024,
+            image="https://images.example.test/inside-out-2.jpg",
+        )
+        self.url = reverse("profile-feed-activity")
+
+    def make_user(self, username):
+        return get_user_model().objects.create_user(
+            username=username,
+            email=f"{username}@example.com",
+            password="test1234",
+        )
+
+    def make_video(self, owner=None, filename="created.mp4"):
+        return VideoComment.objects.create(
+            user=owner or self.owner,
+            movie=self.movie,
+            video=SimpleUploadedFile(filename, b"video", content_type="video/mp4"),
+            duration_seconds=4,
+            mime_type="video/mp4",
+            file_size=5,
+        )
+
+    def activity(self, user=None, **params):
+        self.client.force_authenticate(user or self.owner)
+        response = self.client.get(self.url, {"scope": "me", **params})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response
+
+    def created_item(self, response, video):
+        return next(
+            item for item in response.data["results"]
+            if item["activity_type"] == "video_reaction_created"
+            and item["video_comment_id"] == video.id
+        )
+
+    def test_created_video_activity_has_movie_metadata_and_replay_url(self):
+        video = self.make_video()
+
+        item = self.created_item(self.activity(), video)
+
+        self.assertEqual(item["activity_type"], "video_reaction_created")
+        self.assertEqual(item["video_comment_id"], video.id)
+        self.assertEqual(item["movie"]["id"], self.movie.id)
+        self.assertEqual(item["movie"]["title_spanish"], "Intensa mente 2")
+        self.assertEqual(item["movie"]["title_english"], "Inside Out 2")
+        self.assertEqual(item["movie"]["image"], self.movie.image)
+        self.assertEqual(item["movie"]["type"], Movie.MOVIE)
+        self.assertEqual(item["movie"]["release_year"], 2024)
+        self.assertEqual(item["movie"]["genre"], "Action, Animation, Comedy")
+        self.assertTrue(item["video_url"].endswith(video.video.url))
+        self.assertEqual(item["timestamp"], item["created_at"])
+        self.assertEqual(item["activity_at"], item["created_at"])
+
+    def test_created_video_is_mixed_chronologically_before_pagination(self):
+        video = self.make_video()
+        rating = MovieRating.objects.create(user=self.owner, movie=self.movie, score=8)
+        baseline = timezone.now()
+        VideoComment.objects.filter(pk=video.pk).update(created_at=baseline)
+        MovieRating.objects.filter(pk=rating.pk).update(
+            created_at=baseline + timezone.timedelta(minutes=1)
+        )
+
+        first_page = self.activity(page_size=1)
+
+        self.assertEqual(first_page.data["count"], 2)
+        self.assertEqual(first_page.data["results"][0]["activity_type"], "rating")
+        self.assertIsNotNone(first_page.data["next"])
+
+    def test_deleted_video_removes_derived_activity(self):
+        video = self.make_video()
+        video_id = video.id
+        video.delete()
+
+        self.assertFalse(
+            any(
+                item["activity_type"] == "video_reaction_created"
+                and item["video_comment_id"] == video_id
+                for item in self.activity().data["results"]
+            )
+        )
+
+    def test_video_is_only_own_activity_for_its_owner(self):
+        video = self.make_video()
+
+        other_results = self.activity(self.other).data["results"]
+
+        self.assertFalse(
+            any(item["video_comment_id"] == video.id for item in other_results)
+        )
+
+    def test_query_count_does_not_grow_per_created_video(self):
+        self.make_video()
+        with CaptureQueriesContext(connection) as one_video_queries:
+            self.activity(page_size=50)
+
+        for index in range(4):
+            self.make_video(filename=f"created-{index}.mp4")
+
+        with CaptureQueriesContext(connection) as five_video_queries:
+            self.activity(page_size=50)
+
+        self.assertEqual(len(five_video_queries), len(one_video_queries))

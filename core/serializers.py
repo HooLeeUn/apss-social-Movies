@@ -595,11 +595,13 @@ class SocialActivitySerializer(serializers.Serializer):
         "private_comment_reaction",
         "video_reaction_received",
         "video_reaction_given",
+        "video_reaction_created",
     ])
     type = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField(allow_null=True)
     activity_at = serializers.DateTimeField()
+    timestamp = serializers.SerializerMethodField()
     actor = serializers.SerializerMethodField()
     movie = serializers.SerializerMethodField()
     payload = serializers.DictField()
@@ -612,6 +614,7 @@ class SocialActivitySerializer(serializers.Serializer):
     reaction_value = serializers.SerializerMethodField()
     reaction_id = serializers.SerializerMethodField()
     video_comment_id = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
     video_owner = serializers.SerializerMethodField()
     sender = serializers.SerializerMethodField()
     recipient = serializers.SerializerMethodField()
@@ -628,6 +631,7 @@ class SocialActivitySerializer(serializers.Serializer):
             "private_comment_reaction": "private_comment_reaction",
             "video_reaction_received": "video_reaction_received",
             "video_reaction_given": "video_reaction_given",
+            "video_reaction_created": "video_reaction_created",
         }
         return mapping.get(obj.get("activity_type"), obj.get("activity_type"))
 
@@ -660,6 +664,12 @@ class SocialActivitySerializer(serializers.Serializer):
 
     def get_video_comment_id(self, obj):
         return (obj.get("payload") or {}).get("video_comment_id")
+
+    def get_video_url(self, obj):
+        return self._build_absolute_media_url((obj.get("payload") or {}).get("video_url"))
+
+    def get_timestamp(self, obj):
+        return obj.get("timestamp") or obj.get("created_at")
 
     def get_video_owner(self, obj):
         return (obj.get("payload") or {}).get("video_owner")
