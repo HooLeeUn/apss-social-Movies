@@ -50,6 +50,8 @@ class ReceivedCommentReactionSummaryTests(TestCase):
         summaries = self.summaries()
         self.assertEqual(len(summaries), 2)
         first_summary = next(item for item in summaries if item["comment_id"] == self.first_comment.id)
+        self.assertEqual(first_summary["payload"]["comment_text"], self.first_comment.body)
+        self.assertEqual(first_summary["comment_text"], self.first_comment.body)
         self.assertEqual(first_summary["likes_count"], 2)
         self.assertEqual(
             {user["id"] for user in first_summary["users_who_liked"]},
@@ -69,6 +71,44 @@ class ReceivedCommentReactionSummaryTests(TestCase):
         first.delete()
         deleted = next(item for item in self.summaries() if item["comment_id"] == self.first_comment.id)
         self.assertEqual(deleted["dislikes_count"], 0)
+
+    def test_summary_with_only_like_preserves_reaction_and_object_timestamps(self):
+        reaction = CommentReaction.objects.create(
+            comment=self.first_comment, user=self.first_reactor, reaction_type="like"
+        )
+
+        summary = self.summaries()[0]
+
+        self.assertEqual(summary["payload"]["comment_text"], "First comment")
+        self.assertEqual(summary["likes_count"], 1)
+        self.assertEqual(summary["dislikes_count"], 0)
+        self.assertEqual(summary["users_who_liked"][0]["id"], self.first_reactor.id)
+        self.assertEqual(summary["users_who_disliked"], [])
+        self.assertEqual(
+            summary["object_created_at"],
+            self.first_comment.created_at.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            summary["latest_reaction_at"],
+            reaction.updated_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    def test_summary_with_only_dislike_contains_exact_comment_text(self):
+        exact_text = "A" * 140
+        self.second_comment.body = exact_text
+        self.second_comment.save(update_fields=["body"])
+        CommentReaction.objects.create(
+            comment=self.second_comment, user=self.second_reactor, reaction_type="dislike"
+        )
+
+        summary = self.summaries()[0]
+
+        self.assertEqual(summary["comment_id"], self.second_comment.id)
+        self.assertEqual(summary["payload"]["comment_text"], exact_text)
+        self.assertEqual(summary["likes_count"], 0)
+        self.assertEqual(summary["dislikes_count"], 1)
+        self.assertEqual(summary["users_who_liked"], [])
+        self.assertEqual(summary["users_who_disliked"][0]["id"], self.second_reactor.id)
 
     def test_given_reaction_stays_individual_and_groups_are_not_split_by_pagination(self):
         CommentReaction.objects.create(
