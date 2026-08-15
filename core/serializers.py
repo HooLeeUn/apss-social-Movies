@@ -666,7 +666,7 @@ class SocialActivitySerializer(serializers.Serializer):
 
     def get_comment_text(self, obj):
         payload = obj.get("payload") or {}
-        return payload.get("content") or payload.get("comment_excerpt")
+        return payload.get("content") or payload.get("comment_text") or payload.get("comment_excerpt")
 
     def get_comment_id(self, obj):
         return (obj.get("payload") or {}).get("comment_id")

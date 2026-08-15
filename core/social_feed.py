@@ -153,6 +153,8 @@ class SocialActivityFeedService:
                 "is_received_reaction": True,
                 "is_given_reaction": False,
             }
+            if summary_type == cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY:
+                payload["comment_text"] = reactions[0]["_comment_text"]
             if first_payload.get("video_url") is not None:
                 payload["video_url"] = first_payload["video_url"]
             kept.append({
@@ -479,6 +481,7 @@ class SocialActivityFeedService:
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),
+                "_comment_text": reaction.comment.body,
                 "movie": cls._serialize_movie(
                     reaction.comment.movie,
                     display_rating=reaction.movie_display_rating,
@@ -530,6 +533,7 @@ class SocialActivityFeedService:
                 "_sort_entity_id": reaction.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_COMMENT_REACTION],
                 "actor": cls._serialize_actor(reaction.user),
+                "_comment_text": reaction.comment.body,
                 "movie": cls._serialize_movie(reaction.comment.movie),
                 "payload": {
                     "comment_id": reaction.comment_id,
