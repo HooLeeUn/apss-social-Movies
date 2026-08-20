@@ -66,8 +66,8 @@ class SocialActivityFeedService:
     @classmethod
     def build_feed(cls, *, user, scope: SocialFeedScope) -> list[dict]:
         """
-        Devuelve una lista uniforme de actividades sociales ordenadas por
-        created_at DESC.
+        Devuelve una lista uniforme de actividades sociales ordenadas por el
+        timestamp efectivo del evento DESC.
 
         Nota: devolvemos dicts listos para DRF Serializer, así la vista futura
         no duplica lógica de composición.
@@ -100,13 +100,32 @@ class SocialActivityFeedService:
         # por `id` para paginación por páginas (infinite scroll).
         activities.sort(
             key=lambda item: (
-                item["created_at"],
+                cls._activity_sort_timestamp(item),
                 item["_sort_activity_priority"],
                 item["_sort_entity_id"],
             ),
             reverse=True,
         )
         return activities
+
+    @classmethod
+    def _activity_sort_timestamp(cls, activity: dict):
+        """Return the timestamp of the event represented by an activity.
+
+        Reaction rows can survive a like/dislike switch, so their ``created_at``
+        is the time of the first reaction while ``activity_at`` is the time of
+        the current reaction.  Received-reaction summaries likewise expose the
+        latest reaction as ``activity_at``.  Creation activities keep their
+        original creation timestamp.
+        """
+        creation_activity_types = {
+            cls.ACTIVITY_PUBLIC_COMMENT,
+            cls.ACTIVITY_PRIVATE_MESSAGE,
+            cls.ACTIVITY_VIDEO_REACTION_CREATED,
+        }
+        if activity["activity_type"] in creation_activity_types:
+            return activity["created_at"]
+        return activity["activity_at"]
 
     @classmethod
     def _consolidate_received_reactions(cls, activities: list[dict]) -> list[dict]:
