@@ -2373,6 +2373,85 @@ class MovieCommentEndpointTests(TestCase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]["id"], directed_comment.id)
 
+    def test_post_general_directed_endpoint_persists_structured_reply_without_at_mention(self):
+        Comment.objects.create(
+            author=self.friend_user,
+            movie=self.movie,
+            body=f"Mensaje previo @{self.user.username}",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user=self.user,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            f"{self.directed_url}?movie_id={self.movie.pk}",
+            {
+                "body": "respuesta desde modal",
+                "mentioned_username": self.friend_user.username,
+                "movie_id": str(self.movie.pk),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = Comment.objects.get(pk=response.data["id"])
+        self.assertEqual(created.author, self.user)
+        self.assertEqual(created.target_user, self.friend_user)
+        self.assertEqual(created.movie, self.movie)
+        self.assertEqual(created.body, "respuesta desde modal")
+        self.assertEqual(created.visibility, Comment.VISIBILITY_MENTIONED)
+        self.assertFalse(created.is_read)
+        self.assertEqual(response.data["movie"], self.movie.pk)
+        self.assertEqual(response.data["target_user"], self.friend_user.pk)
+        self.assertEqual(response.data["visibility"], Comment.VISIBILITY_MENTIONED)
+
+        history_url = reverse(
+            "movie-directed-conversation-messages",
+            kwargs={"pk": self.movie.pk, "username": self.friend_user.username},
+        )
+        history_response = self.client.get(history_url)
+        self.assertEqual(history_response.status_code, status.HTTP_200_OK)
+        history = history_response.data["results"] if isinstance(history_response.data, dict) else history_response.data
+        self.assertIn(created.id, [item["id"] for item in history])
+
+    def test_structured_directed_reply_produces_one_private_message_notification(self):
+        self.client.force_authenticate(user=self.user)
+        create_response = self.client.post(
+            self.directed_url,
+            {
+                "body": "respuesta desde modal",
+                "mentioned_username": self.friend_user.username,
+                "movie_id": self.movie.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(user=self.friend_user)
+        notification_response = self.client.get(reverse("me-notifications"))
+        self.assertEqual(notification_response.status_code, status.HTTP_200_OK)
+        notifications = [
+            item for item in notification_response.data["items"]
+            if item["type"] == UserNotification.TYPE_PRIVATE_MESSAGE
+            and item["object"]["comment_id"] == create_response.data["id"]
+        ]
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["actor"]["id"], self.user.id)
+
+    def test_general_directed_endpoint_rejects_self_recipient(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.directed_url,
+            {
+                "body": "no debe persistir",
+                "mentioned_username": self.user.username,
+                "movie_id": self.movie.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Comment.objects.exists())
+
     def test_received_and_fallback_directed_endpoints_support_movie_id_filter(self):
         other_movie = Movie.objects.create(
             author=self.user,
@@ -2417,9 +2496,9 @@ class MovieCommentEndpointTests(TestCase):
         Comment.objects.create(
             author=self.friend_user,
             movie=self.movie,
-            body="Sin mención válida",
+            body="Sin destinatario estructurado",
             visibility=Comment.VISIBILITY_MENTIONED,
-            target_user=self.user,
+            target_user=None,
         )
         Comment.objects.create(
             author=self.friend_user,
@@ -6142,7 +6221,7 @@ class ProfileFeedActivityViewTests(TestCase):
         inconsistent_directed = Comment.objects.create(
             author=self.viewer,
             movie=self.movie,
-            body="Sin mención al target",
+            body="Sin destinatario estructurado",
             visibility=Comment.VISIBILITY_MENTIONED,
             target_user=self.actor,
         )
@@ -6166,7 +6245,7 @@ class ProfileFeedActivityViewTests(TestCase):
             movie=self.movie,
             body="Mentioned only comment",
             visibility=Comment.VISIBILITY_MENTIONED,
-            target_user=self.viewer,
+            target_user=None,
         )
 
         ids, _ = self._fetch_ids(scope="following")

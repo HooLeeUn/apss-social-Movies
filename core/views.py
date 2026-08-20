@@ -1968,6 +1968,28 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
             is_read=is_read,
         )
 
+    def _save_directed_comment(self, serializer, movie):
+        target_user, _ = self._get_mentioned_friend_from_payload(serializer.validated_data)
+        if target_user is None:
+            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
+        if target_user is None:
+            raise ValidationError({"mentioned_username": "Directed comments require a valid friend mention."})
+        if users_have_any_restriction(self.request.user, target_user):
+            raise PermissionDenied({
+                "code": "directed_message_restricted",
+                "detail": "You cannot send a directed message to this user.",
+            })
+
+        # Private-message notifications are derived from this same Comment row.
+        with transaction.atomic():
+            serializer.save(
+                author=self.request.user,
+                movie=movie,
+                target_user=target_user,
+                visibility=Comment.VISIBILITY_MENTIONED,
+                is_read=False,
+            )
+
 
 
 class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
@@ -2163,9 +2185,20 @@ class SentDirectedCommentsView(generics.ListAPIView):
         )
 
 
-class DirectedCommentsListView(generics.ListAPIView):
+class DirectedCommentsListView(MovieCommentsListCreateView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = CommentSerializer
+
+    def perform_create(self, serializer):
+        query_movie_id = self.request.query_params.get("movie_id")
+        body_movie_id = self.request.data.get("movie_id")
+        if query_movie_id and body_movie_id and str(query_movie_id) != str(body_movie_id):
+            raise ValidationError({"movie_id": "Movie identifiers in query and body must match."})
+        movie_id = query_movie_id or body_movie_id
+        if not movie_id:
+            raise ValidationError({"movie_id": "This field is required."})
+        movie = get_object_or_404(Movie, pk=movie_id)
+        self._save_directed_comment(serializer, movie)
 
     def get_queryset(self):
         movie_id = self.request.query_params.get("movie_id")
@@ -2891,19 +2924,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
 
     def perform_create(self, serializer):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
-        target_user, _ = self._get_mentioned_friend_from_payload(serializer.validated_data)
-        if target_user is None:
-            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
-        if target_user is None:
-            raise ValidationError({"mentioned_username": "Directed comments require a valid friend mention."})
-
-        serializer.save(
-            author=self.request.user,
-            movie=movie,
-            target_user=target_user,
-            visibility=Comment.VISIBILITY_MENTIONED,
-            is_read=False,
-        )
+        self._save_directed_comment(serializer, movie)
 
 
 class DirectedConversationMessagesView(generics.ListAPIView):

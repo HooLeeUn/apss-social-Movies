@@ -138,8 +138,9 @@ curl -X POST "http://localhost:8000/api/movies/42/comments/" \
 - **Body expected:**
   - `body` (string, required)
 - **Mention contract:**
-  - Mention is parsed from `body` using `@username`
-  - Alias fields also accepted: `mentioned_username`, `recipient_username`
+  - Mention can be parsed from `body` using `@username` for backwards compatibility.
+  - Structured fields are also accepted: `mentioned_username`, `recipient_username`.
+    When either is supplied, `body` does not need to contain `@username`.
   - Mention is valid only if:
     1. user exists,
     2. is different from author,
@@ -154,4 +155,14 @@ curl -X POST "http://localhost:8000/api/movies/42/comments/" \
   -H "Authorization: Token <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"body":"Te la recomiendo @comment_friend"}'
+```
+
+The general directed endpoint persists the same `Comment` entity and accepts
+the movie in the query string and/or body:
+
+```bash
+curl -X POST "http://localhost:8000/api/comments/directed/?movie_id=42" \
+  -H "Authorization: Token <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"body":"Te la recomiendo","mentioned_username":"comment_friend","movie_id":"42"}'
 ```
