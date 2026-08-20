@@ -1262,21 +1262,21 @@ class Comment(models.Model):
 
     def has_valid_target_mention(self):
         """
-        Valida que el texto incluya una mención explícita al username del target_user.
-        Se usa para filtrar registros legacy inconsistentes.
+        Valida la relación estructurada de un comentario dirigido.
+
+        ``target_user`` es la fuente de verdad del destinatario. El cuerpo puede
+        conservar una mención ``@username`` por compatibilidad con clientes
+        antiguos, pero los clientes que envían ``mentioned_username`` no deben
+        tener que duplicarla en el texto visible.
         """
         if self.visibility != self.VISIBILITY_MENTIONED:
             return False
-        if not self.target_user_id or not getattr(self, "target_user", None):
-            return False
-        if not self.body:
-            return False
-
-        target_username = self.target_user.username.lower()
-        for match in self.mention_pattern.finditer(self.body):
-            if match.group("username").lower() == target_username:
-                return True
-        return False
+        return bool(
+            self.target_user_id
+            and self.author_id != self.target_user_id
+            and getattr(self, "target_user", None)
+            and self.body
+        )
 
 
 class VideoCommentQuerySet(models.QuerySet):
