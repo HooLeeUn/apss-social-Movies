@@ -90,7 +90,7 @@ class SocialActivityFeedService:
                 [
                     *cls._serialize_private_message_activities(actor_ids=actor_ids, viewer=user),
                     *cls._serialize_private_comment_reaction_activities(actor_ids=actor_ids, viewer=user),
-                    *cls._serialize_video_reaction_created_activities(viewer=user),
+                    *cls._serialize_video_reaction_created_activities(actor=user, viewer=user),
                     *cls._serialize_video_reaction_activities(viewer=user),
                 ]
             )
@@ -203,13 +203,13 @@ class SocialActivityFeedService:
             *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=viewer),
             *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=viewer),
             *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer),
+            *cls._serialize_video_reaction_created_activities(actor=actor, viewer=viewer),
         ]
         if viewer and actor and viewer.id == actor.id:
             activities.extend(
                 [
                     *cls._serialize_private_message_activities(actor_ids=actor_ids, viewer=viewer),
                     *cls._serialize_private_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer),
-                    *cls._serialize_video_reaction_created_activities(viewer=viewer),
                     *cls._serialize_video_reaction_activities(viewer=viewer),
                 ]
             )
@@ -673,8 +673,8 @@ class SocialActivityFeedService:
         return activities
 
     @classmethod
-    def _serialize_video_reaction_created_activities(cls, *, viewer) -> Iterable[dict]:
-        """Derive the authenticated user's upload activity from current videos."""
+    def _serialize_video_reaction_created_activities(cls, *, actor, viewer) -> Iterable[dict]:
+        """Derive an actor's upload activity from their current videos."""
         movie_display_rating_subquery = cls._movie_display_rating_subquery(
             movie_id_ref="movie_id"
         )
@@ -683,7 +683,7 @@ class SocialActivityFeedService:
             movie_id_ref="movie_id",
         )
         queryset = (
-            VideoComment.objects.filter(user_id=viewer.id)
+            VideoComment.objects.filter(user_id=actor.id)
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(viewer)
             .annotate(
