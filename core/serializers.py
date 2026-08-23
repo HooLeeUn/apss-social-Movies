@@ -35,6 +35,24 @@ from .models import (
 from .models import Follow, Profile
 
 
+class OnboardingUpdateSerializer(serializers.Serializer):
+    tour = serializers.ChoiceField(choices=("feed", "profile_feed", "detail_movie"))
+    status = serializers.ChoiceField(choices=Profile.OnboardingStatus.values)
+    version = serializers.IntegerField(min_value=1)
+    current_step = serializers.IntegerField(min_value=0, allow_null=True, required=False)
+
+    def validate(self, attrs):
+        status = attrs["status"]
+        current_step = attrs.get("current_step")
+        if status == Profile.OnboardingStatus.IN_PROGRESS and current_step is None:
+            raise serializers.ValidationError(
+                {"current_step": "This field is required while a tour is in progress."}
+            )
+        if status in (Profile.OnboardingStatus.COMPLETED, Profile.OnboardingStatus.SKIPPED):
+            attrs["current_step"] = None
+        return attrs
+
+
 def calculate_age_from_birth_date(birth_date):
     if not birth_date:
         return None
