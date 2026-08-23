@@ -1006,6 +1006,12 @@ class Friendship(models.Model):
 
 
 class Profile(models.Model):
+    class OnboardingStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETED = "completed", "Completed"
+        SKIPPED = "skipped", "Skipped"
+
     class GenderIdentity(models.TextChoices):
         MALE = "male", "Hombre"
         FEMALE = "female", "Mujer"
@@ -1071,6 +1077,27 @@ class Profile(models.Model):
         choices=StreamingCountry.choices,
         default=StreamingCountry.CO,
     )
+    feed_tour_status = models.CharField(
+        max_length=11,
+        choices=OnboardingStatus.choices,
+        default=OnboardingStatus.PENDING,
+    )
+    feed_tour_version = models.PositiveIntegerField(default=1)
+    feed_tour_current_step = models.PositiveIntegerField(null=True, blank=True)
+    profile_feed_tour_status = models.CharField(
+        max_length=11,
+        choices=OnboardingStatus.choices,
+        default=OnboardingStatus.PENDING,
+    )
+    profile_feed_tour_version = models.PositiveIntegerField(default=1)
+    profile_feed_tour_current_step = models.PositiveIntegerField(null=True, blank=True)
+    detail_movie_tour_status = models.CharField(
+        max_length=11,
+        choices=OnboardingStatus.choices,
+        default=OnboardingStatus.PENDING,
+    )
+    detail_movie_tour_version = models.PositiveIntegerField(default=1)
+    detail_movie_tour_current_step = models.PositiveIntegerField(null=True, blank=True)
 
     def __str__(self):
         return f"Profile({self.user.username})"

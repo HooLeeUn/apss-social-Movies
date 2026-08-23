@@ -37,6 +37,7 @@ from .serializers import (
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
     MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
+    OnboardingUpdateSerializer,
 )
 from .models import (
     AppBranding,
@@ -1166,6 +1167,62 @@ class MeView(generics.RetrieveUpdateAPIView):
 
     def get_queryset(self):
         return User.objects.all()
+
+
+class MeOnboardingView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    tour_names = ("feed", "profile_feed", "detail_movie")
+    allowed_transitions = {
+        Profile.OnboardingStatus.PENDING: {
+            Profile.OnboardingStatus.IN_PROGRESS,
+            Profile.OnboardingStatus.SKIPPED,
+        },
+        Profile.OnboardingStatus.IN_PROGRESS: {
+            Profile.OnboardingStatus.IN_PROGRESS,
+            Profile.OnboardingStatus.COMPLETED,
+            Profile.OnboardingStatus.SKIPPED,
+        },
+    }
+
+    @classmethod
+    def representation(cls, profile):
+        return {
+            tour: {
+                "status": getattr(profile, f"{tour}_tour_status"),
+                "version": getattr(profile, f"{tour}_tour_version"),
+                "current_step": getattr(profile, f"{tour}_tour_current_step"),
+            }
+            for tour in cls.tour_names
+        }
+
+    def get(self, request):
+        profile = Profile.objects.get(user=request.user)
+        return Response(self.representation(profile))
+
+    def patch(self, request):
+        serializer = OnboardingUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        tour = data["tour"]
+
+        with transaction.atomic():
+            profile = Profile.objects.select_for_update().get(user=request.user)
+            status_field = f"{tour}_tour_status"
+            current_status = getattr(profile, status_field)
+            new_status = data["status"]
+            if new_status not in self.allowed_transitions.get(current_status, set()):
+                raise ValidationError(
+                    {"status": f"Cannot transition from {current_status} to {new_status}."}
+                )
+
+            version_field = f"{tour}_tour_version"
+            step_field = f"{tour}_tour_current_step"
+            setattr(profile, status_field, new_status)
+            setattr(profile, version_field, data["version"])
+            setattr(profile, step_field, data.get("current_step"))
+            profile.save(update_fields=[status_field, version_field, step_field])
+
+        return Response(self.representation(profile))
 
 
 class MePersonalDataView(generics.RetrieveUpdateAPIView):
