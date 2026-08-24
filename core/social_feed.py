@@ -675,6 +675,12 @@ class SocialActivityFeedService:
     @classmethod
     def _serialize_video_reaction_created_activities(cls, *, actor, viewer) -> Iterable[dict]:
         """Derive an actor's upload activity from their current videos."""
+        queryset = cls.video_reaction_created_queryset(actor=actor, viewer=viewer)
+        return cls.serialize_video_reaction_created_queryset(queryset)
+
+    @classmethod
+    def video_reaction_created_queryset(cls, *, actor, viewer):
+        """Return the directly-filtered, fully annotated video queryset."""
         movie_display_rating_subquery = cls._movie_display_rating_subquery(
             movie_id_ref="movie_id"
         )
@@ -682,7 +688,7 @@ class SocialActivityFeedService:
             viewer=viewer,
             movie_id_ref="movie_id",
         )
-        queryset = (
+        return (
             VideoComment.objects.filter(user_id=actor.id)
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(viewer)
@@ -716,6 +722,9 @@ class SocialActivityFeedService:
             .order_by("-created_at", "-id")
         )
 
+    @classmethod
+    def serialize_video_reaction_created_queryset(cls, queryset) -> list[dict]:
+        """Serialize an already scoped queryset (including a paginated slice)."""
         return [
             {
                 "id": f"{cls.ACTIVITY_VIDEO_REACTION_CREATED}:{video.id}",
