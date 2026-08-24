@@ -7108,6 +7108,109 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertIn(f"public_comment:{self.visited_comment.id}", activity_ids)
         self.assertNotIn(f"rating:{self.other_rating.id}", activity_ids)
 
+    def test_user_activity_excludes_created_video_without_filter(self):
+        VideoComment.objects.create(
+            user=self.visited,
+            movie=self.movie_1,
+            video="video_comments/profile.mp4",
+            duration_seconds=1,
+            mime_type="video/mp4",
+            file_size=1,
+        )
+
+        response = self.client.get(reverse("user-activity", kwargs={"username": self.visited.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(any(
+            item["activity_type"] == "video_reaction_created"
+            for item in response.data["results"]
+        ))
+
+    def test_user_activity_filters_each_public_activity_type(self):
+        other_comment = Comment.objects.create(
+            author=self.other_actor,
+            movie=self.movie_3,
+            body="Comment reacted to by visited user",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        CommentReaction.objects.create(
+            user=self.visited,
+            comment=other_comment,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+
+        for activity_type in ("rating", "public_comment", "public_comment_reaction"):
+            with self.subTest(activity_type=activity_type):
+                response = self.client.get(url, {"activity_type": activity_type})
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertGreater(response.data["count"], 0)
+                self.assertTrue(all(
+                    item["activity_type"] == activity_type
+                    for item in response.data["results"]
+                ))
+                timestamps = [parse_datetime(item["created_at"]) for item in response.data["results"]]
+                self.assertEqual(timestamps, sorted(timestamps, reverse=True))
+
+    def test_user_activity_rejects_invalid_and_created_video_filters(self):
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+
+        invalid = self.client.get(url, {"activity_type": "not_real"})
+        video = self.client.get(url, {"activity_type": "video_reaction_created"})
+
+        self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(invalid.data, {"activity_type": ["Invalid activity type."]})
+        self.assertEqual(video.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("video-reactions", video.data["activity_type"][0])
+
+    def test_user_activity_type_filter_paginates_only_selected_type(self):
+        for index in range(11):
+            movie = Movie.objects.create(
+                author=self.author,
+                title_english=f"Rated Movie {index}",
+                type=Movie.MOVIE,
+            )
+            MovieRating.objects.create(user=self.visited, movie=movie, score=7)
+
+        response = self.client.get(
+            reverse("user-activity", kwargs={"username": self.visited.username}),
+            {"activity_type": "rating", "page": 2},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 12)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertTrue(all(item["activity_type"] == "rating" for item in response.data["results"]))
+
+    @patch("core.social_feed.SocialActivityFeedService._serialize_video_reaction_created_activities")
+    @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_reaction_activities")
+    @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_activities")
+    @patch("core.social_feed.SocialActivityFeedService._serialize_rating_activities")
+    def test_user_activity_filter_builds_only_selected_family(
+        self, ratings, comments, reactions, videos
+    ):
+        ratings.return_value = []
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+
+        response = self.client.get(url, {"activity_type": "rating"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ratings.assert_called_once()
+        comments.assert_not_called()
+        reactions.assert_not_called()
+        videos.assert_not_called()
+
+        ratings.reset_mock()
+        comments.reset_mock()
+        comments.return_value = []
+        response = self.client.get(url, {"activity_type": "public_comment"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        comments.assert_called_once()
+        ratings.assert_not_called()
+        reactions.assert_not_called()
+        videos.assert_not_called()
+
 
 class UserProfileVideoReactionsEndpointTests(TestCase):
     def setUp(self):
@@ -7212,13 +7315,13 @@ class UserProfileVideoReactionsEndpointTests(TestCase):
         self.assertEqual(video_response.status_code, activity_response.status_code)
         self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_existing_activity_endpoint_still_includes_created_video(self):
+    def test_existing_activity_endpoint_excludes_created_video(self):
         video = self.create_video()
 
         response = self.client.get(reverse("user-activity", kwargs={"username": self.actor.username}))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn(f"video_reaction_created:{video.id}", [item["id"] for item in response.data["results"]])
+        self.assertNotIn(f"video_reaction_created:{video.id}", [item["id"] for item in response.data["results"]])
 
 
 class PersonalDataEndpointTests(TestCase):

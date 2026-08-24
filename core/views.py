@@ -1908,6 +1908,13 @@ class ProfileFeedActivityView(generics.ListAPIView):
 
 
 class UserProfileActivityView(generics.ListAPIView):
+    """Return profile activity, optionally limited with ``activity_type``.
+
+    Valid values are ``rating``, ``public_comment`` and
+    ``public_comment_reaction``. Video reactions are available from
+    ``/api/users/<username>/video-reactions/`` instead.
+    """
+
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = SocialActivitySerializer
 
@@ -1921,9 +1928,20 @@ class UserProfileActivityView(generics.ListAPIView):
         if not can_view_user_profile(target, self.request.user):
             raise PermissionDenied("You do not have permission to view this profile.")
 
+        activity_type = self.request.query_params.get("activity_type")
+        if activity_type == SocialActivityFeedService.ACTIVITY_VIDEO_REACTION_CREATED:
+            raise ValidationError({
+                "activity_type": [
+                    "Use /api/users/<username>/video-reactions/ for video reactions."
+                ]
+            })
+        if activity_type is not None and activity_type not in SocialActivityFeedService.PROFILE_ACTIVITY_TYPES:
+            raise ValidationError({"activity_type": ["Invalid activity type."]})
+
         return SocialActivityFeedService.build_feed_for_actor(
             viewer=self.request.user,
             actor=target,
+            activity_type=activity_type,
         )
 
     def get_serializer_context(self):
