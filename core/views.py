@@ -1932,6 +1932,42 @@ class UserProfileActivityView(generics.ListAPIView):
         return context
 
 
+class UserProfileVideoReactionsView(generics.ListAPIView):
+    """Paginated video uploads for a profile, without building its full feed."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = SocialActivitySerializer
+    pagination_class = DefaultPagination
+
+    def get_target(self):
+        if not hasattr(self, "_target"):
+            self._target = get_object_or_404(
+                User.objects.select_related("profile"),
+                username=self.kwargs["username"],
+            )
+            if has_restricted_viewer(self._target, self.request.user):
+                raise PermissionDenied({"detail": "This profile is not available.", "code": "restricted_by_user"})
+            if not can_view_user_profile(self._target, self.request.user):
+                raise PermissionDenied("You do not have permission to view this profile.")
+        return self._target
+
+    def get_queryset(self):
+        return SocialActivityFeedService.video_reaction_created_queryset(
+            actor=self.get_target(),
+            viewer=self.request.user,
+        )
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        videos = page if page is not None else queryset
+        activities = SocialActivityFeedService.serialize_video_reaction_created_queryset(videos)
+        serializer = self.get_serializer(activities, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+
 class MovieCommentsListCreateView(generics.ListCreateAPIView):
     serializer_class = CommentSerializer
     mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")

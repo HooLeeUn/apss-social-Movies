@@ -57,6 +57,7 @@ from core.models import (
     UserDailyFeedPool,
     UserNotification,
     VideoComment,
+    VideoCommentReaction,
 )
 
 
@@ -7106,6 +7107,118 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertIn(f"rating:{self.visited_rating.id}", activity_ids)
         self.assertIn(f"public_comment:{self.visited_comment.id}", activity_ids)
         self.assertNotIn(f"rating:{self.other_rating.id}", activity_ids)
+
+
+class UserProfileVideoReactionsEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.viewer = get_user_model().objects.create_user(username="video_viewer", password="test1234")
+        self.actor = get_user_model().objects.create_user(username="video_actor", password="test1234")
+        self.other = get_user_model().objects.create_user(username="other_video_actor", password="test1234")
+        self.movie = Movie.objects.create(
+            author=self.actor,
+            title_english="Video Movie",
+            title_spanish="Pelicula Video",
+            type=Movie.MOVIE,
+        )
+        self.url = reverse("user-video-reactions", kwargs={"username": self.actor.username})
+        self.client.force_authenticate(self.viewer)
+
+    def create_video(self, user=None, suffix="video"):
+        return VideoComment.objects.create(
+            user=user or self.actor,
+            movie=self.movie,
+            video=f"video_comments/{suffix}.mp4",
+            duration_seconds=1,
+            mime_type="video/mp4",
+            file_size=1,
+        )
+
+    def test_returns_only_actor_videos_in_descending_order_with_expected_contract(self):
+        older = self.create_video(suffix="older")
+        newer = self.create_video(suffix="newer")
+        foreign = self.create_video(user=self.other, suffix="foreign")
+        VideoComment.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+        VideoCommentReaction.objects.create(
+            video_comment=newer,
+            user=self.viewer,
+            reaction_type=VideoCommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+        results = response.data["results"]
+        self.assertEqual([item["payload"]["video_comment_id"] for item in results], [newer.id, older.id])
+        self.assertNotIn(foreign.id, [item["payload"]["video_comment_id"] for item in results])
+        self.assertTrue(all(item["activity_type"] == "video_reaction_created" for item in results))
+        self.assertEqual(results[0]["actor"]["username"], self.actor.username)
+        self.assertEqual(results[0]["movie"]["id"], self.movie.id)
+        self.assertEqual(results[0]["movie"]["title_english"], "Video Movie")
+        self.assertEqual(results[0]["movie"]["title_spanish"], "Pelicula Video")
+        self.assertIn("image", results[0]["movie"])
+        self.assertTrue(results[0]["payload"]["video_url"].endswith("video_comments/newer.mp4"))
+        self.assertEqual(results[0]["payload"]["likes_count"], 1)
+        self.assertEqual(results[0]["payload"]["dislikes_count"], 0)
+        self.assertEqual(results[0]["payload"]["my_reaction"], VideoCommentReaction.REACT_LIKE)
+
+    def test_paginates_video_count_and_second_page(self):
+        videos = [self.create_video(suffix=str(index)) for index in range(11)]
+
+        first = self.client.get(self.url)
+        second = self.client.get(self.url, {"page": 2})
+
+        self.assertEqual(first.data["count"], 11)
+        self.assertEqual(len(first.data["results"]), 10)
+        self.assertIsNotNone(first.data["next"])
+        self.assertEqual(len(second.data["results"]), 1)
+        self.assertEqual(second.data["results"][0]["payload"]["video_comment_id"], videos[0].id)
+
+    @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_reaction_activities")
+    @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_activities")
+    @patch("core.social_feed.SocialActivityFeedService._serialize_rating_activities")
+    def test_does_not_build_other_activity_families(self, ratings, comments, reactions):
+        self.create_video()
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ratings.assert_not_called()
+        comments.assert_not_called()
+        reactions.assert_not_called()
+
+    def test_query_count_does_not_grow_with_number_of_videos(self):
+        self.create_video(suffix="single")
+        with CaptureQueriesContext(connection) as single_queries:
+            self.client.get(self.url)
+        for index in range(9):
+            self.create_video(suffix=f"additional-{index}")
+        with CaptureQueriesContext(connection) as many_queries:
+            self.client.get(self.url)
+
+        self.assertEqual(len(many_queries), len(single_queries))
+
+    def test_matches_activity_privacy_restrictions_and_missing_user(self):
+        self.actor.profile.visibility = Profile.Visibility.PRIVATE
+        self.actor.profile.is_public = False
+        self.actor.profile.save(update_fields=["visibility", "is_public"])
+
+        video_response = self.client.get(self.url)
+        activity_response = self.client.get(reverse("user-activity", kwargs={"username": self.actor.username}))
+        missing_response = self.client.get(reverse("user-video-reactions", kwargs={"username": "missing-user"}))
+
+        self.assertEqual(video_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(video_response.status_code, activity_response.status_code)
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_existing_activity_endpoint_still_includes_created_video(self):
+        video = self.create_video()
+
+        response = self.client.get(reverse("user-activity", kwargs={"username": self.actor.username}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(f"video_reaction_created:{video.id}", [item["id"] for item in response.data["results"]])
 
 
 class PersonalDataEndpointTests(TestCase):
