@@ -40,6 +40,11 @@ class SocialActivityFeedService:
     DEFAULT_SCOPE: SocialFeedScope = SCOPE_ME
     COMMENT_EXCERPT_LENGTH = 120
     VALID_SCOPES = frozenset({SCOPE_ME, SCOPE_FOLLOWING, SCOPE_FRIENDS})
+    PROFILE_ACTIVITY_TYPES = frozenset({
+        ACTIVITY_RATING,
+        ACTIVITY_PUBLIC_COMMENT,
+        ACTIVITY_PUBLIC_COMMENT_REACTION,
+    })
     _ACTIVITY_SORT_PRIORITY = {
         ACTIVITY_RATING: 3,
         ACTIVITY_PRIVATE_MESSAGE: 2,
@@ -194,18 +199,32 @@ class SocialActivityFeedService:
         return kept
 
     @classmethod
-    def build_feed_for_actor(cls, *, viewer, actor) -> list[dict]:
+    def build_feed_for_actor(cls, *, viewer, actor, activity_type: str | None = None) -> list[dict]:
+        """Build a visited profile feed, optionally querying one public family only.
+
+        ``activity_type`` must be one of ``PROFILE_ACTIVITY_TYPES``. Video
+        uploads intentionally live at the dedicated ``/video-reactions/``
+        endpoint and are never included here.
+        """
         if actor is None:
             return []
+        if activity_type is not None and activity_type not in cls.PROFILE_ACTIVITY_TYPES:
+            raise ValueError(f"Unsupported profile activity type: {activity_type}")
 
         actor_ids = [actor.id]
-        activities = [
-            *cls._serialize_rating_activities(actor_ids=actor_ids, viewer=viewer),
-            *cls._serialize_public_comment_activities(actor_ids=actor_ids, viewer=viewer),
-            *cls._serialize_public_comment_reaction_activities(actor_ids=actor_ids, viewer=viewer),
-            *cls._serialize_video_reaction_created_activities(actor=actor, viewer=viewer),
-        ]
-        if viewer and actor and viewer.id == actor.id:
+        serializers_by_type = {
+            cls.ACTIVITY_RATING: cls._serialize_rating_activities,
+            cls.ACTIVITY_PUBLIC_COMMENT: cls._serialize_public_comment_activities,
+            cls.ACTIVITY_PUBLIC_COMMENT_REACTION: cls._serialize_public_comment_reaction_activities,
+        }
+        selected_types = (activity_type,) if activity_type else cls.PROFILE_ACTIVITY_TYPES
+        activities = []
+        for selected_type in selected_types:
+            activities.extend(
+                serializers_by_type[selected_type](actor_ids=actor_ids, viewer=viewer)
+            )
+
+        if activity_type is None and viewer and actor and viewer.id == actor.id:
             activities.extend(
                 [
                     *cls._serialize_private_message_activities(actor_ids=actor_ids, viewer=viewer),
