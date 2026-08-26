@@ -616,7 +616,9 @@ class SocialActivityFeedService:
             hydration_started = perf_counter() if profiler else None
             if profiler:
                 profiler.phase = "hydration"
-            activities = cls._hydrate_adaptive_candidates(selected=selected, viewer=user)
+            activities = cls._hydrate_adaptive_candidates(
+                selected=selected, viewer=user, profiler=profiler
+            )
             if profiler:
                 profiler.hydration_ms = (perf_counter() - hydration_started) * 1000
             expected_ids = [f'{item["namespace"]}:{item["object_id"]}' for item in selected]
@@ -661,6 +663,18 @@ class SocialActivityFeedService:
                 "avg_batch_ms": round(elapsed / sequence.batches, 3) if sequence.batches else 0.0,
                 "queries": profiler.queries_by_phase.get(sequence.name, 0),
             }
+        hydration_families = {
+            phase.removeprefix("hydration_"): {
+                "ms": round(elapsed, 3),
+                "queries": profiler.queries_by_phase.get(phase, 0),
+            }
+            for phase, elapsed in profiler.family_ms.items()
+            if phase.startswith("hydration_")
+        }
+        hydration_queries = sum(
+            count for phase, count in profiler.queries_by_phase.items()
+            if phase == "hydration" or phase.startswith("hydration_")
+        )
         return {
             "total_ms": round((perf_counter() - profiler.started) * 1000, 3),
             "candidate_queries_total": profiler.queries_total,
@@ -668,11 +682,18 @@ class SocialActivityFeedService:
             "frontier_ms": round(profiler.frontier_ms, 3),
             "certification_ms": round(profiler.certification_ms, 3),
             "hydration_ms": round(profiler.hydration_ms, 3),
-            "hydration_queries": profiler.queries_by_phase.get("hydration", 0),
+            "hydration_queries": hydration_queries,
+            "hydration_families": hydration_families,
         }
 
     @classmethod
-    def _hydrate_adaptive_candidates(cls, *, selected, viewer):
+    def _hydrate_adaptive_candidates(cls, *, selected, viewer, profiler=None):
+        """Hydrate the certified top-K in one evaluated queryset per family.
+
+        Keeping the maps of selected identifiers request-local bounds memory to
+        K.  ``profiler`` is deliberately optional so production requests with
+        profiling disabled do not pay for clocks or per-family bookkeeping.
+        """
         ids = {}
         for item in selected:
             ids.setdefault(item["namespace"], []).append(item["object_id"])
@@ -688,13 +709,41 @@ class SocialActivityFeedService:
         for namespace, (hydrator, converter) in ordinary.items():
             object_ids = ids.get(namespace, [])
             if object_ids:
-                activities.extend(converter(hydrator(object_ids, viewer=viewer), viewer=viewer))
-        activities.extend(cls.hydrate_comment_reaction_summaries(
-            comment_ids=ids.get(cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, []), viewer=viewer
-        ))
-        activities.extend(cls.hydrate_video_reaction_summaries(
-            video_comment_ids=ids.get(cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, []), viewer=viewer
-        ))
+                hydrate = lambda: converter(
+                    hydrator(object_ids, viewer=viewer), viewer=viewer
+                )
+                rows = (
+                    profiler.measure(f"hydration_{namespace}", hydrate)
+                    if profiler else hydrate()
+                )
+                activities.extend(rows)
+
+        def hydrate_comment_summaries():
+            return cls.hydrate_comment_reaction_summaries(
+                comment_ids=ids.get(
+                    cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, []
+                ),
+                viewer=viewer,
+            )
+
+        def hydrate_video_summaries():
+            return cls.hydrate_video_reaction_summaries(
+                video_comment_ids=ids.get(
+                    cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, []
+                ),
+                viewer=viewer,
+            )
+
+        comment_rows = (
+            profiler.measure("hydration_comment_summaries", hydrate_comment_summaries)
+            if profiler else hydrate_comment_summaries()
+        )
+        video_rows = (
+            profiler.measure("hydration_video_summaries", hydrate_video_summaries)
+            if profiler else hydrate_video_summaries()
+        )
+        activities.extend(comment_rows)
+        activities.extend(video_rows)
         return activities
 
     @classmethod
@@ -1459,7 +1508,8 @@ class SocialActivityFeedService:
         if actor_ids is not None:
             queryset = queryset.filter(comment__author_id__in=actor_ids)
         return (queryset.exclude(user_id=F("comment__author_id")).select_related(
-            "user", "user__profile", "comment", "comment__author", "comment__target_user", "comment__movie"
+            "user", "user__profile", "comment", "comment__author",
+            "comment__author__profile", "comment__target_user", "comment__movie"
         ).order_by("-created_at", "-id"))
 
     @classmethod
