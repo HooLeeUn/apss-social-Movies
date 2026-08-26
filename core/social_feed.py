@@ -57,6 +57,21 @@ class SocialActivityFeedService:
         ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY: 1,
         ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY: 1,
     }
+    # Frozen in Phase A.  This is deliberately candidate-only: ``build_feed``
+    # keeps its established sort implementation until the candidate is proven
+    # in production-like datasets.
+    LEGACY_FAMILY_RANK = {
+        ACTIVITY_RATING: 7,
+        ACTIVITY_PUBLIC_COMMENT: 6,
+        ACTIVITY_PUBLIC_COMMENT_REACTION: 5,
+        ACTIVITY_PRIVATE_MESSAGE: 4,
+        ACTIVITY_PRIVATE_COMMENT_REACTION: 3,
+        ACTIVITY_VIDEO_REACTION_CREATED: 2,
+        ACTIVITY_VIDEO_REACTION_GIVEN: 1,
+        ACTIVITY_VIDEO_REACTION_RECEIVED: 1,
+        ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY: 0,
+        ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY: -1,
+    }
 
     @classmethod
     def is_valid_scope(cls, scope: str | None) -> bool:
@@ -103,6 +118,52 @@ class SocialActivityFeedService:
 
         # Orden global unificado entre modelos distintos con desempate estable
         # por `id` para paginación por páginas (infinite scroll).
+        activities.sort(
+            key=lambda item: (
+                cls._activity_sort_timestamp(item),
+                item["_sort_activity_priority"],
+                item["_sort_entity_id"],
+            ),
+            reverse=True,
+        )
+        return activities
+
+    @classmethod
+    def build_feed_candidate_full_materialization(cls, *, user, scope: SocialFeedScope) -> list[dict]:
+        """Build the Phase-B candidate without changing the production path.
+
+        All selector rows are intentionally materialized before hydration.  No
+        limit, batching, keyset pagination, or summary optimization belongs in
+        this phase.
+        """
+        if not cls.is_valid_scope(scope):
+            raise ValueError(f"Unsupported social feed scope: {scope}")
+        actor_ids = list(set(cls._get_actor_ids_for_scope(user=user, scope=scope)))
+        if not actor_ids:
+            return []
+
+        activities = []
+        families = (
+            (cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_rating_ids, cls.serialize_rating_queryset),
+            (cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
+            (cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_public_reaction_ids, cls.serialize_public_reaction_queryset),
+        )
+        for candidates, hydrator, converter in families:
+            ids = list(candidates.values_list("pk", flat=True))
+            activities.extend(converter(hydrator(ids, viewer=user), viewer=user))
+
+        if scope == cls.SCOPE_ME:
+            private_families = (
+                (cls.private_message_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_private_message_ids, cls.serialize_private_message_queryset),
+                (cls.private_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_private_reaction_ids, cls.serialize_private_reaction_queryset),
+                (cls.video_created_candidates_queryset(actor=user, viewer=user), cls.hydrate_video_created_ids, cls.serialize_video_reaction_created_queryset),
+                (cls.video_reaction_candidates_queryset(viewer=user), cls.hydrate_video_reaction_ids, cls.serialize_video_reaction_queryset),
+            )
+            for candidates, hydrator, converter in private_families:
+                ids = list(candidates.values_list("pk", flat=True))
+                activities.extend(converter(hydrator(ids, viewer=user), viewer=user))
+            activities = cls._consolidate_received_reactions(activities)
+
         activities.sort(
             key=lambda item: (
                 cls._activity_sort_timestamp(item),
@@ -287,6 +348,113 @@ class SocialActivityFeedService:
         # build_feed() valida scope antes de llegar aquí.
         raise ValueError(f"Unsupported social feed scope: {scope}")
 
+    # Phase-B selectors.  They intentionally return model querysets rather
+    # than values/lists, so callers may further project them without causing
+    # evaluation.  ``only`` keeps candidate selection free of payload fields.
+    @classmethod
+    def rating_candidates_queryset(cls, *, actor_ids, viewer):
+        return MovieRating.objects.filter(user_id__in=actor_ids).annotate(
+            candidate_activity_at=F("updated_at"),
+            candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_RATING]),
+        ).only(
+            "id", "user_id", "movie_id", "created_at", "updated_at"
+        )
+
+    @classmethod
+    def public_comment_candidates_queryset(cls, *, actor_ids, viewer):
+        return Comment.objects.filter(
+            author_id__in=actor_ids, visibility=Comment.VISIBILITY_PUBLIC
+        ).annotate(
+            candidate_activity_at=F("created_at"),
+            candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PUBLIC_COMMENT]),
+        ).only("id", "author_id", "movie_id", "created_at")
+
+    @classmethod
+    def public_reaction_candidates_queryset(cls, *, actor_ids, viewer):
+        return (
+            CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+            .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
+            .exclude(user_id=F("comment__author_id"))
+            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PUBLIC_COMMENT_REACTION]))
+            .only("id", "user_id", "comment_id", "created_at", "updated_at")
+        )
+
+    @classmethod
+    def private_message_candidates_queryset(cls, *, actor_ids, viewer):
+        # ``has_valid_target_mention`` remains a Python validation after rich
+        # hydration; translating its username/token rules to SQL is not proven
+        # equivalent and is therefore intentionally deferred.
+        return Comment.objects.filter(
+            author_id__in=actor_ids,
+            visibility=Comment.VISIBILITY_MENTIONED,
+            target_user__isnull=False,
+        ).annotate(candidate_activity_at=F("created_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PRIVATE_MESSAGE])).only("id", "author_id", "target_user_id", "movie_id", "created_at")
+
+    @classmethod
+    def private_reaction_candidates_queryset(cls, *, actor_ids, viewer):
+        # The parent comment receives the same post-hydration Python validation
+        # as the legacy implementation.
+        return (
+            CommentReaction.objects.filter(
+                comment__author_id__in=actor_ids,
+                comment__visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .exclude(user_id=F("comment__author_id"))
+            .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PRIVATE_COMMENT_REACTION]))
+            .only("id", "user_id", "comment_id", "created_at", "updated_at")
+        )
+
+    @classmethod
+    def video_created_candidates_queryset(cls, *, actor, viewer):
+        return VideoComment.objects.filter(user_id=actor.id).annotate(
+            candidate_activity_at=F("created_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_CREATED])
+        ).only(
+            "id", "user_id", "movie_id", "created_at"
+        )
+
+    @classmethod
+    def video_reaction_candidates_queryset(cls, *, viewer):
+        return (
+            VideoCommentReaction.objects.filter(
+                Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
+            )
+            .exclude(user_id=F("video_comment__user_id"))
+            .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_GIVEN]))
+            .only("id", "user_id", "video_comment_id", "created_at", "updated_at")
+        )
+
+    @classmethod
+    def hydrate_rating_ids(cls, ids, *, viewer):
+        return cls.rating_activity_queryset(actor_ids=None, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_public_comment_ids(cls, ids, *, viewer):
+        return cls._public_comment_activity_queryset(actor_ids=None, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_public_reaction_ids(cls, ids, *, viewer):
+        return cls._public_reaction_activity_queryset(actor_ids=None, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_private_message_ids(cls, ids, *, viewer):
+        return cls._private_message_activity_queryset(actor_ids=None, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_private_reaction_ids(cls, ids, *, viewer):
+        return cls._private_reaction_activity_queryset(actor_ids=None, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_video_created_ids(cls, ids, *, viewer):
+        return cls.video_reaction_created_queryset(actor=viewer, viewer=viewer).filter(pk__in=ids)
+
+    @classmethod
+    def hydrate_video_reaction_ids(cls, ids, *, viewer):
+        return cls._video_reaction_activity_queryset(viewer=viewer).filter(pk__in=ids)
+
     @classmethod
     def _serialize_rating_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
         return cls.serialize_rating_queryset(
@@ -305,8 +473,11 @@ class SocialActivityFeedService:
             viewer=viewer,
             movie_id_ref="movie_id",
         )
+        queryset = MovieRating.objects.all()
+        if actor_ids is not None:
+            queryset = queryset.filter(user_id__in=actor_ids)
         return (
-            MovieRating.objects.filter(user_id__in=actor_ids)
+            queryset
             .select_related("user", "user__profile", "movie")
             .annotate(
                 movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
@@ -327,7 +498,7 @@ class SocialActivityFeedService:
         )
 
     @classmethod
-    def serialize_rating_queryset(cls, queryset) -> list[dict]:
+    def serialize_rating_queryset(cls, queryset, *, viewer=None) -> list[dict]:
         """Convert an already selected rating queryset/page to feed payloads."""
         return [
             {
@@ -355,355 +526,38 @@ class SocialActivityFeedService:
 
     @classmethod
     def _serialize_public_comment_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
-        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
-        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+        return cls.serialize_public_comment_queryset(
+            cls._public_comment_activity_queryset(actor_ids=actor_ids, viewer=viewer),
             viewer=viewer,
-            movie_id_ref="movie_id",
         )
-        queryset = (
-            Comment.objects.filter(
-                author_id__in=actor_ids,
-                visibility=Comment.VISIBILITY_PUBLIC,
-            )
-            .select_related("author", "author__profile", "movie")
-            .annotate(
-                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
-                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
-                movie_following_avg_rating=Subquery(
-                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="movie_id"),
-                    output_field=FloatField(),
-                ),
-                movie_following_ratings_count=Coalesce(
-                    Subquery(
-                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="movie_id"),
-                        output_field=IntegerField(),
-                    ),
-                    Value(0),
-                ),
-            )
-            .order_by("-created_at", "-id")
-        )
-
-        return [
-            {
-                "id": f"public_comment:{comment.id}",
-                "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
-                "created_at": comment.created_at,
-                "updated_at": comment.updated_at,
-                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
-                "_sort_entity_id": comment.id,
-                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
-                "actor": cls._serialize_actor(comment.author),
-                "movie": cls._serialize_movie(
-                    comment.movie,
-                    display_rating=comment.movie_display_rating,
-                    my_rating=comment.viewer_movie_rating,
-                    following_avg_rating=comment.movie_following_avg_rating,
-                    following_ratings_count=comment.movie_following_ratings_count,
-                ),
-                "payload": {
-                    "comment_id": comment.id,
-                    "content": comment.body,
-                },
-            }
-            for comment in queryset
-        ]
 
     @classmethod
     def _serialize_private_message_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
-        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
-        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+        return cls.serialize_private_message_queryset(
+            cls._private_message_activity_queryset(actor_ids=actor_ids, viewer=viewer),
             viewer=viewer,
-            movie_id_ref="movie_id",
         )
-        queryset = (
-            Comment.objects.filter(
-                author_id__in=actor_ids,
-                visibility=Comment.VISIBILITY_MENTIONED,
-                target_user__isnull=False,
-            )
-            .select_related("author", "author__profile", "movie", "target_user")
-            .annotate(
-                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
-                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
-                movie_following_avg_rating=Subquery(
-                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="movie_id"),
-                    output_field=FloatField(),
-                ),
-                movie_following_ratings_count=Coalesce(
-                    Subquery(
-                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="movie_id"),
-                        output_field=IntegerField(),
-                    ),
-                    Value(0),
-                ),
-            )
-            .order_by("-created_at", "-id")
-        )
-
-        valid_comments = [comment for comment in queryset if comment.has_valid_target_mention()]
-
-        return [
-            {
-                "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}",
-                "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
-                "created_at": comment.created_at,
-                "updated_at": comment.updated_at,
-                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
-                "_sort_entity_id": comment.id,
-                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
-                "actor": cls._serialize_actor(comment.author),
-                "movie": cls._serialize_movie(
-                    comment.movie,
-                    display_rating=comment.movie_display_rating,
-                    my_rating=comment.viewer_movie_rating,
-                    following_avg_rating=comment.movie_following_avg_rating,
-                    following_ratings_count=comment.movie_following_ratings_count,
-                ),
-                "payload": {
-                    "comment_id": comment.id,
-                    "content": comment.body,
-                    "sender": cls._serialize_compact_user(comment.author),
-                    "recipient": cls._serialize_compact_user(comment.target_user),
-                    "target_user": cls._serialize_compact_user(comment.target_user),
-                    "direction": "sent" if viewer and comment.author_id == viewer.id else "received",
-                    "counterpart": cls._serialize_compact_user(
-                        comment.target_user if viewer and comment.author_id == viewer.id else comment.author
-                    ),
-                },
-            }
-            for comment in valid_comments
-        ]
 
     @classmethod
-    def _serialize_public_comment_reaction_activities(
-        cls,
-        *,
-        actor_ids: list[int],
-        viewer,
-    ) -> Iterable[dict]:
-        movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="comment__movie_id")
-        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
+    def _serialize_public_comment_reaction_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
+        return cls.serialize_public_reaction_queryset(
+            cls._public_reaction_activity_queryset(actor_ids=actor_ids, viewer=viewer),
             viewer=viewer,
-            movie_id_ref="comment__movie_id",
         )
-        queryset = (
-            CommentReaction.objects.filter(
-                comment__visibility=Comment.VISIBILITY_PUBLIC,
-            )
-            .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
-            .exclude(user_id=F("comment__author_id"))
-            .exclude(
-                comment__author__visibility_blocks__blocked_user_id=viewer.id,
-            )
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
-            .select_related(
-                "user",
-                "user__profile",
-                "comment",
-                "comment__author",
-                "comment__author__profile",
-                "comment__movie",
-            )
-            .annotate(
-                movie_display_rating=Subquery(movie_display_rating_subquery, output_field=FloatField()),
-                viewer_movie_rating=Subquery(viewer_rating_subquery, output_field=IntegerField()),
-                movie_following_avg_rating=Subquery(
-                    cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref="comment__movie_id"),
-                    output_field=FloatField(),
-                ),
-                movie_following_ratings_count=Coalesce(
-                    Subquery(
-                        cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref="comment__movie_id"),
-                        output_field=IntegerField(),
-                    ),
-                    Value(0),
-                ),
-            )
-            .order_by("-created_at", "-id")
-        )
-
-        return [
-            {
-                "id": f"{cls.ACTIVITY_PUBLIC_COMMENT_REACTION}:{reaction.id}",
-                "activity_type": cls.ACTIVITY_PUBLIC_COMMENT_REACTION,
-                "created_at": reaction.created_at,
-                "updated_at": reaction.updated_at,
-                "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
-                "_sort_entity_id": reaction.id,
-                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT_REACTION],
-                "actor": cls._serialize_actor(reaction.user),
-                "_comment_text": reaction.comment.body,
-                "movie": cls._serialize_movie(
-                    reaction.comment.movie,
-                    display_rating=reaction.movie_display_rating,
-                    my_rating=reaction.viewer_movie_rating,
-                    following_avg_rating=reaction.movie_following_avg_rating,
-                    following_ratings_count=reaction.movie_following_ratings_count,
-                ),
-                "payload": {
-                    "comment_id": reaction.comment_id,
-                    "reaction_id": reaction.id,
-                    "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
-                    "comment_author": cls._serialize_actor(reaction.comment.author),
-                    "reaction_value": reaction.reaction_type,
-                    "reaction_type": reaction.reaction_type,
-                    "is_given_reaction": viewer and reaction.user_id == viewer.id,
-                    "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
-                    "object_created_at": reaction.comment.created_at,
-                },
-            }
-            for reaction in queryset
-        ]
 
     @classmethod
     def _serialize_private_comment_reaction_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
-        queryset = (
-            CommentReaction.objects.filter(
-                comment__author_id__in=actor_ids,
-                comment__visibility=Comment.VISIBILITY_MENTIONED,
-            )
-            .exclude(user_id=F("comment__author_id"))
-            .select_related(
-                "user",
-                "user__profile",
-                "comment",
-                "comment__author",
-                "comment__target_user",
-                "comment__movie",
-            )
-            .order_by("-created_at", "-id")
+        return cls.serialize_private_reaction_queryset(
+            cls._private_reaction_activity_queryset(actor_ids=actor_ids, viewer=viewer),
+            viewer=viewer,
         )
-        valid_reactions = [reaction for reaction in queryset if reaction.comment.has_valid_target_mention()]
-        return [
-            {
-                "id": f"{cls.ACTIVITY_PRIVATE_COMMENT_REACTION}:{reaction.id}",
-                "activity_type": cls.ACTIVITY_PRIVATE_COMMENT_REACTION,
-                "created_at": reaction.created_at,
-                "updated_at": reaction.updated_at,
-                "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
-                "_sort_entity_id": reaction.id,
-                "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_COMMENT_REACTION],
-                "actor": cls._serialize_actor(reaction.user),
-                "_comment_text": reaction.comment.body,
-                "movie": cls._serialize_movie(reaction.comment.movie),
-                "payload": {
-                    "comment_id": reaction.comment_id,
-                    "reaction_id": reaction.id,
-                    "comment_excerpt": cls._truncate_excerpt(reaction.comment.body),
-                    "comment_author": cls._serialize_actor(reaction.comment.author),
-                    "reaction_type": reaction.reaction_type,
-                    "reaction_value": reaction.reaction_type,
-                    "is_given_reaction": viewer and reaction.user_id == viewer.id,
-                    "is_received_reaction": viewer and reaction.comment.author_id == viewer.id,
-                    "object_created_at": reaction.comment.created_at,
-                },
-            }
-            for reaction in valid_reactions
-        ]
 
     @classmethod
     def _serialize_video_reaction_activities(cls, *, viewer) -> Iterable[dict]:
         """Build current-state video reaction activity for the authenticated user."""
-        movie_display_rating_subquery = cls._movie_display_rating_subquery(
-            movie_id_ref="video_comment__movie_id"
+        return cls.serialize_video_reaction_queryset(
+            cls._video_reaction_activity_queryset(viewer=viewer), viewer=viewer
         )
-        viewer_rating_subquery = cls._viewer_movie_rating_subquery(
-            viewer=viewer,
-            movie_id_ref="video_comment__movie_id",
-        )
-        queryset = (
-            VideoCommentReaction.objects.filter(
-                Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
-            )
-            # A reaction to one's own video would otherwise be both given and received.
-            .exclude(user_id=F("video_comment__user_id"))
-            .exclude(
-                video_comment__user__visibility_blocks__blocked_user_id=viewer.id,
-            )
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
-            .select_related(
-                "user",
-                "user__profile",
-                "video_comment",
-                "video_comment__user",
-                "video_comment__user__profile",
-                "video_comment__movie",
-            )
-            .annotate(
-                movie_display_rating=Subquery(
-                    movie_display_rating_subquery,
-                    output_field=FloatField(),
-                ),
-                viewer_movie_rating=Subquery(
-                    viewer_rating_subquery,
-                    output_field=IntegerField(),
-                ),
-                movie_following_avg_rating=Subquery(
-                    cls._viewer_following_avg_rating_subquery(
-                        viewer=viewer,
-                        movie_id_ref="video_comment__movie_id",
-                    ),
-                    output_field=FloatField(),
-                ),
-                movie_following_ratings_count=Coalesce(
-                    Subquery(
-                        cls._viewer_following_ratings_count_subquery(
-                            viewer=viewer,
-                            movie_id_ref="video_comment__movie_id",
-                        ),
-                        output_field=IntegerField(),
-                    ),
-                    Value(0),
-                ),
-            )
-            .order_by("-updated_at", "-id")
-        )
-
-        activities = []
-        for reaction in queryset:
-            is_received = reaction.video_comment.user_id == viewer.id
-            activity_type = (
-                cls.ACTIVITY_VIDEO_REACTION_RECEIVED
-                if is_received
-                else cls.ACTIVITY_VIDEO_REACTION_GIVEN
-            )
-            activities.append(
-                {
-                    "id": f"{activity_type}:{reaction.id}",
-                    "activity_type": activity_type,
-                    "created_at": reaction.created_at,
-                    "updated_at": reaction.updated_at,
-                    "activity_at": cls._resolve_activity_at(
-                        created_at=reaction.created_at,
-                        updated_at=reaction.updated_at,
-                    ),
-                    "_sort_entity_id": reaction.id,
-                    "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
-                    "actor": cls._serialize_actor(reaction.user),
-                    "movie": cls._serialize_movie(
-                        reaction.video_comment.movie,
-                        display_rating=reaction.movie_display_rating,
-                        my_rating=reaction.viewer_movie_rating,
-                        following_avg_rating=reaction.movie_following_avg_rating,
-                        following_ratings_count=reaction.movie_following_ratings_count,
-                    ),
-                    "payload": {
-                        "reaction_id": reaction.id,
-                        "reaction_type": reaction.reaction_type,
-                        "reaction_value": reaction.reaction_type,
-                        "video_comment_id": reaction.video_comment_id,
-                        "video_owner": cls._serialize_actor(
-                            reaction.video_comment.user
-                        ),
-                        "is_received_reaction": is_received,
-                        "is_given_reaction": not is_received,
-                        "object_created_at": reaction.video_comment.created_at,
-                        "video_url": reaction.video_comment.video.url if reaction.video_comment.video else None,
-                    },
-                }
-            )
-        return activities
 
     @classmethod
     def _serialize_video_reaction_created_activities(cls, *, actor, viewer) -> Iterable[dict]:
@@ -756,7 +610,7 @@ class SocialActivityFeedService:
         )
 
     @classmethod
-    def serialize_video_reaction_created_queryset(cls, queryset) -> list[dict]:
+    def serialize_video_reaction_created_queryset(cls, queryset, *, viewer=None) -> list[dict]:
         """Serialize an already scoped queryset (including a paginated slice)."""
         return [
             {
@@ -788,6 +642,133 @@ class SocialActivityFeedService:
             }
             for video in queryset
         ]
+
+    @classmethod
+    def _annotate_movie_feed(cls, queryset, *, viewer, movie_id_ref):
+        return queryset.annotate(
+            movie_display_rating=Subquery(cls._movie_display_rating_subquery(movie_id_ref=movie_id_ref), output_field=FloatField()),
+            viewer_movie_rating=Subquery(cls._viewer_movie_rating_subquery(viewer=viewer, movie_id_ref=movie_id_ref), output_field=IntegerField()),
+            movie_following_avg_rating=Subquery(cls._viewer_following_avg_rating_subquery(viewer=viewer, movie_id_ref=movie_id_ref), output_field=FloatField()),
+            movie_following_ratings_count=Coalesce(
+                Subquery(cls._viewer_following_ratings_count_subquery(viewer=viewer, movie_id_ref=movie_id_ref), output_field=IntegerField()),
+                Value(0),
+            ),
+        )
+
+    @classmethod
+    def _public_comment_activity_queryset(cls, *, actor_ids, viewer):
+        queryset = Comment.objects.filter(visibility=Comment.VISIBILITY_PUBLIC)
+        if actor_ids is not None:
+            queryset = queryset.filter(author_id__in=actor_ids)
+        queryset = queryset.select_related("author", "author__profile", "movie")
+        return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
+
+    @classmethod
+    def serialize_public_comment_queryset(cls, queryset, *, viewer=None):
+        return [{
+            "id": f"public_comment:{comment.id}", "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
+            "created_at": comment.created_at, "updated_at": comment.updated_at,
+            "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
+            "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
+            "actor": cls._serialize_actor(comment.author),
+            "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
+            "payload": {"comment_id": comment.id, "content": comment.body},
+        } for comment in queryset]
+
+    @classmethod
+    def _public_reaction_activity_queryset(cls, *, actor_ids, viewer):
+        queryset = CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+        if actor_ids is not None:
+            queryset = queryset.filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
+        queryset = (queryset.exclude(user_id=F("comment__author_id"))
+            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .select_related("user", "user__profile", "comment", "comment__author", "comment__author__profile", "comment__movie"))
+        return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="comment__movie_id").order_by("-created_at", "-id")
+
+    @classmethod
+    def serialize_public_reaction_queryset(cls, queryset, *, viewer=None):
+        return [cls._serialize_comment_reaction(reaction, viewer=viewer, private=False) for reaction in queryset]
+
+    @classmethod
+    def _private_message_activity_queryset(cls, *, actor_ids, viewer):
+        queryset = Comment.objects.filter(visibility=Comment.VISIBILITY_MENTIONED, target_user__isnull=False)
+        if actor_ids is not None:
+            queryset = queryset.filter(author_id__in=actor_ids)
+        queryset = queryset.select_related("author", "author__profile", "movie", "target_user")
+        return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
+
+    @classmethod
+    def serialize_private_message_queryset(cls, queryset, *, viewer=None):
+        viewer = viewer or getattr(queryset, "_phase_b_viewer", None)
+        result = []
+        for comment in queryset:
+            if not comment.has_valid_target_mention():
+                continue
+            result.append({
+                "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}", "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
+                "created_at": comment.created_at, "updated_at": comment.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
+                "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
+                "actor": cls._serialize_actor(comment.author),
+                "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
+                "payload": {"comment_id": comment.id, "content": comment.body, "sender": cls._serialize_compact_user(comment.author), "recipient": cls._serialize_compact_user(comment.target_user), "target_user": cls._serialize_compact_user(comment.target_user), "direction": "sent" if viewer and comment.author_id == viewer.id else "received", "counterpart": cls._serialize_compact_user(comment.target_user if viewer and comment.author_id == viewer.id else comment.author)},
+            })
+        return result
+
+    @classmethod
+    def _private_reaction_activity_queryset(cls, *, actor_ids, viewer):
+        queryset = CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_MENTIONED)
+        if actor_ids is not None:
+            queryset = queryset.filter(comment__author_id__in=actor_ids)
+        return (queryset.exclude(user_id=F("comment__author_id")).select_related(
+            "user", "user__profile", "comment", "comment__author", "comment__target_user", "comment__movie"
+        ).order_by("-created_at", "-id"))
+
+    @classmethod
+    def serialize_private_reaction_queryset(cls, queryset, *, viewer=None):
+        return [cls._serialize_comment_reaction(reaction, viewer=viewer, private=True) for reaction in queryset if reaction.comment.has_valid_target_mention()]
+
+    @classmethod
+    def _serialize_comment_reaction(cls, reaction, *, viewer, private):
+        activity_type = cls.ACTIVITY_PRIVATE_COMMENT_REACTION if private else cls.ACTIVITY_PUBLIC_COMMENT_REACTION
+        movie_kwargs = {} if private else {"display_rating": reaction.movie_display_rating, "my_rating": reaction.viewer_movie_rating, "following_avg_rating": reaction.movie_following_avg_rating, "following_ratings_count": reaction.movie_following_ratings_count}
+        return {
+            "id": f"{activity_type}:{reaction.id}", "activity_type": activity_type,
+            "created_at": reaction.created_at, "updated_at": reaction.updated_at,
+            "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
+            "_sort_entity_id": reaction.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
+            "actor": cls._serialize_actor(reaction.user), "_comment_text": reaction.comment.body,
+            "movie": cls._serialize_movie(reaction.comment.movie, **movie_kwargs),
+            "payload": {"comment_id": reaction.comment_id, "reaction_id": reaction.id, "comment_excerpt": cls._truncate_excerpt(reaction.comment.body), "comment_author": cls._serialize_actor(reaction.comment.author), "reaction_value": reaction.reaction_type, "reaction_type": reaction.reaction_type, "is_given_reaction": viewer and reaction.user_id == viewer.id, "is_received_reaction": viewer and reaction.comment.author_id == viewer.id, "object_created_at": reaction.comment.created_at},
+        }
+
+    @classmethod
+    def _video_reaction_activity_queryset(cls, *, viewer):
+        queryset = (VideoCommentReaction.objects.filter(
+            Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
+        ).exclude(user_id=F("video_comment__user_id"))
+          .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
+          .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+          .select_related("user", "user__profile", "video_comment", "video_comment__user", "video_comment__user__profile", "video_comment__movie"))
+        return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="video_comment__movie_id").order_by("-updated_at", "-id")
+
+    @classmethod
+    def serialize_video_reaction_queryset(cls, queryset, *, viewer=None):
+        activities = []
+        for reaction in queryset:
+            is_received = reaction.video_comment.user_id == viewer.id
+            activity_type = cls.ACTIVITY_VIDEO_REACTION_RECEIVED if is_received else cls.ACTIVITY_VIDEO_REACTION_GIVEN
+            activities.append({
+                "id": f"{activity_type}:{reaction.id}", "activity_type": activity_type,
+                "created_at": reaction.created_at, "updated_at": reaction.updated_at,
+                "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
+                "_sort_entity_id": reaction.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
+                "actor": cls._serialize_actor(reaction.user),
+                "movie": cls._serialize_movie(reaction.video_comment.movie, display_rating=reaction.movie_display_rating, my_rating=reaction.viewer_movie_rating, following_avg_rating=reaction.movie_following_avg_rating, following_ratings_count=reaction.movie_following_ratings_count),
+                "payload": {"reaction_id": reaction.id, "reaction_type": reaction.reaction_type, "reaction_value": reaction.reaction_type, "video_comment_id": reaction.video_comment_id, "video_owner": cls._serialize_actor(reaction.video_comment.user), "is_received_reaction": is_received, "is_given_reaction": not is_received, "object_created_at": reaction.video_comment.created_at, "video_url": reaction.video_comment.video.url if reaction.video_comment.video else None},
+            })
+        return activities
 
     @classmethod
     def _serialize_compact_user(cls, user) -> dict:
