@@ -13,6 +13,11 @@ from .social_feed import SocialActivityFeedService
 
 logger = logging.getLogger("core.profile_activity_shadow")
 
+SAFE_FALLBACK_REASONS = {
+    "max_batches", "max_candidate_rows", "hydrated_order_mismatch",
+    "phase_d_scope_not_supported",
+}
+
 
 def _shape(value):
     """Describe payload structure without retaining values or PII."""
@@ -34,11 +39,36 @@ def safe_fingerprint(items):
     return hashlib.sha256(json.dumps(safe, sort_keys=True).encode()).hexdigest()
 
 
+def _safe_fallback_reason(reason):
+    if reason is None or reason in SAFE_FALLBACK_REASONS:
+        return reason
+    return "candidate_error"
+
+
 def report_profile_activity_shadow(metadata):
     """Sample a structured, PII-free record; kept separate for test patching."""
     rate = max(0.0, min(1.0, settings.PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE))
     if rate and random.random() < rate:
-        logger.info("profile_activity_shadow %s", metadata)
+        logger.info(
+            "PROFILE_ACTIVITY_SHADOW matched=%s count_matched=%s certified=%s "
+            "fallback=%s fallback_reason=%s k=%s legacy_count=%s "
+            "candidate_count=%s rows_inspected=%s logical_candidates=%s "
+            "hydrated_rows=%s legacy_ms=%.3f candidate_ms=%.3f "
+            "mismatch_reason=%s error=%s batches=%s legacy_fingerprint=%s "
+            "candidate_fingerprint=%s",
+            metadata["matched"], metadata["count_matched"],
+            metadata["candidate_certified"], metadata["fallback_used"],
+            metadata["fallback_reason"], metadata["k"],
+            metadata["legacy_item_count"], metadata["candidate_item_count"],
+            metadata["source_rows_inspected"],
+            metadata["logical_candidates_inspected"], metadata["hydrated_rows"],
+            metadata["duration_legacy_seconds"] * 1000,
+            metadata["duration_candidate_seconds"] * 1000,
+            metadata["mismatch_reason"], metadata["error_type"],
+            metadata["batches_by_family"],
+            metadata.get("legacy_fingerprint"),
+            metadata.get("candidate_fingerprint"),
+        )
 
 
 def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
@@ -61,6 +91,7 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
         "duration_legacy_seconds": legacy_duration,
         "duration_candidate_seconds": 0.0,
         "mismatch_reason": None,
+        "error_type": None,
     }
     try:
         candidate, adaptive = SocialActivityFeedService.build_feed_candidate_adaptive(
@@ -70,7 +101,7 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
         metadata.update({
             "candidate_certified": adaptive["certified"],
             "fallback_used": adaptive["fallback_reason"] is not None,
-            "fallback_reason": adaptive["fallback_reason"],
+            "fallback_reason": _safe_fallback_reason(adaptive["fallback_reason"]),
             "candidate_item_count": len(candidate),
             "batches_by_family": adaptive["batches_by_family"],
             "source_rows_inspected": adaptive["source_rows_inspected"],
@@ -97,6 +128,7 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
     except Exception as exc:  # Shadow must never alter the legacy response.
         metadata["fallback_used"] = True
         metadata["fallback_reason"] = exc.__class__.__name__
+        metadata["error_type"] = exc.__class__.__name__
         metadata["mismatch_reason"] = metadata["mismatch_reason"] or "shadow_error"
     finally:
         metadata["duration_candidate_seconds"] = perf_counter() - started

@@ -32,6 +32,12 @@ and SHA-256 fingerprints made from internal IDs, types, timestamps and value
 shapes. Bodies, usernames, email, titles, URLs, actor lists and payload values
 are excluded.
 
+The dedicated `core.profile_activity_shadow` logger writes `INFO` records to
+stdout with `propagate=false`, independently of the root logger's `WARNING`
+level. Search Render Application Logs for the stable marker
+`PROFILE_ACTIVITY_SHADOW`. At a sample rate of `1.0`, every completed shadow
+attempt emits one result record.
+
 Observe certification and match rates, logical-count match rate, fallback
 reasons, latency distribution, guard exhaustion, rows inspected/hydrated and
 per-family batches on real PostgreSQL. A future candidate response rollout

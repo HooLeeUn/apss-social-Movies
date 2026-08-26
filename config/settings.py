@@ -34,6 +34,13 @@ def env_int(name, default):
         return default
     return int(value)
 
+
+def env_float(name, default):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    return float(value)
+
 def env_list(name, default=""):
     value = os.environ.get(name, default)
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -220,9 +227,37 @@ REST_FRAMEWORK = {
 # Phase E profile-activity shadow validation.  This is deliberately independent
 # of DEBUG and must be explicitly enabled in each environment.
 PROFILE_ACTIVITY_SHADOW_ENABLED = env_bool("PROFILE_ACTIVITY_SHADOW_ENABLED", False)
-PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE = float(
-    os.environ.get("PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE", "0")
+PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE = env_float(
+    "PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE", 0.0
 )
+
+# Keep Phase E observability independent from the root logger's effective
+# WARNING level.  StreamHandler writes to stdout so Render Application Logs can
+# collect it without changing logging for the rest of the application.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "profile_activity_shadow": {
+            "format": "%(asctime)s %(levelname)s %(message)s",
+        },
+    },
+    "handlers": {
+        "profile_activity_shadow_console": {
+            "class": "logging.StreamHandler",
+            "formatter": "profile_activity_shadow",
+            "level": "INFO",
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "loggers": {
+        "core.profile_activity_shadow": {
+            "handlers": ["profile_activity_shadow_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
 
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
