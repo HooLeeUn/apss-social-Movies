@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.conf import settings
 from django.core.cache import cache
+from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
@@ -2350,54 +2351,166 @@ class DirectedCommentsListView(MovieCommentsListCreateView):
 class MeMessagesView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MeMessageSerializer
+    paginated_page_size = 10
+    cursor_salt = "core.me-messages.cursor"
 
-    def list(self, request, *args, **kwargs):
-        private_messages_qs = (
+    def _message_queryset(self, user):
+        return (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
                 target_user__isnull=False,
             )
-            .filter(Q(target_user=request.user) | Q(author=request.user))
+            .filter(Q(target_user=user) | Q(author=user))
             .exclude(author=F("target_user"))
             .exclude(body="")
             .select_related(
-                "author",
-                "author__profile",
-                "movie",
-                "target_user",
-                "target_user__profile",
+                "author", "author__profile", "movie", "target_user", "target_user__profile",
             )
             .order_by("-created_at", "-id")
         )
-        private_messages = list(private_messages_qs)
-        annotate_restricted_current_user_for_users(
-            [user for comment in private_messages for user in (comment.author, comment.target_user)],
-            request.user,
-        )
 
-        private_reactions_qs = (
-            CommentReaction.objects.filter(
-                comment__visibility=Comment.VISIBILITY_MENTIONED,
-            )
+    def _reaction_queryset(self, user):
+        return (
+            CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_MENTIONED)
             .filter(
-                Q(comment__author=request.user, user__isnull=False)
-                | Q(user=request.user, comment__author__isnull=False)
+                Q(comment__author=user, user__isnull=False)
+                | Q(user=user, comment__author__isnull=False)
             )
             .filter(comment__target_user__isnull=False)
             .exclude(user_id=F("comment__author_id"))
             .exclude(comment__author=F("comment__target_user"))
             .exclude(comment__body="")
             .select_related(
-                "user",
-                "user__profile",
-                "comment",
-                "comment__author",
-                "comment__author__profile",
-                "comment__movie",
-                "comment__target_user",
+                "user", "user__profile", "comment", "comment__author",
+                "comment__author__profile", "comment__movie", "comment__target_user",
             )
             .order_by("-created_at", "-id")
         )
+
+    def _serialize_items(self, messages, reactions, request):
+        annotate_restricted_current_user_for_users(
+            [user for comment in messages for user in (comment.author, comment.target_user)],
+            request.user,
+        )
+        message_payloads = {
+            item.id: payload
+            for item, payload in zip(
+                messages,
+                MeMessageSerializer(messages, many=True, context={"request": request}).data,
+            )
+        }
+        reaction_payloads = {
+            item.id: {
+                "id": f"private-reaction-{item.id}",
+                "type": UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
+                "reaction_type": item.reaction_type,
+                "reaction_value": item.reaction_type,
+                "created_at": item.created_at.isoformat(),
+                "actor": build_actor_payload(item.user, request),
+                "movie": ({
+                    "id": item.comment.movie.id,
+                    "title_english": item.comment.movie.title_english,
+                    "title_spanish": item.comment.movie.title_spanish,
+                    "type": item.comment.movie.type,
+                    "genre": item.comment.movie.genre,
+                    "release_year": item.comment.movie.release_year,
+                    "image": item.comment.movie.image,
+                } if item.comment and item.comment.movie else None),
+                "comment_id": item.comment_id,
+                "comment_author": build_actor_payload(item.comment.author, request) if item.comment else None,
+                "direction": "received" if item.comment and item.comment.author_id == request.user.id else "sent",
+                "is_received_reaction": bool(item.comment and item.comment.author_id == request.user.id),
+                "is_given_reaction": bool(item.user_id == request.user.id),
+                "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
+                "message": ((
+                    f"A {item.user.username} no le gustó tu mensaje"
+                    if item.reaction_type == CommentReaction.REACT_DISLIKE
+                    else f"A {item.user.username} le gustó tu mensaje"
+                ) if item.comment and item.comment.author_id == request.user.id else (
+                    f"No te gustó el mensaje de {item.comment.author.username}"
+                    if item.reaction_type == CommentReaction.REACT_DISLIKE
+                    else f"Te gustó el mensaje de {item.comment.author.username}"
+                )),
+                "is_read": True,
+            }
+            for item in reactions
+        }
+        return message_payloads, reaction_payloads
+
+    @staticmethod
+    def _sort_key(family, item):
+        # Python sorts ascending, so negate the deterministic DESC components.
+        return (-item.created_at.timestamp(), 0 if family == "message" else 1, -item.id)
+
+    def _apply_cursor(self, queryset, family, cursor):
+        if cursor is None:
+            return queryset
+        created_at, cursor_family, object_id = cursor
+        older = Q(created_at__lt=created_at)
+        if family == "message" and cursor_family == "message":
+            older |= Q(created_at=created_at, id__lt=object_id)
+        elif family == "reaction" and cursor_family == "message":
+            older |= Q(created_at=created_at)
+        elif family == "reaction" and cursor_family == "reaction":
+            older |= Q(created_at=created_at, id__lt=object_id)
+        return queryset.filter(older)
+
+    def _decode_cursor(self, request):
+        token = request.query_params.get("cursor")
+        if not token:
+            return None
+        try:
+            payload = signing.loads(token, salt=self.cursor_salt)
+            family = payload["family"]
+            if family not in {"message", "reaction"}:
+                raise ValueError
+            created_at = datetime.fromisoformat(payload["created_at"])
+            if timezone.is_naive(created_at):
+                raise ValueError
+            return created_at, family, int(payload["id"])
+        except (signing.BadSignature, KeyError, TypeError, ValueError):
+            raise ValidationError({"cursor": "Invalid cursor."})
+
+    def _paginated_list(self, request):
+        cursor = self._decode_cursor(request)
+        window = self.paginated_page_size + 1
+        messages = list(self._apply_cursor(self._message_queryset(request.user), "message", cursor)[:window])
+        reactions = list(self._apply_cursor(self._reaction_queryset(request.user), "reaction", cursor)[:window])
+        merged = sorted(
+            [("message", item) for item in messages] + [("reaction", item) for item in reactions],
+            key=lambda pair: self._sort_key(*pair),
+        )
+        page = merged[:self.paginated_page_size]
+        page_messages = [item for family, item in page if family == "message"]
+        page_reactions = [item for family, item in page if family == "reaction"]
+        message_payloads, reaction_payloads = self._serialize_items(page_messages, page_reactions, request)
+        results = [
+            message_payloads[item.id] if family == "message" else reaction_payloads[item.id]
+            for family, item in page
+        ]
+        next_url = None
+        if len(merged) > self.paginated_page_size:
+            family, item = page[-1]
+            token = signing.dumps(
+                {"created_at": item.created_at.isoformat(), "family": family, "id": item.id},
+                salt=self.cursor_salt,
+                compress=True,
+            )
+            next_url = replace_query_param(request.build_absolute_uri(), "cursor", token)
+        return Response({"next": next_url, "previous": None, "results": results})
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get("paginated") == "1":
+            return self._paginated_list(request)
+
+        private_messages_qs = self._message_queryset(request.user)
+        private_messages = list(private_messages_qs)
+        annotate_restricted_current_user_for_users(
+            [user for comment in private_messages for user in (comment.author, comment.target_user)],
+            request.user,
+        )
+
+        private_reactions_qs = self._reaction_queryset(request.user)
         private_reactions = list(private_reactions_qs)
 
         message_items = MeMessageSerializer(
