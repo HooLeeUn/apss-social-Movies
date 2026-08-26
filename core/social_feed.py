@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Callable, Iterable, Literal, cast
 
+from django.db import connection
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 
@@ -34,6 +36,36 @@ class _AdaptiveSequence:
     exhausted: bool = False
     batches: int = 0
     source_rows: int = 0
+
+
+class _CandidateProfile:
+    """Request-local numeric instrumentation; never contains query text or PII."""
+
+    def __init__(self):
+        self.started = perf_counter()
+        self.phase = "setup"
+        self.queries_total = 0
+        self.queries_by_phase = {}
+        self.family_ms = {}
+        self.frontier_ms = 0.0
+        self.certification_ms = 0.0
+        self.hydration_ms = 0.0
+
+    def execute(self, execute, sql, params, many, context):
+        self.queries_total += 1
+        self.queries_by_phase[self.phase] = self.queries_by_phase.get(self.phase, 0) + 1
+        return execute(sql, params, many, context)
+
+    def measure(self, phase, callback):
+        previous = self.phase
+        self.phase = phase
+        started = perf_counter()
+        try:
+            return callback()
+        finally:
+            elapsed = (perf_counter() - started) * 1000
+            self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
+            self.phase = previous
 
 
 class SocialActivityFeedService:
@@ -394,7 +426,7 @@ class SocialActivityFeedService:
         return fetch
 
     @classmethod
-    def _adaptive_sequences(cls, *, user, actor_ids) -> list[_AdaptiveSequence]:
+    def _adaptive_sequences(cls, *, user, actor_ids, profiler=None) -> list[_AdaptiveSequence]:
         def ordinary(name, queryset, namespace, timestamp="candidate_activity_at", validator=None):
             return _AdaptiveSequence(name=name, fetch=cls._adaptive_queryset_fetcher(
                 queryset=queryset, namespace=namespace, timestamp_field=timestamp,
@@ -434,7 +466,16 @@ class SocialActivityFeedService:
         # They are over-read once as lightweight rows; an unvalidated row is
         # never used as a frontier. Public and private comments cannot overlap
         # because visibility is a single-valued model field.
-        private_groups = cls.private_comment_received_logical_candidates(viewer=user)
+        private_group_builder = lambda: cls.private_comment_received_logical_candidates(
+            viewer=user
+        )
+        private_groups = (
+            profiler.measure(
+                "comment_reaction_summaries_received_private_hybrid",
+                private_group_builder,
+            )
+            if profiler else private_group_builder()
+        )
         sequences.append(_AdaptiveSequence(
             name="comment_reaction_summaries_received_private_hybrid",
             fetch=cls._adaptive_list_fetcher(rows=private_groups),
@@ -468,6 +509,7 @@ class SocialActivityFeedService:
         max_batches: int = DEFAULT_ADAPTIVE_MAX_BATCHES,
         max_candidate_rows: int = DEFAULT_ADAPTIVE_MAX_CANDIDATE_ROWS,
         fallback_to_legacy: bool = True, return_metadata: bool = False,
+        profile_enabled: bool = False,
     ):
         """Return an exact, certified Phase-D top-K or the legacy fallback.
 
@@ -480,6 +522,10 @@ class SocialActivityFeedService:
             "source_rows_inspected": 0, "logical_candidates_inspected": 0,
             "hydrated_rows": 0,
         }
+        profiler = _CandidateProfile() if profile_enabled else None
+        query_context = connection.execute_wrapper(profiler.execute) if profiler else None
+        if query_context:
+            query_context.__enter__()
         try:
             if not cls.is_valid_scope(scope):
                 raise ValueError(f"Unsupported social feed scope: {scope}")
@@ -491,13 +537,16 @@ class SocialActivityFeedService:
             if scope != cls.SCOPE_ME:
                 raise RuntimeError("phase_d_scope_not_supported")
             actor_ids = list(set(cls._get_actor_ids_for_scope(user=user, scope=scope)))
-            sequences = cls._adaptive_sequences(user=user, actor_ids=actor_ids)
+            sequences = cls._adaptive_sequences(
+                user=user, actor_ids=actor_ids, profiler=profiler
+            )
 
             def expand(sequence):
                 if sequence.batches >= max_batches:
                     raise RuntimeError("max_batches")
-                rows, frontier, exhausted, inspected = sequence.fetch(
-                    sequence.after_key, batch_size
+                fetch = lambda: sequence.fetch(sequence.after_key, batch_size)
+                rows, frontier, exhausted, inspected = (
+                    profiler.measure(sequence.name, fetch) if profiler else fetch()
                 )
                 sequence.batches += 1
                 sequence.source_rows += inspected
@@ -516,6 +565,7 @@ class SocialActivityFeedService:
                 expand(sequence)
 
             while True:
+                frontier_started = perf_counter() if profiler else None
                 known = sorted(
                     (item for sequence in sequences for item in sequence.candidates),
                     key=cls._candidate_key, reverse=True,
@@ -525,20 +575,34 @@ class SocialActivityFeedService:
                     sequence.frontier is None or kth_key is None
                     or cls._candidate_key(sequence.frontier) >= kth_key
                 )]
+                if profiler:
+                    profiler.frontier_ms += (perf_counter() - frontier_started) * 1000
+                certification_started = perf_counter() if profiler else None
                 if len(known) >= k and not unsafe:
                     selected = known[:k]
+                    if profiler:
+                        profiler.certification_ms += (perf_counter() - certification_started) * 1000
                     break
                 if not unsafe:
                     # All streams exhausted, so fewer than K is an exact top-K.
                     selected = known
+                    if profiler:
+                        profiler.certification_ms += (perf_counter() - certification_started) * 1000
                     break
+                if profiler:
+                    profiler.certification_ms += (perf_counter() - certification_started) * 1000
                 for sequence in unsafe:
                     # Promote the look-ahead on expansion without restarting.
                     if sequence.frontier is not None:
                         sequence.candidates.append(sequence.frontier)
                     expand(sequence)
 
+            hydration_started = perf_counter() if profiler else None
+            if profiler:
+                profiler.phase = "hydration"
             activities = cls._hydrate_adaptive_candidates(selected=selected, viewer=user)
+            if profiler:
+                profiler.hydration_ms = (perf_counter() - hydration_started) * 1000
             expected_ids = [f'{item["namespace"]}:{item["object_id"]}' for item in selected]
             activities.sort(key=lambda item: (
                 cls._activity_sort_timestamp(item), item["_sort_activity_priority"],
@@ -549,14 +613,47 @@ class SocialActivityFeedService:
             metadata["certified"] = True
             metadata["hydrated_rows"] = len(activities)
             metadata["batches_by_family"] = {s.name: s.batches for s in sequences}
+            if profiler:
+                metadata["profile"] = cls._candidate_profile_metadata(
+                    profiler=profiler, sequences=sequences
+                )
             return (activities, metadata) if return_metadata else activities
         except Exception as exc:
             metadata["fallback_reason"] = str(exc) or exc.__class__.__name__
+            if profiler:
+                metadata["profile"] = cls._candidate_profile_metadata(
+                    profiler=profiler, sequences=locals().get("sequences", [])
+                )
             if not fallback_to_legacy:
                 return ([], metadata) if return_metadata else []
             legacy = cls.build_feed(user=user, scope=scope)[:k]
             metadata["hydrated_rows"] = len(legacy)
             return (legacy, metadata) if return_metadata else legacy
+        finally:
+            if query_context:
+                query_context.__exit__(None, None, None)
+
+    @classmethod
+    def _candidate_profile_metadata(cls, *, profiler, sequences):
+        families = {}
+        for sequence in sequences:
+            elapsed = profiler.family_ms.get(sequence.name, 0.0)
+            families[sequence.name] = {
+                "batches": sequence.batches,
+                "rows": sequence.source_rows,
+                "ms": round(elapsed, 3),
+                "avg_batch_ms": round(elapsed / sequence.batches, 3) if sequence.batches else 0.0,
+                "queries": profiler.queries_by_phase.get(sequence.name, 0),
+            }
+        return {
+            "total_ms": round((perf_counter() - profiler.started) * 1000, 3),
+            "candidate_queries_total": profiler.queries_total,
+            "families": families,
+            "frontier_ms": round(profiler.frontier_ms, 3),
+            "certification_ms": round(profiler.certification_ms, 3),
+            "hydration_ms": round(profiler.hydration_ms, 3),
+            "hydration_queries": profiler.queries_by_phase.get("hydration", 0),
+        }
 
     @classmethod
     def _hydrate_adaptive_candidates(cls, *, selected, viewer):
