@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, Literal, cast
 
-from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 
 from .models import (
@@ -22,6 +22,8 @@ SocialFeedScope = Literal["following", "friends", "me"]
 
 
 class SocialActivityFeedService:
+    CANDIDATE_MODE_FULL = "full_legacy_like"
+    CANDIDATE_MODE_LOGICAL_GROUPS = "logical_group_candidates"
     ACTIVITY_RATING = "rating"
     ACTIVITY_PUBLIC_COMMENT = "public_comment"
     ACTIVITY_PRIVATE_MESSAGE = "private_message"
@@ -94,7 +96,6 @@ class SocialActivityFeedService:
         """
         if not cls.is_valid_scope(scope):
             raise ValueError(f"Unsupported social feed scope: {scope}")
-
         actor_ids = cls._get_actor_ids_for_scope(user=user, scope=scope)
         actor_ids = list(set(actor_ids))
         if not actor_ids:
@@ -172,6 +173,83 @@ class SocialActivityFeedService:
             ),
             reverse=True,
         )
+        return activities
+
+    @classmethod
+    def build_feed_candidate(cls, *, user, scope: SocialFeedScope, mode: str = CANDIDATE_MODE_FULL) -> list[dict]:
+        """Select an internal implementation mode; neither mode is used by a view."""
+        if mode == cls.CANDIDATE_MODE_FULL:
+            return cls.build_feed_candidate_full_materialization(user=user, scope=scope)
+        if mode == cls.CANDIDATE_MODE_LOGICAL_GROUPS:
+            return cls.build_feed_candidate_logical_groups(user=user, scope=scope)
+        raise ValueError(f"Unsupported candidate mode: {mode}")
+
+    @classmethod
+    def build_feed_candidate_logical_groups(cls, *, user, scope: SocialFeedScope) -> list[dict]:
+        """Build Phase C using logical received groups and batched hydration.
+
+        This still materializes all seven families and performs the same final
+        Python sort.  It is an equivalence candidate, not a production pager or
+        the adaptive global merge planned for Phase D.
+        """
+        if not cls.is_valid_scope(scope):
+            raise ValueError(f"Unsupported social feed scope: {scope}")
+        if scope != cls.SCOPE_ME:
+            return cls.build_feed_candidate_full_materialization(user=user, scope=scope)
+        actor_ids = list(set(cls._get_actor_ids_for_scope(user=user, scope=scope)))
+        if not actor_ids:
+            return []
+
+        activities = []
+        ordinary_families = (
+            (cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_rating_ids, cls.serialize_rating_queryset),
+            (cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
+        )
+        for candidates, hydrator, converter in ordinary_families:
+            activities.extend(converter(hydrator(list(candidates.values_list("pk", flat=True)), viewer=user), viewer=user))
+
+        # Given public reactions remain row-shaped; only received reactions are
+        # replaced by logical comment candidates.
+        public_given_ids = list(
+            cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user)
+            .filter(user_id=user.id)
+            .values_list("pk", flat=True)
+        )
+        activities.extend(cls.serialize_public_reaction_queryset(
+            cls.hydrate_public_reaction_ids(public_given_ids, viewer=user), viewer=user
+        ))
+
+        if scope == cls.SCOPE_ME:
+            non_reaction_families = (
+                (cls.private_message_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.hydrate_private_message_ids, cls.serialize_private_message_queryset),
+                (cls.video_created_candidates_queryset(actor=user, viewer=user), cls.hydrate_video_created_ids, cls.serialize_video_reaction_created_queryset),
+            )
+            for candidates, hydrator, converter in non_reaction_families:
+                activities.extend(converter(hydrator(list(candidates.values_list("pk", flat=True)), viewer=user), viewer=user))
+
+            video_given_ids = list(
+                cls.video_reaction_candidates_queryset(viewer=user)
+                .filter(user_id=user.id)
+                .values_list("pk", flat=True)
+            )
+            activities.extend(cls.serialize_video_reaction_queryset(
+                cls.hydrate_video_reaction_ids(video_given_ids, viewer=user), viewer=user
+            ))
+
+            comment_groups = cls.comment_received_logical_candidates(viewer=user)
+            video_groups = cls.video_received_logical_candidates(viewer=user)
+            activities.extend(cls.hydrate_comment_reaction_summaries(
+                comment_ids=[group["object_id"] for group in comment_groups], viewer=user
+            ))
+            activities.extend(cls.hydrate_video_reaction_summaries(
+                video_comment_ids=[group["object_id"] for group in video_groups], viewer=user
+            ))
+
+        activities.sort(key=lambda item: (
+            cls._activity_sort_timestamp(item),
+            item["_sort_activity_priority"],
+            item["_sort_entity_id"],
+        ), reverse=True)
         return activities
 
     @classmethod
@@ -426,6 +504,172 @@ class SocialActivityFeedService:
             .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_GIVEN]))
             .only("id", "user_id", "video_comment_id", "created_at", "updated_at")
         )
+
+    @classmethod
+    def _public_received_reaction_rows(cls, *, viewer):
+        """Authorized public received rows, before any grouping."""
+        return (
+            CommentReaction.objects.filter(
+                comment__visibility=Comment.VISIBILITY_PUBLIC,
+                comment__author_id=viewer.id,
+            )
+            .exclude(user_id=F("comment__author_id"))
+            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+        )
+
+    @classmethod
+    def _private_received_reaction_rows(cls, *, viewer):
+        """Potential private rows; target validation intentionally stays Python."""
+        return (
+            CommentReaction.objects.filter(
+                comment__author_id=viewer.id,
+                comment__visibility=Comment.VISIBILITY_MENTIONED,
+            )
+            .exclude(user_id=F("comment__author_id"))
+        )
+
+    @classmethod
+    def _video_received_reaction_rows(cls, *, viewer):
+        """Authorized video received rows, before any grouping."""
+        return (
+            VideoCommentReaction.objects.filter(video_comment__user_id=viewer.id)
+            .exclude(user_id=F("video_comment__user_id"))
+            .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+        )
+
+    @classmethod
+    def comment_received_logical_candidates(cls, *, viewer) -> list[dict]:
+        """Return one lightweight logical candidate per authorized comment.
+
+        Public rows are grouped in SQL.  Private rows use a deliberately safe
+        hybrid: their parent comments are loaded in one query and checked with
+        ``has_valid_target_mention`` before being merged with public groups.
+        This preserves the legacy privacy predicate instead of approximating it
+        in SQL.  Public and private namespaces are then unioned by comment id.
+        """
+        latest_public_id = (
+            cls._public_received_reaction_rows(viewer=viewer)
+            .filter(comment_id=OuterRef("comment_id"))
+            .order_by("-updated_at", "-id")
+            .values("id")[:1]
+        )
+        public_groups = cls._public_received_reaction_rows(viewer=viewer).values(
+            "comment_id"
+        ).annotate(
+            latest_activity_at=Max("updated_at"),
+            latest_reaction_id=Subquery(latest_public_id),
+            source_rows=Count("id"),
+        )
+        merged = {
+            row["comment_id"]: {
+                "namespace": cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY,
+                "object_id": row["comment_id"],
+                "latest_activity_at": row["latest_activity_at"],
+                "latest_reaction_id": row["latest_reaction_id"],
+                "family_rank": cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY],
+                "source_rows": row["source_rows"],
+            }
+            for row in public_groups
+        }
+
+        private_rows = cls._private_received_reaction_rows(viewer=viewer).select_related(
+            "comment", "comment__target_user"
+        ).only(
+            "id", "created_at", "updated_at", "comment_id", "comment__visibility",
+            "comment__author_id", "comment__target_user_id", "comment__body",
+            "comment__target_user__username",
+        )
+        for reaction in private_rows:
+            if not reaction.comment.has_valid_target_mention():
+                continue
+            activity_at = cls._resolve_activity_at(
+                created_at=reaction.created_at, updated_at=reaction.updated_at
+            )
+            candidate = merged.get(reaction.comment_id)
+            if candidate is None:
+                candidate = {
+                    "namespace": cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY,
+                    "object_id": reaction.comment_id,
+                    "latest_activity_at": activity_at,
+                    "latest_reaction_id": reaction.id,
+                    "family_rank": cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY],
+                    "source_rows": 0,
+                }
+                merged[reaction.comment_id] = candidate
+            candidate["source_rows"] += 1
+            if (activity_at, reaction.id) > (
+                candidate["latest_activity_at"], candidate["latest_reaction_id"]
+            ):
+                candidate["latest_activity_at"] = activity_at
+                candidate["latest_reaction_id"] = reaction.id
+        return list(merged.values())
+
+    @classmethod
+    def video_received_logical_candidates(cls, *, viewer) -> list[dict]:
+        latest_id = (
+            cls._video_received_reaction_rows(viewer=viewer)
+            .filter(video_comment_id=OuterRef("video_comment_id"))
+            .order_by("-updated_at", "-id")
+            .values("id")[:1]
+        )
+        groups = cls._video_received_reaction_rows(viewer=viewer).values(
+            "video_comment_id"
+        ).annotate(
+            latest_activity_at=Max("updated_at"),
+            latest_reaction_id=Subquery(latest_id),
+            source_rows=Count("id"),
+        )
+        return [{
+            "namespace": cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY,
+            "object_id": row["video_comment_id"],
+            "latest_activity_at": row["latest_activity_at"],
+            "latest_reaction_id": row["latest_reaction_id"],
+            "family_rank": cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY],
+            "source_rows": row["source_rows"],
+        } for row in groups]
+
+    @classmethod
+    def count_comment_received_logical_items(cls, *, viewer) -> int:
+        """Count the public/private union, not the sum of two distinct counts."""
+        return len(cls.comment_received_logical_candidates(viewer=viewer))
+
+    @classmethod
+    def count_video_received_logical_items(cls, *, viewer) -> int:
+        return cls._video_received_reaction_rows(viewer=viewer).values(
+            "video_comment_id"
+        ).distinct().count()
+
+    @classmethod
+    def hydrate_comment_reaction_summaries(cls, *, comment_ids, viewer) -> list[dict]:
+        """Hydrate all selected comment groups in two batch queries."""
+        comment_ids = list(set(comment_ids))
+        if not comment_ids:
+            return []
+        rows = cls.serialize_public_reaction_queryset(
+            cls._public_reaction_activity_queryset(actor_ids=[viewer.id], viewer=viewer)
+            .filter(comment_id__in=comment_ids), viewer=viewer
+        )
+        rows.extend(cls.serialize_private_reaction_queryset(
+            cls._private_reaction_activity_queryset(actor_ids=[viewer.id], viewer=viewer)
+            .filter(comment_id__in=comment_ids), viewer=viewer
+        ))
+        return cls._consolidate_received_reactions(rows)
+
+    @classmethod
+    def hydrate_video_reaction_summaries(cls, *, video_comment_ids, viewer) -> list[dict]:
+        """Hydrate all selected video groups in one batch query."""
+        video_comment_ids = list(set(video_comment_ids))
+        if not video_comment_ids:
+            return []
+        rows = cls.serialize_video_reaction_queryset(
+            cls._video_reaction_activity_queryset(viewer=viewer).filter(
+                video_comment_id__in=video_comment_ids,
+                video_comment__user_id=viewer.id,
+            ), viewer=viewer
+        )
+        return cls._consolidate_received_reactions(rows)
 
     @classmethod
     def hydrate_rating_ids(cls, ids, *, viewer):
