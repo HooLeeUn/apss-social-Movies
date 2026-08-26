@@ -82,13 +82,19 @@ def report_candidate_profile(metadata):
         "legacy_count=%s candidate_count=%s rows_inspected=%s "
         "logical_candidates=%s hydrated_rows=%s frontier_ms=%s "
         "certification_ms=%s hydration_ms=%s hydration_queries=%s "
+        "hydration_sql_ms=%s hydration_python_ms=%s "
+        "hydration_accounted_ms=%s hydration_unaccounted_ms=%s "
+        "hydration_families=%s hydration_components=%s "
         "logical_count_ms=%s logical_count_queries=%s families=%s",
         metadata["k"], profile["total_ms"], profile["candidate_queries_total"],
         metadata["legacy_item_count"], metadata["candidate_item_count"],
         metadata["source_rows_inspected"], metadata["logical_candidates_inspected"],
         metadata["hydrated_rows"], profile["frontier_ms"],
         profile["certification_ms"], profile["hydration_ms"],
-        profile["hydration_queries"], profile["logical_count_ms"],
+        profile["hydration_queries"], profile["hydration_sql_ms"],
+        profile["hydration_python_ms"], profile["hydration_accounted_ms"],
+        profile["hydration_unaccounted_ms"], profile["hydration_families"],
+        profile["hydration_components"], profile["logical_count_ms"],
         profile["logical_count_queries"], profile["families"],
     )
 
