@@ -90,6 +90,15 @@ class _CandidateProfile:
             self.phase = previous
 
 
+@dataclass
+class _CandidateSerializationCache:
+    """Python payload fragments shared only by one candidate hydration."""
+
+    actors: dict[int, dict] = field(default_factory=dict)
+    compact_users: dict[int, dict] = field(default_factory=dict)
+    movies: dict[tuple, dict] = field(default_factory=dict)
+
+
 class SocialActivityFeedService:
     CANDIDATE_MODE_FULL = "full_legacy_like"
     CANDIDATE_MODE_LOGICAL_GROUPS = "logical_group_candidates"
@@ -765,6 +774,9 @@ class SocialActivityFeedService:
         for item in selected:
             ids.setdefault(item["namespace"], []).append(item["object_id"])
         activities = []
+        # This object cannot outlive candidate hydration.  In particular it is
+        # neither attached to the service class nor shared between requests.
+        serialization_cache = _CandidateSerializationCache()
         ordinary = {
             cls.ACTIVITY_RATING: ("ratings", cls.hydrate_rating_ids, cls.serialize_rating_queryset),
             cls.ACTIVITY_PUBLIC_COMMENT: ("public_comments", cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
@@ -781,11 +793,17 @@ class SocialActivityFeedService:
                         family, "fetch", lambda: list(hydrator(object_ids, viewer=viewer))
                     )
                     rows = profiler.measure_hydration(
-                        family, "serialize", lambda: converter(objects, viewer=viewer)
+                        family, "serialize", lambda: converter(
+                            objects, viewer=viewer,
+                            serialization_cache=serialization_cache,
+                        )
                     )
                     profiler.hydration_components[family]["rows"] = len(rows)
                 else:
-                    rows = converter(hydrator(object_ids, viewer=viewer), viewer=viewer)
+                    rows = converter(
+                        hydrator(object_ids, viewer=viewer), viewer=viewer,
+                        serialization_cache=serialization_cache,
+                    )
                 activities.extend(rows)
 
         def hydrate_comment_summaries():
@@ -794,6 +812,7 @@ class SocialActivityFeedService:
                     cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, []
                 ),
                 viewer=viewer, profiler=profiler,
+                serialization_cache=serialization_cache,
             )
 
         def hydrate_video_summaries():
@@ -802,6 +821,7 @@ class SocialActivityFeedService:
                     cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, []
                 ),
                 viewer=viewer, profiler=profiler,
+                serialization_cache=serialization_cache,
             )
 
         comment_rows = hydrate_comment_summaries()
@@ -1249,7 +1269,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def hydrate_comment_reaction_summaries(
-        cls, *, comment_ids, viewer, profiler=None
+        cls, *, comment_ids, viewer, profiler=None, serialization_cache=None
     ) -> list[dict]:
         """Hydrate all selected comment groups in two batch queries."""
         comment_ids = list(set(comment_ids))
@@ -1262,8 +1282,12 @@ class SocialActivityFeedService:
             actor_ids=[viewer.id], viewer=viewer
         ).filter(comment_id__in=comment_ids)
         if not profiler:
-            rows = cls.serialize_public_reaction_queryset(public_qs, viewer=viewer)
-            rows.extend(cls.serialize_private_reaction_queryset(private_qs, viewer=viewer))
+            rows = cls.serialize_public_reaction_queryset(
+                public_qs, viewer=viewer, serialization_cache=serialization_cache
+            )
+            rows.extend(cls.serialize_private_reaction_queryset(
+                private_qs, viewer=viewer, serialization_cache=serialization_cache
+            ))
             return cls._consolidate_received_reactions(rows)
 
         public_family = "comment_reaction_summaries_received"
@@ -1276,11 +1300,17 @@ class SocialActivityFeedService:
         )
         rows = profiler.measure_hydration(
             public_family, "serialize",
-            lambda: cls.serialize_public_reaction_queryset(public_objects, viewer=viewer),
+            lambda: cls.serialize_public_reaction_queryset(
+                public_objects, viewer=viewer,
+                serialization_cache=serialization_cache,
+            ),
         )
         private_rows = profiler.measure_hydration(
             private_family, "serialize",
-            lambda: cls.serialize_private_reaction_queryset(private_objects, viewer=viewer),
+            lambda: cls.serialize_private_reaction_queryset(
+                private_objects, viewer=viewer,
+                serialization_cache=serialization_cache,
+            ),
         )
         rows.extend(private_rows)
         result = profiler.measure_hydration(
@@ -1292,7 +1322,8 @@ class SocialActivityFeedService:
 
     @classmethod
     def hydrate_video_reaction_summaries(
-        cls, *, video_comment_ids, viewer, profiler=None
+        cls, *, video_comment_ids, viewer, profiler=None,
+        serialization_cache=None,
     ) -> list[dict]:
         """Hydrate all selected video groups in one batch query."""
         video_comment_ids = list(set(video_comment_ids))
@@ -1303,13 +1334,19 @@ class SocialActivityFeedService:
             video_comment__user_id=viewer.id,
         )
         if not profiler:
-            rows = cls.serialize_video_reaction_queryset(queryset, viewer=viewer)
+            rows = cls.serialize_video_reaction_queryset(
+                queryset, viewer=viewer,
+                serialization_cache=serialization_cache,
+            )
             return cls._consolidate_received_reactions(rows)
         family = "video_reaction_summaries_received"
         objects = profiler.measure_hydration(family, "fetch", lambda: list(queryset))
         rows = profiler.measure_hydration(
             family, "serialize",
-            lambda: cls.serialize_video_reaction_queryset(objects, viewer=viewer),
+            lambda: cls.serialize_video_reaction_queryset(
+                objects, viewer=viewer,
+                serialization_cache=serialization_cache,
+            ),
         )
         result = profiler.measure_hydration(
             family, "aggregation", lambda: cls._consolidate_received_reactions(rows)
@@ -1388,7 +1425,9 @@ class SocialActivityFeedService:
         )
 
     @classmethod
-    def serialize_rating_queryset(cls, queryset, *, viewer=None) -> list[dict]:
+    def serialize_rating_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ) -> list[dict]:
         """Convert an already selected rating queryset/page to feed payloads."""
         return [
             {
@@ -1399,13 +1438,16 @@ class SocialActivityFeedService:
                 "activity_at": cls._resolve_activity_at(created_at=rating.created_at, updated_at=rating.updated_at),
                 "_sort_entity_id": rating.id,
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_RATING],
-                "actor": cls._serialize_actor(rating.user),
+                "actor": cls._serialize_actor(
+                    rating.user, serialization_cache=serialization_cache
+                ),
                 "movie": cls._serialize_movie(
                     rating.movie,
                     display_rating=rating.movie_display_rating,
                     my_rating=rating.viewer_movie_rating,
                     following_avg_rating=rating.movie_following_avg_rating,
                     following_ratings_count=rating.movie_following_ratings_count,
+                    serialization_cache=serialization_cache,
                 ),
                 "payload": {
                     "score": rating.score,
@@ -1500,7 +1542,9 @@ class SocialActivityFeedService:
         )
 
     @classmethod
-    def serialize_video_reaction_created_queryset(cls, queryset, *, viewer=None) -> list[dict]:
+    def serialize_video_reaction_created_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ) -> list[dict]:
         """Serialize an already scoped queryset (including a paginated slice)."""
         return [
             {
@@ -1514,13 +1558,16 @@ class SocialActivityFeedService:
                 "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[
                     cls.ACTIVITY_VIDEO_REACTION_CREATED
                 ],
-                "actor": cls._serialize_actor(video.user),
+                "actor": cls._serialize_actor(
+                    video.user, serialization_cache=serialization_cache
+                ),
                 "movie": cls._serialize_movie(
                     video.movie,
                     display_rating=video.movie_display_rating,
                     my_rating=video.viewer_movie_rating,
                     following_avg_rating=video.movie_following_avg_rating,
                     following_ratings_count=video.movie_following_ratings_count,
+                    serialization_cache=serialization_cache,
                 ),
                 "payload": {
                     "video_comment_id": video.id,
@@ -1554,14 +1601,16 @@ class SocialActivityFeedService:
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
 
     @classmethod
-    def serialize_public_comment_queryset(cls, queryset, *, viewer=None):
+    def serialize_public_comment_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ):
         return [{
             "id": f"public_comment:{comment.id}", "activity_type": cls.ACTIVITY_PUBLIC_COMMENT,
             "created_at": comment.created_at, "updated_at": comment.updated_at,
             "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
             "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
-            "actor": cls._serialize_actor(comment.author),
-            "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
+            "actor": cls._serialize_actor(comment.author, serialization_cache=serialization_cache),
+            "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count, serialization_cache=serialization_cache),
             "payload": {"comment_id": comment.id, "content": comment.body},
         } for comment in queryset]
 
@@ -1577,8 +1626,13 @@ class SocialActivityFeedService:
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="comment__movie_id").order_by("-created_at", "-id")
 
     @classmethod
-    def serialize_public_reaction_queryset(cls, queryset, *, viewer=None):
-        return [cls._serialize_comment_reaction(reaction, viewer=viewer, private=False) for reaction in queryset]
+    def serialize_public_reaction_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ):
+        return [cls._serialize_comment_reaction(
+            reaction, viewer=viewer, private=False,
+            serialization_cache=serialization_cache,
+        ) for reaction in queryset]
 
     @classmethod
     def _private_message_activity_queryset(cls, *, actor_ids, viewer):
@@ -1589,7 +1643,9 @@ class SocialActivityFeedService:
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
 
     @classmethod
-    def serialize_private_message_queryset(cls, queryset, *, viewer=None):
+    def serialize_private_message_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ):
         viewer = viewer or getattr(queryset, "_phase_b_viewer", None)
         result = []
         for comment in queryset:
@@ -1600,9 +1656,9 @@ class SocialActivityFeedService:
                 "created_at": comment.created_at, "updated_at": comment.updated_at,
                 "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
                 "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
-                "actor": cls._serialize_actor(comment.author),
-                "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
-                "payload": {"comment_id": comment.id, "content": comment.body, "sender": cls._serialize_compact_user(comment.author), "recipient": cls._serialize_compact_user(comment.target_user), "target_user": cls._serialize_compact_user(comment.target_user), "direction": "sent" if viewer and comment.author_id == viewer.id else "received", "counterpart": cls._serialize_compact_user(comment.target_user if viewer and comment.author_id == viewer.id else comment.author)},
+                "actor": cls._serialize_actor(comment.author, serialization_cache=serialization_cache),
+                "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count, serialization_cache=serialization_cache),
+                "payload": {"comment_id": comment.id, "content": comment.body, "sender": cls._serialize_compact_user(comment.author, serialization_cache=serialization_cache), "recipient": cls._serialize_compact_user(comment.target_user, serialization_cache=serialization_cache), "target_user": cls._serialize_compact_user(comment.target_user, serialization_cache=serialization_cache), "direction": "sent" if viewer and comment.author_id == viewer.id else "received", "counterpart": cls._serialize_compact_user(comment.target_user if viewer and comment.author_id == viewer.id else comment.author, serialization_cache=serialization_cache)},
             })
         return result
 
@@ -1617,11 +1673,18 @@ class SocialActivityFeedService:
         ).order_by("-created_at", "-id"))
 
     @classmethod
-    def serialize_private_reaction_queryset(cls, queryset, *, viewer=None):
-        return [cls._serialize_comment_reaction(reaction, viewer=viewer, private=True) for reaction in queryset if reaction.comment.has_valid_target_mention()]
+    def serialize_private_reaction_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ):
+        return [cls._serialize_comment_reaction(
+            reaction, viewer=viewer, private=True,
+            serialization_cache=serialization_cache,
+        ) for reaction in queryset if reaction.comment.has_valid_target_mention()]
 
     @classmethod
-    def _serialize_comment_reaction(cls, reaction, *, viewer, private):
+    def _serialize_comment_reaction(
+        cls, reaction, *, viewer, private, serialization_cache=None
+    ):
         activity_type = cls.ACTIVITY_PRIVATE_COMMENT_REACTION if private else cls.ACTIVITY_PUBLIC_COMMENT_REACTION
         movie_kwargs = {} if private else {"display_rating": reaction.movie_display_rating, "my_rating": reaction.viewer_movie_rating, "following_avg_rating": reaction.movie_following_avg_rating, "following_ratings_count": reaction.movie_following_ratings_count}
         return {
@@ -1629,9 +1692,9 @@ class SocialActivityFeedService:
             "created_at": reaction.created_at, "updated_at": reaction.updated_at,
             "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
             "_sort_entity_id": reaction.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
-            "actor": cls._serialize_actor(reaction.user), "_comment_text": reaction.comment.body,
-            "movie": cls._serialize_movie(reaction.comment.movie, **movie_kwargs),
-            "payload": {"comment_id": reaction.comment_id, "reaction_id": reaction.id, "comment_excerpt": cls._truncate_excerpt(reaction.comment.body), "comment_author": cls._serialize_actor(reaction.comment.author), "reaction_value": reaction.reaction_type, "reaction_type": reaction.reaction_type, "is_given_reaction": viewer and reaction.user_id == viewer.id, "is_received_reaction": viewer and reaction.comment.author_id == viewer.id, "object_created_at": reaction.comment.created_at},
+            "actor": cls._serialize_actor(reaction.user, serialization_cache=serialization_cache), "_comment_text": reaction.comment.body,
+            "movie": cls._serialize_movie(reaction.comment.movie, serialization_cache=serialization_cache, **movie_kwargs),
+            "payload": {"comment_id": reaction.comment_id, "reaction_id": reaction.id, "comment_excerpt": cls._truncate_excerpt(reaction.comment.body), "comment_author": cls._serialize_actor(reaction.comment.author, serialization_cache=serialization_cache), "reaction_value": reaction.reaction_type, "reaction_type": reaction.reaction_type, "is_given_reaction": viewer and reaction.user_id == viewer.id, "is_received_reaction": viewer and reaction.comment.author_id == viewer.id, "object_created_at": reaction.comment.created_at},
         }
 
     @classmethod
@@ -1645,7 +1708,9 @@ class SocialActivityFeedService:
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="video_comment__movie_id").order_by("-updated_at", "-id")
 
     @classmethod
-    def serialize_video_reaction_queryset(cls, queryset, *, viewer=None):
+    def serialize_video_reaction_queryset(
+        cls, queryset, *, viewer=None, serialization_cache=None
+    ):
         activities = []
         for reaction in queryset:
             is_received = reaction.video_comment.user_id == viewer.id
@@ -1655,30 +1720,46 @@ class SocialActivityFeedService:
                 "created_at": reaction.created_at, "updated_at": reaction.updated_at,
                 "activity_at": cls._resolve_activity_at(created_at=reaction.created_at, updated_at=reaction.updated_at),
                 "_sort_entity_id": reaction.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[activity_type],
-                "actor": cls._serialize_actor(reaction.user),
-                "movie": cls._serialize_movie(reaction.video_comment.movie, display_rating=reaction.movie_display_rating, my_rating=reaction.viewer_movie_rating, following_avg_rating=reaction.movie_following_avg_rating, following_ratings_count=reaction.movie_following_ratings_count),
-                "payload": {"reaction_id": reaction.id, "reaction_type": reaction.reaction_type, "reaction_value": reaction.reaction_type, "video_comment_id": reaction.video_comment_id, "video_owner": cls._serialize_actor(reaction.video_comment.user), "is_received_reaction": is_received, "is_given_reaction": not is_received, "object_created_at": reaction.video_comment.created_at, "video_url": reaction.video_comment.video.url if reaction.video_comment.video else None},
+                "actor": cls._serialize_actor(reaction.user, serialization_cache=serialization_cache),
+                "movie": cls._serialize_movie(reaction.video_comment.movie, display_rating=reaction.movie_display_rating, my_rating=reaction.viewer_movie_rating, following_avg_rating=reaction.movie_following_avg_rating, following_ratings_count=reaction.movie_following_ratings_count, serialization_cache=serialization_cache),
+                "payload": {"reaction_id": reaction.id, "reaction_type": reaction.reaction_type, "reaction_value": reaction.reaction_type, "video_comment_id": reaction.video_comment_id, "video_owner": cls._serialize_actor(reaction.video_comment.user, serialization_cache=serialization_cache), "is_received_reaction": is_received, "is_given_reaction": not is_received, "object_created_at": reaction.video_comment.created_at, "video_url": reaction.video_comment.video.url if reaction.video_comment.video else None},
             })
         return activities
 
     @classmethod
-    def _serialize_compact_user(cls, user) -> dict:
-        return {
+    def _serialize_compact_user(
+        cls, user, *, serialization_cache=None
+    ) -> dict:
+        if serialization_cache is not None:
+            cached = serialization_cache.compact_users.get(user.id)
+            if cached is not None:
+                return cached
+        payload = {
             "id": user.id,
             "username": user.username,
         }
+        if serialization_cache is not None:
+            serialization_cache.compact_users[user.id] = payload
+        return payload
 
     @classmethod
-    def _serialize_actor(cls, user) -> dict:
+    def _serialize_actor(cls, user, *, serialization_cache=None) -> dict:
+        if serialization_cache is not None:
+            cached = serialization_cache.actors.get(user.id)
+            if cached is not None:
+                return cached
         avatar_url = None
         if hasattr(user, "profile") and user.profile and user.profile.avatar:
             avatar_url = user.profile.avatar.url
 
-        return {
+        payload = {
             "id": user.id,
             "username": user.username,
             "avatar": avatar_url,
         }
+        if serialization_cache is not None:
+            serialization_cache.actors[user.id] = payload
+        return payload
 
     @classmethod
     def _serialize_movie(
@@ -1689,8 +1770,17 @@ class SocialActivityFeedService:
         my_rating=None,
         following_avg_rating=None,
         following_ratings_count=0,
+        serialization_cache=None,
     ) -> dict:
-        return {
+        cache_key = (
+            movie.id, display_rating, my_rating, following_avg_rating,
+            following_ratings_count,
+        )
+        if serialization_cache is not None:
+            cached = serialization_cache.movies.get(cache_key)
+            if cached is not None:
+                return cached
+        payload = {
             "id": movie.id,
             "title_english": movie.title_english,
             "title_spanish": movie.title_spanish,
@@ -1703,6 +1793,9 @@ class SocialActivityFeedService:
             "following_avg_rating": following_avg_rating,
             "following_ratings_count": following_ratings_count,
         }
+        if serialization_cache is not None:
+            serialization_cache.movies[cache_key] = payload
+        return payload
 
     @classmethod
     def _movie_display_rating_subquery(cls, *, movie_id_ref: str):
