@@ -2355,15 +2355,21 @@ class MeMessagesView(generics.ListAPIView):
         private_messages_qs = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
+                target_user__isnull=False,
             )
             .filter(Q(target_user=request.user) | Q(author=request.user))
-            .select_related("author", "author__profile", "movie", "target_user")
+            .exclude(author=F("target_user"))
+            .exclude(body="")
+            .select_related(
+                "author",
+                "author__profile",
+                "movie",
+                "target_user",
+                "target_user__profile",
+            )
             .order_by("-created_at", "-id")
         )
-        private_messages = list(annotate_comments_for_user(
-            filter_valid_directed_comments(private_messages_qs),
-            request.user,
-        ))
+        private_messages = list(private_messages_qs)
         annotate_restricted_current_user_for_users(
             [user for comment in private_messages for user in (comment.author, comment.target_user)],
             request.user,
@@ -2377,11 +2383,22 @@ class MeMessagesView(generics.ListAPIView):
                 Q(comment__author=request.user, user__isnull=False)
                 | Q(user=request.user, comment__author__isnull=False)
             )
+            .filter(comment__target_user__isnull=False)
             .exclude(user_id=F("comment__author_id"))
-            .select_related("user", "user__profile", "comment", "comment__author", "comment__movie")
+            .exclude(comment__author=F("comment__target_user"))
+            .exclude(comment__body="")
+            .select_related(
+                "user",
+                "user__profile",
+                "comment",
+                "comment__author",
+                "comment__author__profile",
+                "comment__movie",
+                "comment__target_user",
+            )
             .order_by("-created_at", "-id")
         )
-        private_reactions = [item for item in private_reactions_qs if item.comment.has_valid_target_mention()]
+        private_reactions = list(private_reactions_qs)
 
         message_items = MeMessageSerializer(
             private_messages,

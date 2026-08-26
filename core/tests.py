@@ -4577,6 +4577,58 @@ class NotificationsAPITests(TestCase):
         self.assertFalse(given_reaction["is_received_reaction"])
         self.assertTrue(given_reaction["is_given_reaction"])
 
+    def test_me_messages_preserves_global_order_and_message_first_tie_break(self):
+        reaction = CommentReaction.objects.create(
+            comment=self.private_comment,
+            user=self.actor,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        shared_timestamp = timezone.now() + timedelta(days=1)
+        Comment.objects.filter(pk=self.inbox_message.pk).update(created_at=shared_timestamp)
+        CommentReaction.objects.filter(pk=reaction.pk).update(created_at=shared_timestamp)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.me_messages_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(response.data, list)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [self.inbox_message.id, f"private-reaction-{reaction.id}", self.private_comment.id],
+        )
+
+    def test_me_messages_query_count_does_not_grow_per_item(self):
+        CommentReaction.objects.create(
+            comment=self.private_comment,
+            user=self.actor,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        self.client.force_authenticate(self.owner)
+        with CaptureQueriesContext(connection) as single_queries:
+            single_response = self.client.get(self.me_messages_url)
+
+        for index in range(4):
+            comment = Comment.objects.create(
+                author=self.owner,
+                movie=self.movie,
+                body=f"Mensaje privado {index}",
+                visibility=Comment.VISIBILITY_MENTIONED,
+                target_user=self.actor,
+            )
+            CommentReaction.objects.create(
+                comment=comment,
+                user=self.actor,
+                reaction_type=CommentReaction.REACT_DISLIKE,
+            )
+
+        with CaptureQueriesContext(connection) as many_queries:
+            many_response = self.client.get(self.me_messages_url)
+
+        self.assertEqual(single_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(many_response.status_code, status.HTTP_200_OK)
+        self.assertGreater(len(many_response.data), len(single_response.data))
+        self.assertEqual(len(many_queries), len(single_queries))
+
     def test_me_messages_hides_private_reaction_after_delete(self):
         self.client.force_authenticate(self.actor)
         self.client.put(
