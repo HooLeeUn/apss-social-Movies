@@ -437,7 +437,23 @@ class SocialActivityFeedService:
             ordinary("ratings", cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_RATING),
             ordinary("public_comments", cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_PUBLIC_COMMENT),
             ordinary("public_reactions_given", cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user).filter(user_id=user.id), cls.ACTIVITY_PUBLIC_COMMENT_REACTION),
-            ordinary("private_messages", cls.private_message_candidates_queryset(actor_ids=actor_ids, viewer=user).select_related("target_user"), cls.ACTIVITY_PRIVATE_MESSAGE, validator=lambda comment: comment.has_valid_target_mention()),
+            # G1: the Python privacy predicate reads ``visibility`` and
+            # ``body``.  The base lightweight selector deliberately omits
+            # payload fields, so accessing those deferred attributes used to
+            # issue two queries per row.  Load only those predicate fields and
+            # the target relation for this Candidate stream; hydration remains
+            # unchanged and still owns all response payload construction.
+            ordinary(
+                "private_messages",
+                cls.private_message_candidates_queryset(
+                    actor_ids=actor_ids, viewer=user
+                ).only(
+                    "id", "author_id", "target_user_id", "movie_id",
+                    "created_at", "body", "visibility",
+                ).select_related("target_user"),
+                cls.ACTIVITY_PRIVATE_MESSAGE,
+                validator=lambda comment: comment.has_valid_target_mention(),
+            ),
             ordinary("videos_created", cls.video_created_candidates_queryset(actor=user, viewer=user), cls.ACTIVITY_VIDEO_REACTION_CREATED),
             ordinary("video_reactions_given", cls.video_reaction_candidates_queryset(viewer=user).filter(user_id=user.id), cls.ACTIVITY_VIDEO_REACTION_GIVEN),
         ]
