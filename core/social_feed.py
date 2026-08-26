@@ -46,7 +46,9 @@ class _CandidateProfile:
         self.phase = "setup"
         self.queries_total = 0
         self.queries_by_phase = {}
+        self.sql_ms_by_phase = {}
         self.family_ms = {}
+        self.hydration_components = {}
         self.frontier_ms = 0.0
         self.certification_ms = 0.0
         self.hydration_ms = 0.0
@@ -54,7 +56,12 @@ class _CandidateProfile:
     def execute(self, execute, sql, params, many, context):
         self.queries_total += 1
         self.queries_by_phase[self.phase] = self.queries_by_phase.get(self.phase, 0) + 1
-        return execute(sql, params, many, context)
+        started = perf_counter()
+        try:
+            return execute(sql, params, many, context)
+        finally:
+            elapsed = (perf_counter() - started) * 1000
+            self.sql_ms_by_phase[self.phase] = self.sql_ms_by_phase.get(self.phase, 0.0) + elapsed
 
     def measure(self, phase, callback):
         previous = self.phase
@@ -64,6 +71,21 @@ class _CandidateProfile:
             return callback()
         finally:
             elapsed = (perf_counter() - started) * 1000
+            self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
+            self.phase = previous
+
+    def measure_hydration(self, family, component, callback):
+        """Measure a candidate-local hydration section without retaining values."""
+        phase = f"hydration_{family}"
+        started = perf_counter()
+        previous = self.phase
+        self.phase = phase
+        try:
+            return callback()
+        finally:
+            elapsed = (perf_counter() - started) * 1000
+            components = self.hydration_components.setdefault(family, {})
+            components[component] = components.get(component, 0.0) + elapsed
             self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
             self.phase = previous
 
@@ -663,17 +685,46 @@ class SocialActivityFeedService:
                 "avg_batch_ms": round(elapsed / sequence.batches, 3) if sequence.batches else 0.0,
                 "queries": profiler.queries_by_phase.get(sequence.name, 0),
             }
-        hydration_families = {
-            phase.removeprefix("hydration_"): {
-                "ms": round(elapsed, 3),
+        hydration_family_names = (
+            "ratings", "public_comments", "public_reactions_given",
+            "private_messages", "videos_created", "video_reactions_given",
+            "comment_reaction_summaries_received",
+            "comment_reaction_summaries_received_private_hybrid",
+            "video_reaction_summaries_received",
+        )
+        hydration_families = {}
+        for family in hydration_family_names:
+            phase = f"hydration_{family}"
+            components = profiler.hydration_components.get(family, {})
+            total_ms = sum(
+                value for key, value in components.items() if key != "rows"
+            )
+            sql_ms = profiler.sql_ms_by_phase.get(phase, 0.0)
+            hydration_families[family] = {
+                "sql_ms": round(sql_ms, 3),
+                "python_ms": round(max(0.0, total_ms - sql_ms), 3),
+                "total_ms": round(total_ms, 3),
+                "rows": components.get("rows", 0),
                 "queries": profiler.queries_by_phase.get(phase, 0),
+                "fetch_ms": round(components.get("fetch", 0.0), 3),
+                "serialize_ms": round(components.get("serialize", 0.0), 3),
+                "aggregation_ms": round(components.get("aggregation", 0.0), 3),
+                "payload_ms": round(components.get("payload", 0.0), 3),
             }
-            for phase, elapsed in profiler.family_ms.items()
-            if phase.startswith("hydration_")
-        }
+        # Compatibility alias retained for the G2 staging dashboards.
+        summary = hydration_families["comment_reaction_summaries_received"]
+        hydration_families["comment_summaries"] = dict(summary)
         hydration_queries = sum(
             count for phase, count in profiler.queries_by_phase.items()
             if phase == "hydration" or phase.startswith("hydration_")
+        )
+        hydration_sql_ms = sum(
+            elapsed for phase, elapsed in profiler.sql_ms_by_phase.items()
+            if phase == "hydration" or phase.startswith("hydration_")
+        )
+        accounted_ms = sum(
+            sum(value for key, value in components.items() if key != "rows")
+            for components in profiler.hydration_components.values()
         )
         return {
             "total_ms": round((perf_counter() - profiler.started) * 1000, 3),
@@ -682,6 +733,22 @@ class SocialActivityFeedService:
             "frontier_ms": round(profiler.frontier_ms, 3),
             "certification_ms": round(profiler.certification_ms, 3),
             "hydration_ms": round(profiler.hydration_ms, 3),
+            "hydration_total_ms": round(profiler.hydration_ms, 3),
+            "hydration_sql_ms": round(hydration_sql_ms, 3),
+            "hydration_python_ms": round(max(0.0, profiler.hydration_ms - hydration_sql_ms), 3),
+            "hydration_accounted_ms": round(accounted_ms, 3),
+            "hydration_unaccounted_ms": round(max(0.0, profiler.hydration_ms - accounted_ms), 3),
+            "hydration_components": {
+                "serialization_ms": round(sum(c.get("serialize", 0.0) for c in profiler.hydration_components.values()), 3),
+                "payload_construction_ms": round(sum(c.get("payload", 0.0) for c in profiler.hydration_components.values()), 3),
+                "auxiliary_lookups_ms": round(sum(c.get("auxiliary_lookups", 0.0) for c in profiler.hydration_components.values()), 3),
+                "reaction_counts_ms": round(sum(c.get("reaction_counts", 0.0) for c in profiler.hydration_components.values()), 3),
+                "summary_construction_ms": round(sum(c.get("aggregation", 0.0) for c in profiler.hydration_components.values()), 3),
+                "movie_fetch_ms": round(sum(c.get("movie_fetch", 0.0) for c in profiler.hydration_components.values()), 3),
+                "movie_metadata_ms": round(sum(c.get("movie_metadata", 0.0) for c in profiler.hydration_components.values()), 3),
+                "localization_ms": round(sum(c.get("localization", 0.0) for c in profiler.hydration_components.values()), 3),
+                "other_python_ms": round(sum(c.get("other_python", 0.0) for c in profiler.hydration_components.values()), 3),
+            },
             "hydration_queries": hydration_queries,
             "hydration_families": hydration_families,
         }
@@ -699,23 +766,26 @@ class SocialActivityFeedService:
             ids.setdefault(item["namespace"], []).append(item["object_id"])
         activities = []
         ordinary = {
-            cls.ACTIVITY_RATING: (cls.hydrate_rating_ids, cls.serialize_rating_queryset),
-            cls.ACTIVITY_PUBLIC_COMMENT: (cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
-            cls.ACTIVITY_PUBLIC_COMMENT_REACTION: (cls.hydrate_public_reaction_ids, cls.serialize_public_reaction_queryset),
-            cls.ACTIVITY_PRIVATE_MESSAGE: (cls.hydrate_private_message_ids, cls.serialize_private_message_queryset),
-            cls.ACTIVITY_VIDEO_REACTION_CREATED: (cls.hydrate_video_created_ids, cls.serialize_video_reaction_created_queryset),
-            cls.ACTIVITY_VIDEO_REACTION_GIVEN: (cls.hydrate_video_reaction_ids, cls.serialize_video_reaction_queryset),
+            cls.ACTIVITY_RATING: ("ratings", cls.hydrate_rating_ids, cls.serialize_rating_queryset),
+            cls.ACTIVITY_PUBLIC_COMMENT: ("public_comments", cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
+            cls.ACTIVITY_PUBLIC_COMMENT_REACTION: ("public_reactions_given", cls.hydrate_public_reaction_ids, cls.serialize_public_reaction_queryset),
+            cls.ACTIVITY_PRIVATE_MESSAGE: ("private_messages", cls.hydrate_private_message_ids, cls.serialize_private_message_queryset),
+            cls.ACTIVITY_VIDEO_REACTION_CREATED: ("videos_created", cls.hydrate_video_created_ids, cls.serialize_video_reaction_created_queryset),
+            cls.ACTIVITY_VIDEO_REACTION_GIVEN: ("video_reactions_given", cls.hydrate_video_reaction_ids, cls.serialize_video_reaction_queryset),
         }
-        for namespace, (hydrator, converter) in ordinary.items():
+        for namespace, (family, hydrator, converter) in ordinary.items():
             object_ids = ids.get(namespace, [])
             if object_ids:
-                hydrate = lambda: converter(
-                    hydrator(object_ids, viewer=viewer), viewer=viewer
-                )
-                rows = (
-                    profiler.measure(f"hydration_{namespace}", hydrate)
-                    if profiler else hydrate()
-                )
+                if profiler:
+                    objects = profiler.measure_hydration(
+                        family, "fetch", lambda: list(hydrator(object_ids, viewer=viewer))
+                    )
+                    rows = profiler.measure_hydration(
+                        family, "serialize", lambda: converter(objects, viewer=viewer)
+                    )
+                    profiler.hydration_components[family]["rows"] = len(rows)
+                else:
+                    rows = converter(hydrator(object_ids, viewer=viewer), viewer=viewer)
                 activities.extend(rows)
 
         def hydrate_comment_summaries():
@@ -723,7 +793,7 @@ class SocialActivityFeedService:
                 comment_ids=ids.get(
                     cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, []
                 ),
-                viewer=viewer,
+                viewer=viewer, profiler=profiler,
             )
 
         def hydrate_video_summaries():
@@ -731,17 +801,11 @@ class SocialActivityFeedService:
                 video_comment_ids=ids.get(
                     cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, []
                 ),
-                viewer=viewer,
+                viewer=viewer, profiler=profiler,
             )
 
-        comment_rows = (
-            profiler.measure("hydration_comment_summaries", hydrate_comment_summaries)
-            if profiler else hydrate_comment_summaries()
-        )
-        video_rows = (
-            profiler.measure("hydration_video_summaries", hydrate_video_summaries)
-            if profiler else hydrate_video_summaries()
-        )
+        comment_rows = hydrate_comment_summaries()
+        video_rows = hydrate_video_summaries()
         activities.extend(comment_rows)
         activities.extend(video_rows)
         return activities
@@ -1184,34 +1248,74 @@ class SocialActivityFeedService:
         ))
 
     @classmethod
-    def hydrate_comment_reaction_summaries(cls, *, comment_ids, viewer) -> list[dict]:
+    def hydrate_comment_reaction_summaries(
+        cls, *, comment_ids, viewer, profiler=None
+    ) -> list[dict]:
         """Hydrate all selected comment groups in two batch queries."""
         comment_ids = list(set(comment_ids))
         if not comment_ids:
             return []
-        rows = cls.serialize_public_reaction_queryset(
-            cls._public_reaction_activity_queryset(actor_ids=[viewer.id], viewer=viewer)
-            .filter(comment_id__in=comment_ids), viewer=viewer
+        public_qs = cls._public_reaction_activity_queryset(
+            actor_ids=[viewer.id], viewer=viewer
+        ).filter(comment_id__in=comment_ids)
+        private_qs = cls._private_reaction_activity_queryset(
+            actor_ids=[viewer.id], viewer=viewer
+        ).filter(comment_id__in=comment_ids)
+        if not profiler:
+            rows = cls.serialize_public_reaction_queryset(public_qs, viewer=viewer)
+            rows.extend(cls.serialize_private_reaction_queryset(private_qs, viewer=viewer))
+            return cls._consolidate_received_reactions(rows)
+
+        public_family = "comment_reaction_summaries_received"
+        private_family = "comment_reaction_summaries_received_private_hybrid"
+        public_objects = profiler.measure_hydration(
+            public_family, "fetch", lambda: list(public_qs)
         )
-        rows.extend(cls.serialize_private_reaction_queryset(
-            cls._private_reaction_activity_queryset(actor_ids=[viewer.id], viewer=viewer)
-            .filter(comment_id__in=comment_ids), viewer=viewer
-        ))
-        return cls._consolidate_received_reactions(rows)
+        private_objects = profiler.measure_hydration(
+            private_family, "fetch", lambda: list(private_qs)
+        )
+        rows = profiler.measure_hydration(
+            public_family, "serialize",
+            lambda: cls.serialize_public_reaction_queryset(public_objects, viewer=viewer),
+        )
+        private_rows = profiler.measure_hydration(
+            private_family, "serialize",
+            lambda: cls.serialize_private_reaction_queryset(private_objects, viewer=viewer),
+        )
+        rows.extend(private_rows)
+        result = profiler.measure_hydration(
+            public_family, "aggregation", lambda: cls._consolidate_received_reactions(rows)
+        )
+        profiler.hydration_components[public_family]["rows"] = len(result)
+        profiler.hydration_components[private_family]["rows"] = len(private_rows)
+        return result
 
     @classmethod
-    def hydrate_video_reaction_summaries(cls, *, video_comment_ids, viewer) -> list[dict]:
+    def hydrate_video_reaction_summaries(
+        cls, *, video_comment_ids, viewer, profiler=None
+    ) -> list[dict]:
         """Hydrate all selected video groups in one batch query."""
         video_comment_ids = list(set(video_comment_ids))
         if not video_comment_ids:
             return []
-        rows = cls.serialize_video_reaction_queryset(
-            cls._video_reaction_activity_queryset(viewer=viewer).filter(
-                video_comment_id__in=video_comment_ids,
-                video_comment__user_id=viewer.id,
-            ), viewer=viewer
+        queryset = cls._video_reaction_activity_queryset(viewer=viewer).filter(
+            video_comment_id__in=video_comment_ids,
+            video_comment__user_id=viewer.id,
         )
-        return cls._consolidate_received_reactions(rows)
+        if not profiler:
+            rows = cls.serialize_video_reaction_queryset(queryset, viewer=viewer)
+            return cls._consolidate_received_reactions(rows)
+        family = "video_reaction_summaries_received"
+        objects = profiler.measure_hydration(family, "fetch", lambda: list(queryset))
+        rows = profiler.measure_hydration(
+            family, "serialize",
+            lambda: cls.serialize_video_reaction_queryset(objects, viewer=viewer),
+        )
+        result = profiler.measure_hydration(
+            family, "aggregation", lambda: cls._consolidate_received_reactions(rows)
+        )
+        profiler.hydration_components[family]["rows"] = len(result)
+        return result
 
     @classmethod
     def hydrate_rating_ids(cls, ids, *, viewer):
