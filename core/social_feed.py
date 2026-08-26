@@ -289,12 +289,23 @@ class SocialActivityFeedService:
 
     @classmethod
     def _serialize_rating_activities(cls, *, actor_ids: list[int], viewer) -> Iterable[dict]:
+        return cls.serialize_rating_queryset(
+            cls.rating_activity_queryset(actor_ids=actor_ids, viewer=viewer)
+        )
+
+    @classmethod
+    def rating_activity_queryset(cls, *, actor_ids: list[int], viewer):
+        """Return the ordered, fully annotated queryset behind rating activities.
+
+        Keeping this as a queryset lets rating-only endpoints apply pagination in
+        SQL before activity dictionaries are materialized.
+        """
         movie_display_rating_subquery = cls._movie_display_rating_subquery(movie_id_ref="movie_id")
         viewer_rating_subquery = cls._viewer_movie_rating_subquery(
             viewer=viewer,
             movie_id_ref="movie_id",
         )
-        queryset = (
+        return (
             MovieRating.objects.filter(user_id__in=actor_ids)
             .select_related("user", "user__profile", "movie")
             .annotate(
@@ -315,6 +326,9 @@ class SocialActivityFeedService:
             .order_by("-created_at", "-id")
         )
 
+    @classmethod
+    def serialize_rating_queryset(cls, queryset) -> list[dict]:
+        """Convert an already selected rating queryset/page to feed payloads."""
         return [
             {
                 "id": f"rating:{rating.id}",

@@ -7182,6 +7182,74 @@ class VisitedProfileDataEndpointsTests(TestCase):
         self.assertEqual(len(response.data["results"]), 2)
         self.assertTrue(all(item["activity_type"] == "rating" for item in response.data["results"]))
 
+    def test_rating_filter_paginates_queryset_in_sql_and_skips_other_tables(self):
+        for index in range(12):
+            movie = Movie.objects.create(
+                author=self.author,
+                title_english=f"SQL page movie {index}",
+                type=Movie.MOVIE,
+            )
+            MovieRating.objects.create(user=self.visited, movie=movie, score=7)
+
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(url, {"activity_type": "rating", "page": 2})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rating_selects = [
+            query["sql"] for query in queries.captured_queries
+            if 'FROM "core_movierating"' in query["sql"] and "SELECT" in query["sql"]
+        ]
+        self.assertTrue(any("LIMIT 10 OFFSET 10" in sql for sql in rating_selects))
+        executed_sql = "\n".join(query["sql"] for query in queries.captured_queries)
+        for table in (
+            '"core_comment"',
+            '"core_videocomment"',
+            '"core_commentreaction"',
+            '"core_videocommentreaction"',
+        ):
+            self.assertNotIn(table, executed_sql)
+
+    def test_rating_filter_query_count_does_not_grow_with_page_size(self):
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+        with CaptureQueriesContext(connection) as single_queries:
+            single_response = self.client.get(url, {"activity_type": "rating"})
+
+        for index in range(9):
+            movie = Movie.objects.create(
+                author=self.author,
+                title_english=f"Query count movie {index}",
+                type=Movie.MOVIE,
+            )
+            MovieRating.objects.create(user=self.visited, movie=movie, score=8)
+        with CaptureQueriesContext(connection) as ten_queries:
+            ten_response = self.client.get(url, {"activity_type": "rating"})
+
+        self.assertEqual(len(single_response.data["results"]), 1)
+        self.assertEqual(len(ten_response.data["results"]), 10)
+        self.assertEqual(len(ten_queries), len(single_queries))
+
+    def test_rating_filter_pages_preserve_stable_order_without_gaps(self):
+        ratings = [self.visited_rating]
+        for index in range(10):
+            movie = Movie.objects.create(
+                author=self.author,
+                title_english=f"Ordered movie {index}",
+                type=Movie.MOVIE,
+            )
+            ratings.append(MovieRating.objects.create(user=self.visited, movie=movie, score=6))
+        shared_time = timezone.now() - timedelta(hours=1)
+        MovieRating.objects.filter(pk__in=[rating.pk for rating in ratings]).update(created_at=shared_time)
+
+        url = reverse("user-activity", kwargs={"username": self.visited.username})
+        first = self.client.get(url, {"activity_type": "rating"})
+        second = self.client.get(url, {"activity_type": "rating", "page": 2})
+        returned_ids = [item["id"] for item in first.data["results"] + second.data["results"]]
+
+        expected_ids = [f"rating:{rating.id}" for rating in sorted(ratings, key=lambda item: item.id, reverse=True)]
+        self.assertEqual(returned_ids, expected_ids)
+        self.assertEqual(len(returned_ids), len(set(returned_ids)))
+
     @patch("core.social_feed.SocialActivityFeedService._serialize_video_reaction_created_activities")
     @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_reaction_activities")
     @patch("core.social_feed.SocialActivityFeedService._serialize_public_comment_activities")
