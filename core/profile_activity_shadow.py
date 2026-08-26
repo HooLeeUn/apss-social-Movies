@@ -7,6 +7,7 @@ import random
 from time import perf_counter
 
 from django.conf import settings
+from django.db import connection
 
 from .social_feed import SocialActivityFeedService
 
@@ -71,6 +72,27 @@ def report_profile_activity_shadow(metadata):
         )
 
 
+def report_candidate_profile(metadata):
+    """Emit one compact numeric-only Phase F record for a sampled run."""
+    profile = metadata.get("profile")
+    if not profile:
+        return
+    logger.info(
+        "PROFILE_ACTIVITY_CANDIDATE_PROFILE k=%s total_ms=%s queries=%s "
+        "legacy_count=%s candidate_count=%s rows_inspected=%s "
+        "logical_candidates=%s hydrated_rows=%s frontier_ms=%s "
+        "certification_ms=%s hydration_ms=%s hydration_queries=%s "
+        "logical_count_ms=%s logical_count_queries=%s families=%s",
+        metadata["k"], profile["total_ms"], profile["candidate_queries_total"],
+        metadata["legacy_item_count"], metadata["candidate_item_count"],
+        metadata["source_rows_inspected"], metadata["logical_candidates_inspected"],
+        metadata["hydrated_rows"], profile["frontier_ms"],
+        profile["certification_ms"], profile["hydration_ms"],
+        profile["hydration_queries"], profile["logical_count_ms"],
+        profile["logical_count_queries"], profile["families"],
+    )
+
+
 def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
     """Compare candidates and always swallow failures to protect legacy."""
     started = perf_counter()
@@ -93,10 +115,11 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
         "mismatch_reason": None,
         "error_type": None,
     }
+    profile_enabled = settings.PROFILE_ACTIVITY_CANDIDATE_PROFILE_ENABLED
     try:
         candidate, adaptive = SocialActivityFeedService.build_feed_candidate_adaptive(
             user=user, scope=scope, k=k, fallback_to_legacy=False,
-            return_metadata=True,
+            return_metadata=True, profile_enabled=profile_enabled,
         )
         metadata.update({
             "candidate_certified": adaptive["certified"],
@@ -108,6 +131,8 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
             "logical_candidates_inspected": adaptive["logical_candidates_inspected"],
             "hydrated_rows": adaptive["hydrated_rows"],
         })
+        if profile_enabled and "profile" in adaptive:
+            metadata["profile"] = adaptive["profile"]
         expected = legacy[:k]
         metadata["matched"] = adaptive["certified"] and candidate == expected
         if not metadata["matched"]:
@@ -118,9 +143,26 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
             )
         metadata["legacy_fingerprint"] = safe_fingerprint(expected)
         metadata["candidate_fingerprint"] = safe_fingerprint(candidate)
-        candidate_count = SocialActivityFeedService.count_feed_candidate_logical(
-            user=user, scope=scope
-        )
+        if profile_enabled:
+            query_count = 0
+            def count_query(execute, sql, params, many, context):
+                nonlocal query_count
+                query_count += 1
+                return execute(sql, params, many, context)
+            count_started = perf_counter()
+            with connection.execute_wrapper(count_query):
+                candidate_count = SocialActivityFeedService.count_feed_candidate_logical(
+                    user=user, scope=scope
+                )
+            metadata["profile"].update({
+                "logical_count_ms": round((perf_counter() - count_started) * 1000, 3),
+                "logical_count_queries": query_count,
+            })
+            metadata["profile"]["candidate_queries_total"] += query_count
+        else:
+            candidate_count = SocialActivityFeedService.count_feed_candidate_logical(
+                user=user, scope=scope
+            )
         metadata["candidate_logical_count"] = candidate_count
         metadata["count_matched"] = candidate_count == len(legacy)
         if not metadata["count_matched"]:
@@ -133,4 +175,8 @@ def run_profile_activity_shadow(*, user, scope, legacy, k, legacy_duration):
     finally:
         metadata["duration_candidate_seconds"] = perf_counter() - started
         report_profile_activity_shadow(metadata)
+        if profile_enabled and "profile" in metadata:
+            rate = max(0.0, min(1.0, settings.PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE))
+            if rate and random.random() < rate:
+                report_candidate_profile(metadata)
     return metadata

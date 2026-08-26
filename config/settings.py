@@ -230,6 +230,9 @@ PROFILE_ACTIVITY_SHADOW_ENABLED = env_bool("PROFILE_ACTIVITY_SHADOW_ENABLED", Fa
 PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE = env_float(
     "PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE", 0.0
 )
+PROFILE_ACTIVITY_CANDIDATE_PROFILE_ENABLED = env_bool(
+    "PROFILE_ACTIVITY_CANDIDATE_PROFILE_ENABLED", False
+)
 
 # Keep Phase E observability independent from the root logger's effective
 # WARNING level.  StreamHandler writes to stdout so Render Application Logs can
