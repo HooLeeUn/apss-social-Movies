@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable, Literal, cast
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Literal, cast
 
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
@@ -21,9 +22,27 @@ from .models import (
 SocialFeedScope = Literal["following", "friends", "me"]
 
 
+@dataclass
+class _AdaptiveSequence:
+    """Candidate-only cursor state; never serialized by the API."""
+
+    name: str
+    fetch: Callable[[tuple | None, int], tuple[list[dict], dict | None, bool, int]]
+    after_key: tuple | None = None
+    candidates: list[dict] = field(default_factory=list)
+    frontier: dict | None = None
+    exhausted: bool = False
+    batches: int = 0
+    source_rows: int = 0
+
+
 class SocialActivityFeedService:
     CANDIDATE_MODE_FULL = "full_legacy_like"
     CANDIDATE_MODE_LOGICAL_GROUPS = "logical_group_candidates"
+    CANDIDATE_MODE_ADAPTIVE = "adaptive_top_k"
+    DEFAULT_ADAPTIVE_BATCH_SIZE = 10
+    DEFAULT_ADAPTIVE_MAX_BATCHES = 100
+    DEFAULT_ADAPTIVE_MAX_CANDIDATE_ROWS = 10000
     ACTIVITY_RATING = "rating"
     ACTIVITY_PUBLIC_COMMENT = "public_comment"
     ACTIVITY_PRIVATE_MESSAGE = "private_message"
@@ -250,6 +269,319 @@ class SocialActivityFeedService:
             item["_sort_activity_priority"],
             item["_sort_entity_id"],
         ), reverse=True)
+        return activities
+
+    @classmethod
+    def _candidate_key(cls, candidate: dict) -> tuple:
+        return (
+            candidate["effective_at"], candidate["priority"],
+            candidate["entity_id"], candidate["family_rank"],
+        )
+
+    @classmethod
+    def _adaptive_queryset_fetcher(
+        cls, *, queryset, namespace: str, timestamp_field: str,
+        entity_field: str = "id", object_field: str = "id",
+        validator=None,
+    ):
+        """Build a descending keyset reader with one look-ahead frontier.
+
+        ``batch_size + 1`` is intentional: the extra lightweight row is the
+        certified best unread item.  It is retained as a frontier and becomes
+        part of the next batch rather than being queried again.
+        """
+        priority = cls._ACTIVITY_SORT_PRIORITY[namespace]
+        family_rank = cls.LEGACY_FAMILY_RANK[namespace]
+
+        def fetch(after_key, batch_size):
+            page = queryset
+            if after_key is not None:
+                after_at, after_entity = after_key
+                page = page.filter(
+                    Q(**{f"{timestamp_field}__lt": after_at})
+                    | Q(**{timestamp_field: after_at, f"{entity_field}__lt": after_entity})
+                )
+            page = page.order_by(f"-{timestamp_field}", f"-{entity_field}")
+            rows = list(page[:batch_size + 1])
+            accepted = []
+            for row in rows:
+                if validator is not None and not validator(row):
+                    continue
+                effective_at = getattr(row, timestamp_field)
+                entity_id = getattr(row, entity_field)
+                accepted.append({
+                    "namespace": namespace,
+                    "object_id": getattr(row, object_field),
+                    "effective_at": effective_at,
+                    "priority": priority,
+                    "entity_id": entity_id,
+                    "family_rank": family_rank,
+                    "source_rows": 1,
+                })
+            # A rejected final row cannot be a privacy-safe frontier.  The
+            # caller must continue this sequence until a valid look-ahead or
+            # exhaustion, so we expose no frontier in that case.
+            exhausted = len(rows) <= batch_size
+            visible = accepted[:batch_size]
+            frontier = accepted[batch_size] if len(accepted) > batch_size else None
+            if rows:
+                last = rows[-1]
+                cursor = (getattr(last, timestamp_field), getattr(last, entity_field))
+            else:
+                cursor = after_key
+            for item in visible:
+                item["_cursor"] = cursor
+            if frontier is not None:
+                frontier["_cursor"] = cursor
+            return visible, frontier, exhausted, len(rows)
+
+        return fetch
+
+    @classmethod
+    def _adaptive_list_fetcher(cls, *, rows: list[dict]):
+        """Safe hybrid cursor for Python-validated private summary groups."""
+        ordered = sorted(rows, key=lambda row: (
+            row["latest_activity_at"],
+            cls._ACTIVITY_SORT_PRIORITY[row["namespace"]], row["object_id"],
+            row["family_rank"],
+        ), reverse=True)
+
+        def fetch(after_key, batch_size):
+            start = 0 if after_key is None else after_key
+            window = ordered[start:start + batch_size + 1]
+            converted = [{
+                **row,
+                "effective_at": row["latest_activity_at"],
+                "priority": cls._ACTIVITY_SORT_PRIORITY[row["namespace"]],
+                "entity_id": row["object_id"],
+            } for row in window]
+            frontier = converted[batch_size] if len(converted) > batch_size else None
+            next_cursor = start + len(window)
+            for item in converted:
+                item["_cursor"] = next_cursor
+            return converted[:batch_size], frontier, len(window) <= batch_size, sum(
+                row.get("source_rows", 1) for row in window
+            )
+        return fetch
+
+    @classmethod
+    def _adaptive_group_fetcher(cls, *, queryset, namespace: str, object_field: str):
+        priority = cls._ACTIVITY_SORT_PRIORITY[namespace]
+        family_rank = cls.LEGACY_FAMILY_RANK[namespace]
+
+        def fetch(after_key, batch_size):
+            page = queryset
+            if after_key is not None:
+                after_at, after_id = after_key
+                page = page.filter(
+                    Q(latest_activity_at__lt=after_at)
+                    | Q(latest_activity_at=after_at, **{f"{object_field}__lt": after_id})
+                )
+            rows = list(page.order_by("-latest_activity_at", f"-{object_field}")[:batch_size + 1])
+            converted = [{
+                "namespace": namespace, "object_id": row[object_field],
+                "effective_at": row["latest_activity_at"], "priority": priority,
+                "entity_id": row[object_field], "family_rank": family_rank,
+                "source_rows": row["source_rows"],
+            } for row in rows]
+            frontier = converted[batch_size] if len(converted) > batch_size else None
+            cursor = ((rows[-1]["latest_activity_at"], rows[-1][object_field]) if rows else after_key)
+            for item in converted:
+                item["_cursor"] = cursor
+            return converted[:batch_size], frontier, len(rows) <= batch_size, sum(
+                row["source_rows"] for row in rows
+            )
+        return fetch
+
+    @classmethod
+    def _adaptive_sequences(cls, *, user, actor_ids) -> list[_AdaptiveSequence]:
+        def ordinary(name, queryset, namespace, timestamp="candidate_activity_at", validator=None):
+            return _AdaptiveSequence(name=name, fetch=cls._adaptive_queryset_fetcher(
+                queryset=queryset, namespace=namespace, timestamp_field=timestamp,
+                validator=validator,
+            ))
+
+        sequences = [
+            ordinary("ratings", cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_RATING),
+            ordinary("public_comments", cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_PUBLIC_COMMENT),
+            ordinary("public_reactions_given", cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user).filter(user_id=user.id), cls.ACTIVITY_PUBLIC_COMMENT_REACTION),
+            ordinary("private_messages", cls.private_message_candidates_queryset(actor_ids=actor_ids, viewer=user).select_related("target_user"), cls.ACTIVITY_PRIVATE_MESSAGE, validator=lambda comment: comment.has_valid_target_mention()),
+            ordinary("videos_created", cls.video_created_candidates_queryset(actor=user, viewer=user), cls.ACTIVITY_VIDEO_REACTION_CREATED),
+            ordinary("video_reactions_given", cls.video_reaction_candidates_queryset(viewer=user).filter(user_id=user.id), cls.ACTIVITY_VIDEO_REACTION_GIVEN),
+        ]
+
+        latest_public_id = (
+            cls._public_received_reaction_rows(viewer=user)
+            .filter(comment_id=OuterRef("comment_id"))
+            .order_by("-updated_at", "-id").values("id")[:1]
+        )
+        public_comment_groups = cls._public_received_reaction_rows(viewer=user).values(
+            "comment_id"
+        ).annotate(
+            latest_activity_at=Max("updated_at"),
+            latest_reaction_id=Subquery(latest_public_id), source_rows=Count("id"),
+        )
+        sequences.append(_AdaptiveSequence(
+            name="comment_reaction_summaries_received",
+            fetch=cls._adaptive_group_fetcher(
+                queryset=public_comment_groups,
+                namespace=cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY,
+                object_field="comment_id",
+            ),
+        ))
+
+        # Only private received rows require Phase C's Python privacy check.
+        # They are over-read once as lightweight rows; an unvalidated row is
+        # never used as a frontier. Public and private comments cannot overlap
+        # because visibility is a single-valued model field.
+        private_groups = cls.private_comment_received_logical_candidates(viewer=user)
+        sequences.append(_AdaptiveSequence(
+            name="comment_reaction_summaries_received_private_hybrid",
+            fetch=cls._adaptive_list_fetcher(rows=private_groups),
+        ))
+
+        latest_video_id = (
+            cls._video_received_reaction_rows(viewer=user)
+            .filter(video_comment_id=OuterRef("video_comment_id"))
+            .order_by("-updated_at", "-id").values("id")[:1]
+        )
+        video_groups = cls._video_received_reaction_rows(viewer=user).values(
+            "video_comment_id"
+        ).annotate(
+            latest_activity_at=Max("updated_at"),
+            latest_reaction_id=Subquery(latest_video_id), source_rows=Count("id"),
+        )
+        sequences.append(_AdaptiveSequence(
+            name="video_reaction_summaries_received",
+            fetch=cls._adaptive_group_fetcher(
+                queryset=video_groups,
+                namespace=cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY,
+                object_field="video_comment_id",
+            ),
+        ))
+        return sequences
+
+    @classmethod
+    def build_feed_candidate_adaptive(
+        cls, *, user, scope: SocialFeedScope, k: int,
+        batch_size: int = DEFAULT_ADAPTIVE_BATCH_SIZE,
+        max_batches: int = DEFAULT_ADAPTIVE_MAX_BATCHES,
+        max_candidate_rows: int = DEFAULT_ADAPTIVE_MAX_CANDIDATE_ROWS,
+        fallback_to_legacy: bool = True, return_metadata: bool = False,
+    ):
+        """Return an exact, certified Phase-D top-K or the legacy fallback.
+
+        This internal service is intentionally not called by any view.  A
+        sequence expands only when its look-ahead can equal or beat the current
+        Kth total key. Payload hydration begins after every frontier certifies.
+        """
+        metadata = {
+            "certified": False, "fallback_reason": None, "batches_by_family": {},
+            "source_rows_inspected": 0, "logical_candidates_inspected": 0,
+            "hydrated_rows": 0,
+        }
+        try:
+            if not cls.is_valid_scope(scope):
+                raise ValueError(f"Unsupported social feed scope: {scope}")
+            if k < 0 or batch_size < 1 or max_batches < 1 or max_candidate_rows < 1:
+                raise ValueError("Adaptive limits must be positive (k may be zero)")
+            if k == 0:
+                metadata["certified"] = True
+                return ([], metadata) if return_metadata else []
+            if scope != cls.SCOPE_ME:
+                raise RuntimeError("phase_d_scope_not_supported")
+            actor_ids = list(set(cls._get_actor_ids_for_scope(user=user, scope=scope)))
+            sequences = cls._adaptive_sequences(user=user, actor_ids=actor_ids)
+
+            def expand(sequence):
+                if sequence.batches >= max_batches:
+                    raise RuntimeError("max_batches")
+                rows, frontier, exhausted, inspected = sequence.fetch(
+                    sequence.after_key, batch_size
+                )
+                sequence.batches += 1
+                sequence.source_rows += inspected
+                metadata["source_rows_inspected"] += inspected
+                metadata["logical_candidates_inspected"] += len(rows) + (frontier is not None)
+                if metadata["logical_candidates_inspected"] > max_candidate_rows:
+                    raise RuntimeError("max_candidate_rows")
+                sequence.candidates.extend(rows)
+                sequence.frontier = frontier
+                sequence.exhausted = exhausted
+                cursor_source = frontier or (rows[-1] if rows else None)
+                if cursor_source is not None:
+                    sequence.after_key = cursor_source.get("_cursor")
+
+            for sequence in sequences:
+                expand(sequence)
+
+            while True:
+                known = sorted(
+                    (item for sequence in sequences for item in sequence.candidates),
+                    key=cls._candidate_key, reverse=True,
+                )
+                kth_key = cls._candidate_key(known[k - 1]) if len(known) >= k else None
+                unsafe = [sequence for sequence in sequences if not sequence.exhausted and (
+                    sequence.frontier is None or kth_key is None
+                    or cls._candidate_key(sequence.frontier) >= kth_key
+                )]
+                if len(known) >= k and not unsafe:
+                    selected = known[:k]
+                    break
+                if not unsafe:
+                    # All streams exhausted, so fewer than K is an exact top-K.
+                    selected = known
+                    break
+                for sequence in unsafe:
+                    # Promote the look-ahead on expansion without restarting.
+                    if sequence.frontier is not None:
+                        sequence.candidates.append(sequence.frontier)
+                    expand(sequence)
+
+            activities = cls._hydrate_adaptive_candidates(selected=selected, viewer=user)
+            expected_ids = [f'{item["namespace"]}:{item["object_id"]}' for item in selected]
+            activities.sort(key=lambda item: (
+                cls._activity_sort_timestamp(item), item["_sort_activity_priority"],
+                item["_sort_entity_id"], cls.LEGACY_FAMILY_RANK[item["activity_type"]],
+            ), reverse=True)
+            if [item["id"] for item in activities] != expected_ids:
+                raise RuntimeError("hydrated_order_mismatch")
+            metadata["certified"] = True
+            metadata["hydrated_rows"] = len(activities)
+            metadata["batches_by_family"] = {s.name: s.batches for s in sequences}
+            return (activities, metadata) if return_metadata else activities
+        except Exception as exc:
+            metadata["fallback_reason"] = str(exc) or exc.__class__.__name__
+            if not fallback_to_legacy:
+                return ([], metadata) if return_metadata else []
+            legacy = cls.build_feed(user=user, scope=scope)[:k]
+            metadata["hydrated_rows"] = len(legacy)
+            return (legacy, metadata) if return_metadata else legacy
+
+    @classmethod
+    def _hydrate_adaptive_candidates(cls, *, selected, viewer):
+        ids = {}
+        for item in selected:
+            ids.setdefault(item["namespace"], []).append(item["object_id"])
+        activities = []
+        ordinary = {
+            cls.ACTIVITY_RATING: (cls.hydrate_rating_ids, cls.serialize_rating_queryset),
+            cls.ACTIVITY_PUBLIC_COMMENT: (cls.hydrate_public_comment_ids, cls.serialize_public_comment_queryset),
+            cls.ACTIVITY_PUBLIC_COMMENT_REACTION: (cls.hydrate_public_reaction_ids, cls.serialize_public_reaction_queryset),
+            cls.ACTIVITY_PRIVATE_MESSAGE: (cls.hydrate_private_message_ids, cls.serialize_private_message_queryset),
+            cls.ACTIVITY_VIDEO_REACTION_CREATED: (cls.hydrate_video_created_ids, cls.serialize_video_reaction_created_queryset),
+            cls.ACTIVITY_VIDEO_REACTION_GIVEN: (cls.hydrate_video_reaction_ids, cls.serialize_video_reaction_queryset),
+        }
+        for namespace, (hydrator, converter) in ordinary.items():
+            object_ids = ids.get(namespace, [])
+            if object_ids:
+                activities.extend(converter(hydrator(object_ids, viewer=viewer), viewer=viewer))
+        activities.extend(cls.hydrate_comment_reaction_summaries(
+            comment_ids=ids.get(cls.ACTIVITY_COMMENT_REACTIONS_RECEIVED_SUMMARY, []), viewer=viewer
+        ))
+        activities.extend(cls.hydrate_video_reaction_summaries(
+            video_comment_ids=ids.get(cls.ACTIVITY_VIDEO_REACTIONS_RECEIVED_SUMMARY, []), viewer=viewer
+        ))
         return activities
 
     @classmethod
@@ -574,6 +906,23 @@ class SocialActivityFeedService:
             for row in public_groups
         }
 
+        for row in cls.private_comment_received_logical_candidates(viewer=viewer):
+            candidate = merged.get(row["object_id"])
+            if candidate is None:
+                merged[row["object_id"]] = row
+                continue
+            candidate["source_rows"] += row["source_rows"]
+            if (row["latest_activity_at"], row["latest_reaction_id"]) > (
+                candidate["latest_activity_at"], candidate["latest_reaction_id"]
+            ):
+                candidate["latest_activity_at"] = row["latest_activity_at"]
+                candidate["latest_reaction_id"] = row["latest_reaction_id"]
+        return list(merged.values())
+
+    @classmethod
+    def private_comment_received_logical_candidates(cls, *, viewer) -> list[dict]:
+        """Python-validated private groups, isolated for adaptive over-read."""
+        merged = {}
         private_rows = cls._private_received_reaction_rows(viewer=viewer).select_related(
             "comment", "comment__target_user"
         ).only(
