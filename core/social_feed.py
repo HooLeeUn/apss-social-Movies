@@ -991,6 +991,37 @@ class SocialActivityFeedService:
         ).distinct().count()
 
     @classmethod
+    def count_feed_candidate_logical(cls, *, user, scope: SocialFeedScope) -> int:
+        """Count Phase-C logical activities without hydrating feed payloads.
+
+        Phase E only observes this value; DRF continues to count the fully
+        materialized legacy list.  The only Python materialization here is for
+        mention validation, whose rules intentionally remain outside SQL.
+        """
+        if scope != cls.SCOPE_ME:
+            raise ValueError("candidate_logical_count_scope_not_supported")
+        actor_ids = list(set(cls._get_actor_ids_for_scope(user=user, scope=scope)))
+        private_messages = cls.private_message_candidates_queryset(
+            actor_ids=actor_ids, viewer=user
+        ).select_related("target_user").only(
+            "id", "body", "author_id", "target_user_id", "target_user__username"
+        )
+        valid_private_messages = sum(
+            comment.has_valid_target_mention() for comment in private_messages
+        )
+        return sum((
+            cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user).count(),
+            cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user).count(),
+            cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user)
+            .filter(user_id=user.id).count(),
+            valid_private_messages,
+            cls.video_created_candidates_queryset(actor=user, viewer=user).count(),
+            cls.video_reaction_candidates_queryset(viewer=user).filter(user_id=user.id).count(),
+            cls.count_comment_received_logical_items(viewer=user),
+            cls.count_video_received_logical_items(viewer=user),
+        ))
+
+    @classmethod
     def hydrate_comment_reaction_summaries(cls, *, comment_ids, viewer) -> list[dict]:
         """Hydrate all selected comment groups in two batch queries."""
         comment_ids = list(set(comment_ids))

@@ -76,6 +76,7 @@ from .trailers import get_movie_trailer_payload
 from .watch_providers import get_movie_watch_providers, normalize_country_code, build_empty_watch_provider_payload
 from .pagination import AutocompletePagination, DefaultPagination, FeedMoviesPagination
 from .social_feed import SocialActivityFeedService
+from .profile_activity_shadow import run_profile_activity_shadow
 from .weekly_recommendations import (
     get_previous_closed_week_window,
     refresh_weekly_recommendation_snapshot,
@@ -1897,10 +1898,29 @@ class ProfileFeedActivityView(generics.ListAPIView):
             self.request.query_params.get("scope")
         )
 
-        return SocialActivityFeedService.build_feed(
-            user=self.request.user,
-            scope=scope,
-        )
+        if not settings.PROFILE_ACTIVITY_SHADOW_ENABLED:
+            return SocialActivityFeedService.build_feed(
+                user=self.request.user,
+                scope=scope,
+            )
+        started = perf_counter()
+        legacy = SocialActivityFeedService.build_feed(user=self.request.user, scope=scope)
+        self._profile_activity_shadow_context = (scope, legacy, perf_counter() - started)
+        return legacy
+
+    def paginate_queryset(self, queryset):
+        page = super().paginate_queryset(queryset)
+        context = getattr(self, "_profile_activity_shadow_context", None)
+        if context is not None and page is not None:
+            scope, legacy, legacy_duration = context
+            # Use the paginator's resolved values, including its default and
+            # max_page_size, so K exactly represents the requested PageNumber.
+            k = self.paginator.page.number * self.paginator.get_page_size(self.request)
+            run_profile_activity_shadow(
+                user=self.request.user, scope=scope, legacy=legacy, k=k,
+                legacy_duration=legacy_duration,
+            )
+        return page
 
     def get_serializer_context(self):
         context = super().get_serializer_context()

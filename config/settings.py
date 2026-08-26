@@ -217,6 +217,13 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 10,
 }
 
+# Phase E profile-activity shadow validation.  This is deliberately independent
+# of DEBUG and must be explicitly enabled in each environment.
+PROFILE_ACTIVITY_SHADOW_ENABLED = env_bool("PROFILE_ACTIVITY_SHADOW_ENABLED", False)
+PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE = float(
+    os.environ.get("PROFILE_ACTIVITY_SHADOW_LOG_SAMPLE_RATE", "0")
+)
+
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
     (
