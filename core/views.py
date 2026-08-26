@@ -1918,15 +1918,31 @@ class UserProfileActivityView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = SocialActivitySerializer
 
-    def get_queryset(self):
-        target = get_object_or_404(
-            User.objects.select_related("profile"),
-            username=self.kwargs["username"],
-        )
+    def get_target(self):
+        if hasattr(self, "_target"):
+            return self._target
+        target = get_object_or_404(User.objects.select_related("profile"), username=self.kwargs["username"])
         if has_restricted_viewer(target, self.request.user):
             raise PermissionDenied({"detail": "This profile is not available.", "code": "restricted_by_user"})
         if not can_view_user_profile(target, self.request.user):
             raise PermissionDenied("You do not have permission to view this profile.")
+        self._target = target
+        return target
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get("activity_type") == SocialActivityFeedService.ACTIVITY_RATING:
+            target = self.get_target()
+            queryset = SocialActivityFeedService.rating_activity_queryset(
+                actor_ids=[target.id], viewer=request.user
+            )
+            page = self.paginate_queryset(queryset)
+            activities = SocialActivityFeedService.serialize_rating_queryset(page)
+            serializer = self.get_serializer(activities, many=True)
+            return self.get_paginated_response(serializer.data)
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        target = self.get_target()
 
         activity_type = self.request.query_params.get("activity_type")
         if activity_type == SocialActivityFeedService.ACTIVITY_VIDEO_REACTION_CREATED:
