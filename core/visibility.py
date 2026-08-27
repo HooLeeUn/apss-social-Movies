@@ -82,17 +82,21 @@ def users_have_any_restriction(user_a, user_b):
 def can_view_user_profile(target_user, viewer):
     if target_user is None:
         return False
+    profile = getattr(target_user, "profile", None)
+    visibility = getattr(profile, "visibility", None)
+    if not visibility:
+        visibility = Profile.Visibility.PUBLIC if getattr(profile, "is_public", True) else Profile.Visibility.PRIVATE
+
+    # Anonymous visitors have no social relationship to consult.  Public
+    # profiles are therefore readable, while every other visibility remains
+    # closed without issuing friendship/block queries.
     if not viewer or not getattr(viewer, "is_authenticated", False):
-        return False
+        return visibility == Profile.Visibility.PUBLIC
     if viewer.id == target_user.id:
         return True
     if is_blocked_from_user_content(target_user, viewer):
         return False
 
-    profile = getattr(target_user, "profile", None)
-    visibility = getattr(profile, "visibility", None)
-    if not visibility:
-        visibility = Profile.Visibility.PUBLIC if getattr(profile, "is_public", True) else Profile.Visibility.PRIVATE
     if visibility == Profile.Visibility.PUBLIC:
         return True
 

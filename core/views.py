@@ -1121,6 +1121,7 @@ class AppBrandingView(APIView):
 
 
 class UserProfileView(RetrieveAPIView):
+    permission_classes = [permissions.AllowAny]
     serializer_class = UserProfileSerializer
     lookup_field = "username"
     queryset = (
@@ -1139,6 +1140,8 @@ class UserProfileView(RetrieveAPIView):
         if has_restricted_viewer(obj, request.user):
             return restricted_profile_response()
         can_view_full_profile = can_view_user_profile(obj, request.user)
+        if not request.user.is_authenticated and not can_view_full_profile:
+            raise PermissionDenied("You do not have permission to view this profile.")
         serializer = self.get_serializer(
             obj,
             context={
@@ -1840,23 +1843,25 @@ class PostRatingView(APIView):
 
 
 class PublicCommentsFeedView(generics.ListAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = PublicCommentFeedSerializer
 
     def get_queryset(self):
         user = self.request.user
 
-        is_following_subquery = Follow.objects.filter(
-            follower_id=user.id,
-            following_id=OuterRef("author_id"),
-        )
-
-        is_friend_subquery = Friendship.objects.filter(
-            status=Friendship.STATUS_ACCEPTED,
-        ).filter(
-            Q(user1_id=user.id, user2_id=OuterRef("author_id"))
-            | Q(user2_id=user.id, user1_id=OuterRef("author_id"))
-        )
+        if user.is_authenticated:
+            is_following = Exists(Follow.objects.filter(
+                follower_id=user.id, following_id=OuterRef("author_id"),
+            ))
+            is_friend = Exists(Friendship.objects.filter(
+                status=Friendship.STATUS_ACCEPTED,
+            ).filter(
+                Q(user1_id=user.id, user2_id=OuterRef("author_id"))
+                | Q(user2_id=user.id, user1_id=OuterRef("author_id"))
+            ))
+        else:
+            is_following = Value(False)
+            is_friend = Value(False)
 
         queryset = (
             Comment.objects.filter(
@@ -1865,15 +1870,15 @@ class PublicCommentsFeedView(generics.ListAPIView):
             .select_related("author", "author__profile", "movie", "target_user")
             .annotate(
                 author_followers_count=Count("author__followers", distinct=True),
-                is_following_author=Exists(is_following_subquery),
-                is_friend_author=Exists(is_friend_subquery),
+                is_following_author=is_following,
+                is_friend_author=is_friend,
             )
             .annotate(
                 feed_category=Case(
                     When(
                         Q(is_following_author=False)
                         & Q(is_friend_author=False)
-                        & ~Q(author_id=user.id),
+                        & ~Q(author_id=getattr(user, "id", None)),
                         then=Value(1),
                     ),
                     When(is_following_author=True, then=Value(2)),
@@ -1936,7 +1941,7 @@ class UserProfileActivityView(generics.ListAPIView):
     ``/api/users/<username>/video-reactions/`` instead.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = SocialActivitySerializer
 
     def get_target(self):
@@ -1990,7 +1995,7 @@ class UserProfileActivityView(generics.ListAPIView):
 class UserProfileVideoReactionsView(generics.ListAPIView):
     """Paginated video uploads for a profile, without building its full feed."""
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = SocialActivitySerializer
     pagination_class = DefaultPagination
 
@@ -2028,6 +2033,8 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
     mention_pattern = re.compile(r"(?<!\w)@(?P<username>[\w.@+-]+)")
 
     def get_permissions(self):
+        if self.request.method in permissions.SAFE_METHODS:
+            return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
@@ -2151,7 +2158,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method in permissions.SAFE_METHODS:
-            return [permissions.IsAuthenticated()]
+            return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
@@ -2179,7 +2186,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
 
 class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
     serializer_class = VideoCommentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
     http_method_names = ["get", "delete", "head", "options"]
 
     def get_queryset(self):
@@ -3660,7 +3667,7 @@ class MyMovieRecommendationsView(generics.ListAPIView):
 
 
 class UserMovieRecommendationsView(generics.ListAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = UserMovieRecommendationItemSerializer
 
     def get_queryset(self):
@@ -3711,7 +3718,7 @@ class ProfileFavoritesView(APIView):
 
 
 class UserProfileFavoritesView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request, username):
         target = get_object_or_404(
@@ -3843,7 +3850,7 @@ class ProfileFavoriteSlotDetailView(APIView):
 
 
 class FeedMoviesView(generics.ListAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     serializer_class = MovieListSerializer
     pagination_class = FeedMoviesPagination
     FEED_PAGE_CACHE_TTL_SECONDS = 120
@@ -4011,6 +4018,24 @@ class FeedMoviesView(generics.ListAPIView):
         )
 
     def get_queryset(self):
+        if not self.request.user.is_authenticated:
+            queryset = (
+                Movie.objects.with_display_rating()
+                .with_my_rating(self.request.user)
+                .with_in_my_list(self.request.user)
+                .with_in_my_recommendations(self.request.user)
+                .with_comment_stats()
+                .with_following_rating_stats(self.request.user)
+                .select_related("author", "author__profile")
+                .annotate(general_rating=F("display_rating"))
+            )
+            if search := self.request.query_params.get("search"):
+                queryset = apply_movie_search(queryset, search)
+            if movie_type := self.request.query_params.get("type"):
+                queryset = queryset.filter(type=movie_type)
+            queryset = apply_feed_genre_filters(queryset, parse_feed_genre_filters(self.request))
+            return queryset.order_by("-display_rating", "-created_at", "-id")
+
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
         if self._feed_profile_enabled and not hasattr(self, "_feed_profile_timings"):
             self._feed_profile_timings = {}
@@ -4060,6 +4085,12 @@ class FeedMoviesView(generics.ListAPIView):
             movie.my_rating = ratings_by_movie.get(movie.id)
 
     def list(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            # Do not resolve a DailyFeedPool/UserTasteProfile or use a
+            # user-specific cache for a visitor.  The generic feed is public
+            # and its personalized fields are neutral queryset annotations.
+            return generics.ListAPIView.list(self, request, *args, **kwargs)
+
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
         if self._feed_profile_enabled:
             self._feed_profile_timings = {}
