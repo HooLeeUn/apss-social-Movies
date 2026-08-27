@@ -83,6 +83,9 @@ def report_candidate_profile(metadata):
         "logical_candidates=%s hydrated_rows=%s frontier_ms=%s "
         "certification_ms=%s hydration_ms=%s hydration_queries=%s "
         "hydration_sql_ms=%s hydration_python_ms=%s "
+        "hydration_query_build_ms=%s hydration_sql_execute_ms=%s "
+        "hydration_row_fetch_conversion_ms=%s hydration_model_materialization_ms=%s "
+        "hydration_serialize_ms=%s hydration_wall_ms=%s hydration_cpu_ms=%s "
         "hydration_accounted_ms=%s hydration_unaccounted_ms=%s "
         "hydration_families=%s hydration_components=%s "
         "logical_count_ms=%s logical_count_queries=%s families=%s",
@@ -92,7 +95,12 @@ def report_candidate_profile(metadata):
         metadata["hydrated_rows"], profile["frontier_ms"],
         profile["certification_ms"], profile["hydration_ms"],
         profile["hydration_queries"], profile["hydration_sql_ms"],
-        profile["hydration_python_ms"], profile["hydration_accounted_ms"],
+        profile["hydration_python_ms"], profile["hydration_query_build_ms"],
+        profile["hydration_sql_execute_ms"],
+        profile["hydration_row_fetch_conversion_ms"],
+        profile["hydration_model_materialization_ms"],
+        profile["hydration_serialize_ms"], profile["hydration_wall_ms"],
+        profile["hydration_cpu_ms"], profile["hydration_accounted_ms"],
         profile["hydration_unaccounted_ms"], profile["hydration_families"],
         profile["hydration_components"], profile["logical_count_ms"],
         profile["logical_count_queries"], profile["families"],

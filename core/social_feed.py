@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from time import perf_counter
+import operator
+from time import perf_counter, process_time
 from typing import Callable, Iterable, Literal, cast
 
 from django.db import connection
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
+from django.db.models.query import ModelIterable, get_related_populators
 
 from .models import (
     Comment,
@@ -52,6 +54,7 @@ class _CandidateProfile:
         self.frontier_ms = 0.0
         self.certification_ms = 0.0
         self.hydration_ms = 0.0
+        self.hydration_cpu_ms = 0.0
 
     def execute(self, execute, sql, params, many, context):
         self.queries_total += 1
@@ -88,6 +91,110 @@ class _CandidateProfile:
             components[component] = components.get(component, 0.0) + elapsed
             self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
             self.phase = previous
+
+    def materialize_queryset(self, family, builder):
+        """Build and evaluate one hydration queryset with request-local probes.
+
+        Django's ``results_iter`` deliberately owns both cursor fetching and
+        database/Django value conversion.  G5 therefore reports those as one
+        honest bucket and times model construction after each converted row is
+        yielded.  The custom iterable is installed on this queryset only; no
+        connection, cursor, driver, or global class is monkey-patched.
+        """
+        build_wall = perf_counter()
+        queryset = builder()
+        self._add_hydration_value(family, "query_build", (perf_counter() - build_wall) * 1000)
+        queryset._g5_profiler = self
+        queryset._g5_family = family
+        queryset._iterable_class = _ProfiledModelIterable
+
+        wall_started = perf_counter()
+        cpu_started = process_time()
+        objects = self.measure_hydration(family, "queryset_iteration", lambda: list(queryset))
+        components = self.hydration_components.setdefault(family, {})
+        components["materialization_wall"] = components.get("materialization_wall", 0.0) + (
+            perf_counter() - wall_started
+        ) * 1000
+        components["materialization_cpu"] = components.get("materialization_cpu", 0.0) + (
+            process_time() - cpu_started
+        ) * 1000
+        return objects
+
+    def _add_hydration_value(self, family, component, elapsed):
+        components = self.hydration_components.setdefault(family, {})
+        components[component] = components.get(component, 0.0) + elapsed
+
+
+class _ProfiledModelIterable(ModelIterable):
+    """Django's ModelIterable with timings at its two real isolation seams."""
+
+    def __iter__(self):
+        queryset = self.queryset
+        profiler = queryset._g5_profiler
+        family = queryset._g5_family
+        db = queryset.db
+        compiler = queryset.query.get_compiler(using=db)
+        results = compiler.execute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+        select, klass_info, annotation_col_map = (
+            compiler.select, compiler.klass_info, compiler.annotation_col_map,
+        )
+        components = profiler.hydration_components.setdefault(family, {})
+        components["selected_column_count"] = len(select)
+        model_cls = klass_info["model"]
+        select_fields = klass_info["select_fields"]
+        model_fields_start, model_fields_end = select_fields[0], select_fields[-1] + 1
+        init_list = [
+            field[0].target.attname
+            for field in select[model_fields_start:model_fields_end]
+        ]
+        related_populators = get_related_populators(klass_info, select, db)
+        components["select_related_count"] = len(related_populators)
+        known_related_objects = [
+            (
+                field, related_objs,
+                operator.attrgetter(*[
+                    field.attname if from_field == "self"
+                    else queryset.model._meta.get_field(from_field).attname
+                    for from_field in field.from_fields
+                ]),
+            )
+            for field, related_objs in queryset._known_related_objects.items()
+        ]
+        converted_rows = iter(compiler.results_iter(results))
+        while True:
+            row_started = perf_counter()
+            try:
+                row = next(converted_rows)
+            except StopIteration:
+                profiler._add_hydration_value(
+                    family, "row_fetch_and_conversion", (perf_counter() - row_started) * 1000
+                )
+                break
+            profiler._add_hydration_value(
+                family, "row_fetch_and_conversion", (perf_counter() - row_started) * 1000
+            )
+            model_started = perf_counter()
+            obj = model_cls.from_db(db, init_list, row[model_fields_start:model_fields_end])
+            for rel_populator in related_populators:
+                rel_populator.populate(row, obj)
+            if annotation_col_map:
+                for attr_name, col_pos in annotation_col_map.items():
+                    setattr(obj, attr_name, row[col_pos])
+            for field, rel_objs, rel_getter in known_related_objects:
+                if field.is_cached(obj):
+                    continue
+                try:
+                    rel_obj = rel_objs[rel_getter(obj)]
+                except KeyError:
+                    pass
+                else:
+                    setattr(obj, field.name, rel_obj)
+            profiler._add_hydration_value(
+                family, "model_materialization", (perf_counter() - model_started) * 1000
+            )
+            yield obj
 
 
 class SocialActivityFeedService:
@@ -636,6 +743,7 @@ class SocialActivityFeedService:
                     expand(sequence)
 
             hydration_started = perf_counter() if profiler else None
+            hydration_cpu_started = process_time() if profiler else None
             if profiler:
                 profiler.phase = "hydration"
             activities = cls._hydrate_adaptive_candidates(
@@ -643,6 +751,7 @@ class SocialActivityFeedService:
             )
             if profiler:
                 profiler.hydration_ms = (perf_counter() - hydration_started) * 1000
+                profiler.hydration_cpu_ms = (process_time() - hydration_cpu_started) * 1000
             expected_ids = [f'{item["namespace"]}:{item["object_id"]}' for item in selected]
             activities.sort(key=lambda item: (
                 cls._activity_sort_timestamp(item), item["_sort_activity_priority"],
@@ -693,21 +802,39 @@ class SocialActivityFeedService:
             "video_reaction_summaries_received",
         )
         hydration_families = {}
+        possible_overfetch = {
+            # These full model/select_related projections include text, media,
+            # URL/JSON-like metadata, or other fields not all read by Candidate.
+            family: True for family in hydration_family_names
+        }
         for family in hydration_family_names:
             phase = f"hydration_{family}"
             components = profiler.hydration_components.get(family, {})
-            total_ms = sum(
-                value for key, value in components.items() if key != "rows"
+            total_ms = (
+                components.get("query_build", 0.0)
+                + components.get("queryset_iteration", 0.0)
+                + components.get("serialize", 0.0)
+                + components.get("aggregation", 0.0)
             )
             sql_ms = profiler.sql_ms_by_phase.get(phase, 0.0)
             hydration_families[family] = {
                 "sql_ms": round(sql_ms, 3),
+                "sql_execute_ms": round(sql_ms, 3),
                 "python_ms": round(max(0.0, total_ms - sql_ms), 3),
                 "total_ms": round(total_ms, 3),
                 "rows": components.get("rows", 0),
                 "queries": profiler.queries_by_phase.get(phase, 0),
-                "fetch_ms": round(components.get("fetch", 0.0), 3),
+                "fetch_ms": round(components.get("queryset_iteration", 0.0), 3),
+                "query_build_ms": round(components.get("query_build", 0.0), 3),
+                "row_fetch_and_conversion_ms": round(components.get("row_fetch_and_conversion", 0.0), 3),
+                "model_materialization_ms": round(components.get("model_materialization", 0.0), 3),
+                "queryset_iteration_ms": round(components.get("queryset_iteration", 0.0), 3),
                 "serialize_ms": round(components.get("serialize", 0.0), 3),
+                "materialization_wall_ms": round(components.get("materialization_wall", 0.0), 3),
+                "materialization_cpu_ms": round(components.get("materialization_cpu", 0.0), 3),
+                "selected_column_count": components.get("selected_column_count", 0),
+                "select_related_count": components.get("select_related_count", 0),
+                "possible_overfetch": possible_overfetch[family],
                 "aggregation_ms": round(components.get("aggregation", 0.0), 3),
                 "payload_ms": round(components.get("payload", 0.0), 3),
             }
@@ -722,10 +849,12 @@ class SocialActivityFeedService:
             elapsed for phase, elapsed in profiler.sql_ms_by_phase.items()
             if phase == "hydration" or phase.startswith("hydration_")
         )
-        accounted_ms = sum(
-            sum(value for key, value in components.items() if key != "rows")
-            for components in profiler.hydration_components.values()
-        )
+        query_build_ms = sum(c.get("query_build", 0.0) for c in profiler.hydration_components.values())
+        row_fetch_ms = sum(c.get("row_fetch_and_conversion", 0.0) for c in profiler.hydration_components.values())
+        model_ms = sum(c.get("model_materialization", 0.0) for c in profiler.hydration_components.values())
+        serialize_ms = sum(c.get("serialize", 0.0) for c in profiler.hydration_components.values())
+        aggregation_ms = sum(c.get("aggregation", 0.0) for c in profiler.hydration_components.values())
+        accounted_ms = query_build_ms + hydration_sql_ms + row_fetch_ms + model_ms + serialize_ms + aggregation_ms
         return {
             "total_ms": round((perf_counter() - profiler.started) * 1000, 3),
             "candidate_queries_total": profiler.queries_total,
@@ -735,6 +864,13 @@ class SocialActivityFeedService:
             "hydration_ms": round(profiler.hydration_ms, 3),
             "hydration_total_ms": round(profiler.hydration_ms, 3),
             "hydration_sql_ms": round(hydration_sql_ms, 3),
+            "hydration_query_build_ms": round(query_build_ms, 3),
+            "hydration_sql_execute_ms": round(hydration_sql_ms, 3),
+            "hydration_row_fetch_conversion_ms": round(row_fetch_ms, 3),
+            "hydration_model_materialization_ms": round(model_ms, 3),
+            "hydration_serialize_ms": round(serialize_ms, 3),
+            "hydration_wall_ms": round(profiler.hydration_ms, 3),
+            "hydration_cpu_ms": round(profiler.hydration_cpu_ms, 3),
             "hydration_python_ms": round(max(0.0, profiler.hydration_ms - hydration_sql_ms), 3),
             "hydration_accounted_ms": round(accounted_ms, 3),
             "hydration_unaccounted_ms": round(max(0.0, profiler.hydration_ms - accounted_ms), 3),
@@ -777,8 +913,8 @@ class SocialActivityFeedService:
             object_ids = ids.get(namespace, [])
             if object_ids:
                 if profiler:
-                    objects = profiler.measure_hydration(
-                        family, "fetch", lambda: list(hydrator(object_ids, viewer=viewer))
+                    objects = profiler.materialize_queryset(
+                        family, lambda: hydrator(object_ids, viewer=viewer)
                     )
                     rows = profiler.measure_hydration(
                         family, "serialize", lambda: converter(objects, viewer=viewer)
@@ -1255,24 +1391,30 @@ class SocialActivityFeedService:
         comment_ids = list(set(comment_ids))
         if not comment_ids:
             return []
-        public_qs = cls._public_reaction_activity_queryset(
-            actor_ids=[viewer.id], viewer=viewer
-        ).filter(comment_id__in=comment_ids)
-        private_qs = cls._private_reaction_activity_queryset(
-            actor_ids=[viewer.id], viewer=viewer
-        ).filter(comment_id__in=comment_ids)
         if not profiler:
+            public_qs = cls._public_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids)
+            private_qs = cls._private_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids)
             rows = cls.serialize_public_reaction_queryset(public_qs, viewer=viewer)
             rows.extend(cls.serialize_private_reaction_queryset(private_qs, viewer=viewer))
             return cls._consolidate_received_reactions(rows)
 
         public_family = "comment_reaction_summaries_received"
         private_family = "comment_reaction_summaries_received_private_hybrid"
-        public_objects = profiler.measure_hydration(
-            public_family, "fetch", lambda: list(public_qs)
+        public_objects = profiler.materialize_queryset(
+            public_family,
+            lambda: cls._public_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids),
         )
-        private_objects = profiler.measure_hydration(
-            private_family, "fetch", lambda: list(private_qs)
+        private_objects = profiler.materialize_queryset(
+            private_family,
+            lambda: cls._private_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids),
         )
         rows = profiler.measure_hydration(
             public_family, "serialize",
@@ -1298,15 +1440,21 @@ class SocialActivityFeedService:
         video_comment_ids = list(set(video_comment_ids))
         if not video_comment_ids:
             return []
-        queryset = cls._video_reaction_activity_queryset(viewer=viewer).filter(
-            video_comment_id__in=video_comment_ids,
-            video_comment__user_id=viewer.id,
-        )
         if not profiler:
+            queryset = cls._video_reaction_activity_queryset(viewer=viewer).filter(
+                video_comment_id__in=video_comment_ids,
+                video_comment__user_id=viewer.id,
+            )
             rows = cls.serialize_video_reaction_queryset(queryset, viewer=viewer)
             return cls._consolidate_received_reactions(rows)
         family = "video_reaction_summaries_received"
-        objects = profiler.measure_hydration(family, "fetch", lambda: list(queryset))
+        objects = profiler.materialize_queryset(
+            family,
+            lambda: cls._video_reaction_activity_queryset(viewer=viewer).filter(
+                video_comment_id__in=video_comment_ids,
+                video_comment__user_id=viewer.id,
+            ),
+        )
         rows = profiler.measure_hydration(
             family, "serialize",
             lambda: cls.serialize_video_reaction_queryset(objects, viewer=viewer),
