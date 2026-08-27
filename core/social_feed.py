@@ -89,6 +89,15 @@ class _CandidateProfile:
             self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
             self.phase = previous
 
+    def define_hydration_queryset(self, family, callback):
+        """Time lazy ORM definition separately from its eventual DB work.
+
+        G3's ``fetch`` section intentionally wrapped both the hydrator call and
+        ``list()``.  G6 keeps the instrumentation request-local while making
+        that boundary explicit; no query should be attributed to this section.
+        """
+        return self.measure_hydration(family, "queryset_definition", callback)
+
 
 class SocialActivityFeedService:
     CANDIDATE_MODE_FULL = "full_legacy_like"
@@ -706,6 +715,9 @@ class SocialActivityFeedService:
                 "total_ms": round(total_ms, 3),
                 "rows": components.get("rows", 0),
                 "queries": profiler.queries_by_phase.get(phase, 0),
+                "queryset_definition_ms": round(
+                    components.get("queryset_definition", 0.0), 3
+                ),
                 "fetch_ms": round(components.get("fetch", 0.0), 3),
                 "serialize_ms": round(components.get("serialize", 0.0), 3),
                 "aggregation_ms": round(components.get("aggregation", 0.0), 3),
@@ -739,6 +751,7 @@ class SocialActivityFeedService:
             "hydration_accounted_ms": round(accounted_ms, 3),
             "hydration_unaccounted_ms": round(max(0.0, profiler.hydration_ms - accounted_ms), 3),
             "hydration_components": {
+                "queryset_definition_ms": round(sum(c.get("queryset_definition", 0.0) for c in profiler.hydration_components.values()), 3),
                 "serialization_ms": round(sum(c.get("serialize", 0.0) for c in profiler.hydration_components.values()), 3),
                 "payload_construction_ms": round(sum(c.get("payload", 0.0) for c in profiler.hydration_components.values()), 3),
                 "auxiliary_lookups_ms": round(sum(c.get("auxiliary_lookups", 0.0) for c in profiler.hydration_components.values()), 3),
@@ -777,8 +790,11 @@ class SocialActivityFeedService:
             object_ids = ids.get(namespace, [])
             if object_ids:
                 if profiler:
+                    queryset = profiler.define_hydration_queryset(
+                        family, lambda: hydrator(object_ids, viewer=viewer)
+                    )
                     objects = profiler.measure_hydration(
-                        family, "fetch", lambda: list(hydrator(object_ids, viewer=viewer))
+                        family, "fetch", lambda: list(queryset)
                     )
                     rows = profiler.measure_hydration(
                         family, "serialize", lambda: converter(objects, viewer=viewer)
@@ -1255,12 +1271,27 @@ class SocialActivityFeedService:
         comment_ids = list(set(comment_ids))
         if not comment_ids:
             return []
-        public_qs = cls._public_reaction_activity_queryset(
-            actor_ids=[viewer.id], viewer=viewer
-        ).filter(comment_id__in=comment_ids)
-        private_qs = cls._private_reaction_activity_queryset(
-            actor_ids=[viewer.id], viewer=viewer
-        ).filter(comment_id__in=comment_ids)
+        def define_public_queryset():
+            return cls._public_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids)
+
+        def define_private_queryset():
+            return cls._private_reaction_activity_queryset(
+                actor_ids=[viewer.id], viewer=viewer
+            ).filter(comment_id__in=comment_ids)
+
+        if profiler:
+            public_qs = profiler.define_hydration_queryset(
+                "comment_reaction_summaries_received", define_public_queryset
+            )
+            private_qs = profiler.define_hydration_queryset(
+                "comment_reaction_summaries_received_private_hybrid",
+                define_private_queryset,
+            )
+        else:
+            public_qs = define_public_queryset()
+            private_qs = define_private_queryset()
         if not profiler:
             rows = cls.serialize_public_reaction_queryset(public_qs, viewer=viewer)
             rows.extend(cls.serialize_private_reaction_queryset(private_qs, viewer=viewer))
@@ -1298,9 +1329,17 @@ class SocialActivityFeedService:
         video_comment_ids = list(set(video_comment_ids))
         if not video_comment_ids:
             return []
-        queryset = cls._video_reaction_activity_queryset(viewer=viewer).filter(
-            video_comment_id__in=video_comment_ids,
-            video_comment__user_id=viewer.id,
+        def define_queryset():
+            return cls._video_reaction_activity_queryset(viewer=viewer).filter(
+                video_comment_id__in=video_comment_ids,
+                video_comment__user_id=viewer.id,
+            )
+
+        queryset = (
+            profiler.define_hydration_queryset(
+                "video_reaction_summaries_received", define_queryset
+            )
+            if profiler else define_queryset()
         )
         if not profiler:
             rows = cls.serialize_video_reaction_queryset(queryset, viewer=viewer)
