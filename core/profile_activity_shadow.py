@@ -84,8 +84,11 @@ def report_candidate_profile(metadata):
         "certification_ms=%s hydration_ms=%s hydration_queries=%s "
         "hydration_sql_ms=%s hydration_python_ms=%s "
         "hydration_accounted_ms=%s hydration_unaccounted_ms=%s "
+        "candidate_wall_ms=%s candidate_cpu_ms=%s candidate_wall_minus_cpu_ms=%s "
+        "hydration_wall_ms=%s hydration_cpu_ms=%s hydration_wall_minus_cpu_ms=%s "
+        "connection_state=%s connection_age_ms=%s hydration_gc_collections=%s "
         "hydration_families=%s hydration_components=%s "
-        "logical_count_ms=%s logical_count_queries=%s families=%s",
+        "logical_count_ms=%s logical_count_queries=%s families=%s query_profiles=%s",
         metadata["k"], profile["total_ms"], profile["candidate_queries_total"],
         metadata["legacy_item_count"], metadata["candidate_item_count"],
         metadata["source_rows_inspected"], metadata["logical_candidates_inspected"],
@@ -93,9 +96,15 @@ def report_candidate_profile(metadata):
         profile["certification_ms"], profile["hydration_ms"],
         profile["hydration_queries"], profile["hydration_sql_ms"],
         profile["hydration_python_ms"], profile["hydration_accounted_ms"],
-        profile["hydration_unaccounted_ms"], profile["hydration_families"],
-        profile["hydration_components"], profile["logical_count_ms"],
-        profile["logical_count_queries"], profile["families"],
+        profile["hydration_unaccounted_ms"],
+        profile["candidate_wall_ms"], profile["candidate_cpu_ms"],
+        profile["candidate_wall_minus_cpu_ms"], profile["hydration_wall_ms"],
+        profile["hydration_cpu_ms"], profile["hydration_wall_minus_cpu_ms"],
+        profile["connection_state"], profile["connection_age_ms"],
+        profile["hydration_gc_collections"], profile["hydration_families"],
+        profile["hydration_components"],
+        profile["logical_count_ms"], profile["logical_count_queries"],
+        profile["families"], profile["query_profiles"],
     )
 
 

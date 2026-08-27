@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from time import perf_counter
+import gc
+import hashlib
+import re
+from time import perf_counter, process_time
 from typing import Callable, Iterable, Literal, cast
 
 from django.db import connection
+from django.db.backends.signals import connection_created
 from django.db.models import Avg, Case, Count, F, FloatField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 
@@ -22,6 +26,18 @@ from .models import (
 
 
 SocialFeedScope = Literal["following", "friends", "me"]
+
+
+def _record_connection_opened(sender, connection, **kwargs):
+    """Attach process-local, credential-free connection diagnostics."""
+    connection._qnext_g7_connection = connection.connection
+    connection._qnext_g7_connection_opened_at = perf_counter()
+    connection._qnext_g7_profile_seen = False
+
+
+connection_created.connect(
+    _record_connection_opened, dispatch_uid="qnext_g7_connection_opened"
+)
 
 
 @dataclass
@@ -43,6 +59,7 @@ class _CandidateProfile:
 
     def __init__(self):
         self.started = perf_counter()
+        self.cpu_started = process_time()
         self.phase = "setup"
         self.queries_total = 0
         self.queries_by_phase = {}
@@ -52,23 +69,90 @@ class _CandidateProfile:
         self.frontier_ms = 0.0
         self.certification_ms = 0.0
         self.hydration_ms = 0.0
+        self.hydration_cpu_ms = 0.0
+        self.block_metrics = {}
+        self.query_fingerprints = {}
+        raw_connection = connection.connection
+        tracked = getattr(connection, "_qnext_g7_connection", None)
+        opened_at = getattr(connection, "_qnext_g7_connection_opened_at", None)
+        if raw_connection is None:
+            self.connection_state = "cold"
+        elif tracked is not raw_connection:
+            self.connection_state = "unknown"
+        elif getattr(connection, "_qnext_g7_profile_seen", False):
+            self.connection_state = "reused"
+        else:
+            self.connection_state = "cold"
+        if raw_connection is not None and tracked is raw_connection:
+            connection._qnext_g7_profile_seen = True
+        self.connection_age_ms = (
+            max(0.0, (self.started - opened_at) * 1000)
+            if raw_connection is not None and tracked is raw_connection and opened_at else None
+        )
+
+    @staticmethod
+    def _gc_collections():
+        return sum(generation["collections"] for generation in gc.get_stats())
+
+    @staticmethod
+    def _fingerprint(sql):
+        # Django passes SQL and bind parameters separately. Redaction is still
+        # applied defensively for backend-generated literal constants.
+        normalized = re.sub(r"'(?:''|[^'])*'|\b\d+(?:\.\d+)?\b", "?", sql)
+        normalized = " ".join(normalized.split()).lower()
+        return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
     def execute(self, execute, sql, params, many, context):
         self.queries_total += 1
         self.queries_by_phase[self.phase] = self.queries_by_phase.get(self.phase, 0) + 1
         started = perf_counter()
+        cpu_started = process_time()
         try:
             return execute(sql, params, many, context)
         finally:
             elapsed = (perf_counter() - started) * 1000
+            cpu_elapsed = (process_time() - cpu_started) * 1000
             self.sql_ms_by_phase[self.phase] = self.sql_ms_by_phase.get(self.phase, 0.0) + elapsed
+            fingerprint = self._fingerprint(sql)
+            item = self.query_fingerprints.setdefault(
+                (self.phase, fingerprint), {"count": 0, "spikes": 0, "max_ms": 0.0}
+            )
+            item["count"] += 1
+            item["spikes"] += elapsed >= 50.0
+            item["max_ms"] = max(item["max_ms"], elapsed)
+            # The first execute establishes a new underlying connection when
+            # Django entered the request disconnected.
+            raw_connection = connection.connection
+            if raw_connection is not None and getattr(connection, "_qnext_g7_connection", None) is not raw_connection:
+                connection._qnext_g7_connection = raw_connection
+                connection._qnext_g7_connection_opened_at = perf_counter()
+                connection._qnext_g7_profile_seen = True
+            item["max_wall_minus_cpu_ms"] = max(
+                item.get("max_wall_minus_cpu_ms", 0.0), max(0.0, elapsed - cpu_elapsed)
+            )
+
+    def measure_block(self, category, family, callback):
+        started_wall = perf_counter()
+        started_cpu = process_time()
+        gc_before = self._gc_collections()
+        try:
+            return callback()
+        finally:
+            wall = (perf_counter() - started_wall) * 1000
+            cpu = (process_time() - started_cpu) * 1000
+            item = self.block_metrics.setdefault(
+                category, {}
+            ).setdefault(family, {"wall_ms": 0.0, "cpu_ms": 0.0, "gc_collections": 0})
+            item["wall_ms"] += wall
+            item["cpu_ms"] += cpu
+            item["gc_collections"] += max(0, self._gc_collections() - gc_before)
 
     def measure(self, phase, callback):
         previous = self.phase
         self.phase = phase
         started = perf_counter()
         try:
-            return callback()
+            return self.measure_block("fetch", phase, callback)
         finally:
             elapsed = (perf_counter() - started) * 1000
             self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
@@ -78,6 +162,8 @@ class _CandidateProfile:
         """Measure a candidate-local hydration section without retaining values."""
         phase = f"hydration_{family}"
         started = perf_counter()
+        cpu_started = process_time()
+        gc_before = self._gc_collections()
         previous = self.phase
         self.phase = phase
         try:
@@ -86,6 +172,14 @@ class _CandidateProfile:
             elapsed = (perf_counter() - started) * 1000
             components = self.hydration_components.setdefault(family, {})
             components[component] = components.get(component, 0.0) + elapsed
+            cpu_elapsed = (process_time() - cpu_started) * 1000
+            if component == "fetch":
+                item = self.block_metrics.setdefault("fetch", {}).setdefault(
+                    family, {"wall_ms": 0.0, "cpu_ms": 0.0, "gc_collections": 0}
+                )
+                item["wall_ms"] += elapsed
+                item["cpu_ms"] += cpu_elapsed
+                item["gc_collections"] += max(0, self._gc_collections() - gc_before)
             self.family_ms[phase] = self.family_ms.get(phase, 0.0) + elapsed
             self.phase = previous
 
@@ -449,6 +543,9 @@ class SocialActivityFeedService:
 
     @classmethod
     def _adaptive_sequences(cls, *, user, actor_ids, profiler=None) -> list[_AdaptiveSequence]:
+        def define(name, callback):
+            return profiler.measure_block("queryset_definition", name, callback) if profiler else callback()
+
         def ordinary(name, queryset, namespace, timestamp="candidate_activity_at", validator=None):
             return _AdaptiveSequence(name=name, fetch=cls._adaptive_queryset_fetcher(
                 queryset=queryset, namespace=namespace, timestamp_field=timestamp,
@@ -456,9 +553,9 @@ class SocialActivityFeedService:
             ))
 
         sequences = [
-            ordinary("ratings", cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_RATING),
-            ordinary("public_comments", cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user), cls.ACTIVITY_PUBLIC_COMMENT),
-            ordinary("public_reactions_given", cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user).filter(user_id=user.id), cls.ACTIVITY_PUBLIC_COMMENT_REACTION),
+            ordinary("ratings", define("ratings", lambda: cls.rating_candidates_queryset(actor_ids=actor_ids, viewer=user)), cls.ACTIVITY_RATING),
+            ordinary("public_comments", define("public_comments", lambda: cls.public_comment_candidates_queryset(actor_ids=actor_ids, viewer=user)), cls.ACTIVITY_PUBLIC_COMMENT),
+            ordinary("public_reactions_given", define("public_reactions_given", lambda: cls.public_reaction_candidates_queryset(actor_ids=actor_ids, viewer=user).filter(user_id=user.id)), cls.ACTIVITY_PUBLIC_COMMENT_REACTION),
             # G1: the Python privacy predicate reads ``visibility`` and
             # ``body``.  The base lightweight selector deliberately omits
             # payload fields, so accessing those deferred attributes used to
@@ -467,29 +564,33 @@ class SocialActivityFeedService:
             # unchanged and still owns all response payload construction.
             ordinary(
                 "private_messages",
-                cls.private_message_candidates_queryset(
+                define("private_messages", lambda: cls.private_message_candidates_queryset(
                     actor_ids=actor_ids, viewer=user
                 ).only(
                     "id", "author_id", "target_user_id", "movie_id",
                     "created_at", "body", "visibility",
-                ).select_related("target_user"),
+                ).select_related("target_user")),
                 cls.ACTIVITY_PRIVATE_MESSAGE,
                 validator=lambda comment: comment.has_valid_target_mention(),
             ),
-            ordinary("videos_created", cls.video_created_candidates_queryset(actor=user, viewer=user), cls.ACTIVITY_VIDEO_REACTION_CREATED),
-            ordinary("video_reactions_given", cls.video_reaction_candidates_queryset(viewer=user).filter(user_id=user.id), cls.ACTIVITY_VIDEO_REACTION_GIVEN),
+            ordinary("videos_created", define("videos_created", lambda: cls.video_created_candidates_queryset(actor=user, viewer=user)), cls.ACTIVITY_VIDEO_REACTION_CREATED),
+            ordinary("video_reactions_given", define("video_reactions_given", lambda: cls.video_reaction_candidates_queryset(viewer=user).filter(user_id=user.id)), cls.ACTIVITY_VIDEO_REACTION_GIVEN),
         ]
 
-        latest_public_id = (
-            cls._public_received_reaction_rows(viewer=user)
-            .filter(comment_id=OuterRef("comment_id"))
-            .order_by("-updated_at", "-id").values("id")[:1]
-        )
-        public_comment_groups = cls._public_received_reaction_rows(viewer=user).values(
-            "comment_id"
-        ).annotate(
-            latest_activity_at=Max("updated_at"),
-            latest_reaction_id=Subquery(latest_public_id), source_rows=Count("id"),
+        def public_groups_builder():
+            latest_public_id = (
+                cls._public_received_reaction_rows(viewer=user)
+                .filter(comment_id=OuterRef("comment_id"))
+                .order_by("-updated_at", "-id").values("id")[:1]
+            )
+            return cls._public_received_reaction_rows(viewer=user).values(
+                "comment_id"
+            ).annotate(
+                latest_activity_at=Max("updated_at"),
+                latest_reaction_id=Subquery(latest_public_id), source_rows=Count("id"),
+            )
+        public_comment_groups = define(
+            "comment_reaction_summaries_received", public_groups_builder
         )
         sequences.append(_AdaptiveSequence(
             name="comment_reaction_summaries_received",
@@ -507,6 +608,7 @@ class SocialActivityFeedService:
         private_group_builder = lambda: cls.private_comment_received_logical_candidates(
             viewer=user
         )
+        define("comment_reaction_summaries_received_private_hybrid", lambda: None)
         private_groups = (
             profiler.measure(
                 "comment_reaction_summaries_received_private_hybrid",
@@ -519,17 +621,19 @@ class SocialActivityFeedService:
             fetch=cls._adaptive_list_fetcher(rows=private_groups),
         ))
 
-        latest_video_id = (
-            cls._video_received_reaction_rows(viewer=user)
-            .filter(video_comment_id=OuterRef("video_comment_id"))
-            .order_by("-updated_at", "-id").values("id")[:1]
-        )
-        video_groups = cls._video_received_reaction_rows(viewer=user).values(
-            "video_comment_id"
-        ).annotate(
-            latest_activity_at=Max("updated_at"),
-            latest_reaction_id=Subquery(latest_video_id), source_rows=Count("id"),
-        )
+        def video_groups_builder():
+            latest_video_id = (
+                cls._video_received_reaction_rows(viewer=user)
+                .filter(video_comment_id=OuterRef("video_comment_id"))
+                .order_by("-updated_at", "-id").values("id")[:1]
+            )
+            return cls._video_received_reaction_rows(viewer=user).values(
+                "video_comment_id"
+            ).annotate(
+                latest_activity_at=Max("updated_at"),
+                latest_reaction_id=Subquery(latest_video_id), source_rows=Count("id"),
+            )
+        video_groups = define("video_reaction_summaries_received", video_groups_builder)
         sequences.append(_AdaptiveSequence(
             name="video_reaction_summaries_received",
             fetch=cls._adaptive_group_fetcher(
@@ -636,6 +740,8 @@ class SocialActivityFeedService:
                     expand(sequence)
 
             hydration_started = perf_counter() if profiler else None
+            hydration_cpu_started = process_time() if profiler else None
+            hydration_gc_started = profiler._gc_collections() if profiler else None
             if profiler:
                 profiler.phase = "hydration"
             activities = cls._hydrate_adaptive_candidates(
@@ -643,6 +749,10 @@ class SocialActivityFeedService:
             )
             if profiler:
                 profiler.hydration_ms = (perf_counter() - hydration_started) * 1000
+                profiler.hydration_cpu_ms = (process_time() - hydration_cpu_started) * 1000
+                profiler.hydration_gc_collections = max(
+                    0, profiler._gc_collections() - hydration_gc_started
+                )
             expected_ids = [f'{item["namespace"]}:{item["object_id"]}' for item in selected]
             activities.sort(key=lambda item: (
                 cls._activity_sort_timestamp(item), item["_sort_activity_priority"],
@@ -675,6 +785,19 @@ class SocialActivityFeedService:
 
     @classmethod
     def _candidate_profile_metadata(cls, *, profiler, sequences):
+        def block(category, family):
+            metric = profiler.block_metrics.get(category, {}).get(
+                family, {"wall_ms": 0.0, "cpu_ms": 0.0, "gc_collections": 0}
+            )
+            wall = metric["wall_ms"]
+            cpu = metric["cpu_ms"]
+            return {
+                "wall_ms": round(wall, 3),
+                "cpu_ms": round(cpu, 3),
+                "wall_minus_cpu_ms": round(max(0.0, wall - cpu), 3),
+                "gc_collections": metric["gc_collections"],
+            }
+
         families = {}
         for sequence in sequences:
             elapsed = profiler.family_ms.get(sequence.name, 0.0)
@@ -684,6 +807,8 @@ class SocialActivityFeedService:
                 "ms": round(elapsed, 3),
                 "avg_batch_ms": round(elapsed / sequence.batches, 3) if sequence.batches else 0.0,
                 "queries": profiler.queries_by_phase.get(sequence.name, 0),
+                "queryset_definition": block("queryset_definition", sequence.name),
+                "fetch": block("fetch", sequence.name),
             }
         hydration_family_names = (
             "ratings", "public_comments", "public_reactions_given",
@@ -710,6 +835,7 @@ class SocialActivityFeedService:
                 "serialize_ms": round(components.get("serialize", 0.0), 3),
                 "aggregation_ms": round(components.get("aggregation", 0.0), 3),
                 "payload_ms": round(components.get("payload", 0.0), 3),
+                "fetch_timing": block("fetch", family),
             }
         # Compatibility alias retained for the G2 staging dashboards.
         summary = hydration_families["comment_reaction_summaries_received"]
@@ -726,13 +852,32 @@ class SocialActivityFeedService:
             sum(value for key, value in components.items() if key != "rows")
             for components in profiler.hydration_components.values()
         )
+        candidate_wall = (perf_counter() - profiler.started) * 1000
+        candidate_cpu = (process_time() - profiler.cpu_started) * 1000
+        query_profiles = [{
+            "family": phase.removeprefix("hydration_"),
+            "fingerprint": fingerprint,
+            "count": values["count"],
+            "spikes": values["spikes"],
+            "max_ms": round(values["max_ms"], 3),
+            "max_wall_minus_cpu_ms": round(values["max_wall_minus_cpu_ms"], 3),
+        } for (phase, fingerprint), values in sorted(profiler.query_fingerprints.items())]
         return {
-            "total_ms": round((perf_counter() - profiler.started) * 1000, 3),
+            "total_ms": round(candidate_wall, 3),
+            "candidate_wall_ms": round(candidate_wall, 3),
+            "candidate_cpu_ms": round(candidate_cpu, 3),
+            "candidate_wall_minus_cpu_ms": round(max(0.0, candidate_wall - candidate_cpu), 3),
+            "connection_state": profiler.connection_state,
+            "connection_age_ms": round(profiler.connection_age_ms, 3) if profiler.connection_age_ms is not None else None,
             "candidate_queries_total": profiler.queries_total,
             "families": families,
             "frontier_ms": round(profiler.frontier_ms, 3),
             "certification_ms": round(profiler.certification_ms, 3),
             "hydration_ms": round(profiler.hydration_ms, 3),
+            "hydration_wall_ms": round(profiler.hydration_ms, 3),
+            "hydration_cpu_ms": round(profiler.hydration_cpu_ms, 3),
+            "hydration_wall_minus_cpu_ms": round(max(0.0, profiler.hydration_ms - profiler.hydration_cpu_ms), 3),
+            "hydration_gc_collections": getattr(profiler, "hydration_gc_collections", 0),
             "hydration_total_ms": round(profiler.hydration_ms, 3),
             "hydration_sql_ms": round(hydration_sql_ms, 3),
             "hydration_python_ms": round(max(0.0, profiler.hydration_ms - hydration_sql_ms), 3),
@@ -751,6 +896,7 @@ class SocialActivityFeedService:
             },
             "hydration_queries": hydration_queries,
             "hydration_families": hydration_families,
+            "query_profiles": query_profiles,
         }
 
     @classmethod
