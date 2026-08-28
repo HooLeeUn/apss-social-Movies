@@ -1007,14 +1007,31 @@ class SocialActivityFeedService:
 
     @classmethod
     def public_reaction_candidates_queryset(cls, *, actor_ids, viewer):
-        return (
+        queryset = (
             CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
             .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
             .exclude(user_id=F("comment__author_id"))
-            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
             .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PUBLIC_COMMENT_REACTION]))
             .only("id", "user_id", "comment_id", "created_at", "updated_at")
+        )
+        return cls._exclude_public_reactions_hidden_from_viewer(queryset, viewer=viewer)
+
+    @staticmethod
+    def _exclude_public_reactions_hidden_from_viewer(queryset, *, viewer):
+        """Apply user-block visibility only when there is a real viewer.
+
+        ``AnonymousUser.id`` is ``None``.  Passing that value through reverse
+        relation ``exclude()`` clauses changes their SQL null semantics and can
+        eliminate the entire public queryset.  Anonymous visitors cannot be a
+        blocked database user, so there is no viewer-specific block filter to
+        apply for them.
+        """
+        if not viewer or not viewer.is_authenticated:
+            return queryset
+        return (
+            queryset
+            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
         )
 
     @classmethod
@@ -1570,10 +1587,12 @@ class SocialActivityFeedService:
         queryset = CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
         if actor_ids is not None:
             queryset = queryset.filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
-        queryset = (queryset.exclude(user_id=F("comment__author_id"))
-            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
-            .select_related("user", "user__profile", "comment", "comment__author", "comment__author__profile", "comment__movie"))
+        queryset = queryset.exclude(user_id=F("comment__author_id"))
+        queryset = cls._exclude_public_reactions_hidden_from_viewer(queryset, viewer=viewer)
+        queryset = queryset.select_related(
+            "user", "user__profile", "comment", "comment__author",
+            "comment__author__profile", "comment__movie",
+        )
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="comment__movie_id").order_by("-created_at", "-id")
 
     @classmethod

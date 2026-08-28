@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import Comment, Movie, Profile, VideoComment
+from .models import Comment, CommentReaction, Movie, Profile, VideoComment
 
 
 User = get_user_model()
@@ -14,7 +14,8 @@ User = get_user_model()
 class GuestModeTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.owner = User.objects.create_user(username="public-owner", password="password")
+        self.owner = User.objects.create_user(username="CatherineFX", password="password")
+        self.reactor = User.objects.create_user(username="public-reactor", password="password")
         self.private_owner = User.objects.create_user(username="private-owner", password="password")
         self.private_owner.profile.visibility = Profile.Visibility.PRIVATE
         self.private_owner.profile.is_public = False
@@ -30,6 +31,23 @@ class GuestModeTests(TestCase):
             movie=self.movie,
             body="Public comment",
             visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        self.public_reaction = CommentReaction.objects.create(
+            comment=self.comment,
+            user=self.reactor,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+        self.directed_comment = Comment.objects.create(
+            author=self.owner,
+            movie=self.movie,
+            target_user=self.reactor,
+            body="Private directed comment",
+            visibility=Comment.VISIBILITY_MENTIONED,
+        )
+        self.private_reaction = CommentReaction.objects.create(
+            comment=self.directed_comment,
+            user=self.reactor,
+            reaction_type=CommentReaction.REACT_DISLIKE,
         )
         self.video = VideoComment.objects.create(
             user=self.owner,
@@ -108,3 +126,43 @@ class GuestModeTests(TestCase):
         self.assertIn("my_rating", response.data)
         self.assertIn("is_in_my_list", response.data)
         self.assertIn("is_in_my_recommendations", response.data)
+
+    def test_public_comment_reactions_have_same_base_set_for_guest_and_authenticated_viewer(self):
+        url = reverse("user-activity", args=[self.owner.username])
+        params = {"activity_type": "public_comment_reaction"}
+
+        anonymous_response = self.client.get(url, params)
+        self.client.force_authenticate(self.reactor)
+        authenticated_response = self.client.get(url, params)
+
+        self.assertEqual(anonymous_response.status_code, status.HTTP_200_OK)
+        self.assertGreater(anonymous_response.data["count"], 0)
+        anonymous_ids = {item["id"] for item in anonymous_response.data["results"]}
+        authenticated_ids = {item["id"] for item in authenticated_response.data["results"]}
+        expected_id = f"public_comment_reaction:{self.public_reaction.id}"
+        self.assertIn(expected_id, anonymous_ids)
+        self.assertEqual(anonymous_ids, authenticated_ids)
+        self.assertNotIn(
+            f"private_comment_reaction:{self.private_reaction.id}",
+            anonymous_ids,
+        )
+
+    def test_private_profile_public_comment_reactions_remain_hidden_from_guest(self):
+        private_comment = Comment.objects.create(
+            author=self.private_owner,
+            movie=self.movie,
+            body="Public comment on a private profile",
+            visibility=Comment.VISIBILITY_PUBLIC,
+        )
+        CommentReaction.objects.create(
+            comment=private_comment,
+            user=self.reactor,
+            reaction_type=CommentReaction.REACT_LIKE,
+        )
+
+        response = self.client.get(
+            reverse("user-activity", args=[self.private_owner.username]),
+            {"activity_type": "public_comment_reaction"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
