@@ -17,9 +17,11 @@ from .views import (
     MyMovieListView, MovieListToggleView, MyMovieRecommendationsView, UserMovieRecommendationsView, MovieRecommendationToggleView,
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView, LegalPoliciesView, TMDbPersonDetailView,
+    ContactView,
 )
 
 urlpatterns = [
+    path("contact/", ContactView.as_view(), name="contact"),
     path("legal/policies/", LegalPoliciesView.as_view(), name="legal-policies"),
     path("branding/", AppBrandingView.as_view(), name="app-branding"),
     path("register/", RegisterView.as_view(), name="register"),

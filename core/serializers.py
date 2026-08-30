@@ -27,12 +27,31 @@ from .models import (
     WeeklyRecommendationItem,
     VideoComment,
     VideoCommentReaction,
+    ContactCategory,
 )
 
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
 # porque los stats vienen por annotate() desde la vista.
 from .models import Follow, Profile
+
+
+class ContactMessageCreateSerializer(serializers.Serializer):
+    category = serializers.ChoiceField(choices=ContactCategory.choices)
+    subject = serializers.CharField(max_length=50, trim_whitespace=True)
+    message = serializers.CharField(max_length=1500, trim_whitespace=True)
+
+    def validate_subject(self, value):
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        if "\r" in value or "\n" in value:
+            raise serializers.ValidationError("Line breaks are not allowed in the subject.")
+        return value
+
+    def validate_message(self, value):
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
 
 
 class OnboardingUpdateSerializer(serializers.Serializer):

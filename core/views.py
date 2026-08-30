@@ -39,6 +39,7 @@ from .serializers import (
     MovieWatchProvidersSerializer,
     MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
     OnboardingUpdateSerializer,
+    ContactMessageCreateSerializer,
 )
 from .models import (
     AppBranding,
@@ -67,6 +68,9 @@ from .models import (
     WeeklyRecommendationSnapshot,
     VideoComment,
     VideoCommentReaction,
+    ContactCategory,
+    ContactMessage,
+    ContactRecipient,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .video_comments import validate_video_upload
@@ -112,6 +116,88 @@ class EmailChangeRateThrottle(SimpleRateThrottle):
         if not request.user.is_authenticated:
             return None
         return self.cache_format % {"scope": self.scope, "ident": request.user.pk}
+
+
+class ContactMessageRateThrottle(SimpleRateThrottle):
+    scope = "contact_message"
+    rate = "5/hour"
+
+    def get_cache_key(self, request, view):
+        if not request.user.is_authenticated:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": request.user.pk}
+
+
+class ContactView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ContactMessageRateThrottle]
+
+    category_email_labels = {
+        ContactCategory.TECHNICAL: "Technical Support",
+        ContactCategory.COMMERCIAL: "Commercial",
+        ContactCategory.REQUESTS_SUGGESTIONS: "Requests and Suggestions",
+    }
+
+    def post(self, request):
+        serializer = ContactMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        recipient = ContactRecipient.objects.filter(
+            category=data["category"], is_active=True
+        ).first()
+        if recipient is None:
+            return Response(
+                {"detail": "No active recipient is configured for this category."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        contact_message = ContactMessage.objects.create(
+            user=request.user,
+            category=data["category"],
+            subject=data["subject"],
+            message=data["message"],
+            recipient_email=recipient.email,
+        )
+        category_label = self.category_email_labels[data["category"]]
+        email_subject = f"[RecCool][{category_label}] {contact_message.subject}"
+        email_body = (
+            "RecCool Contact Message\n\n"
+            f"Usuario:\n{request.user.get_username()}\n\n"
+            f"Email del usuario:\n{request.user.email or 'No disponible'}\n\n"
+            f"Categoría:\n{contact_message.get_category_display()} ({contact_message.category})\n\n"
+            f"Asunto:\n{contact_message.subject}\n\n"
+            f"Mensaje:\n{contact_message.message}\n\n"
+            f"Fecha:\n{contact_message.created_at.isoformat()}\n\n"
+            f"ContactMessage ID:\n{contact_message.pk}"
+        )
+
+        try:
+            sent_count = send_mail(
+                subject=email_subject,
+                message=email_body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[contact_message.recipient_email],
+                fail_silently=False,
+            )
+            if sent_count != 1:
+                raise RuntimeError("Email backend did not confirm delivery.")
+        except Exception as exc:
+            logger.exception("Contact email delivery failed for message_id=%s", contact_message.pk)
+            contact_message.email_error = str(exc)[:2000]
+            contact_message.save(update_fields=["email_error"])
+            return Response(
+                {"detail": "The message was saved, but the email could not be sent."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        contact_message.email_sent = True
+        contact_message.email_error = None
+        contact_message.save(update_fields=["email_sent", "email_error"])
+        return Response(
+            {"detail": "Message sent successfully."},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 User = get_user_model()
