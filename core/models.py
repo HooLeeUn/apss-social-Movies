@@ -1554,3 +1554,44 @@ class AppBranding(models.Model):
         result = super().save(*args, **kwargs)
         cache.delete("app_branding_active_v1")
         return result
+
+
+class ContactCategory(models.TextChoices):
+    TECHNICAL = "technical", "Servicio técnico"
+    COMMERCIAL = "commercial", "Comercial"
+    REQUESTS_SUGGESTIONS = "requests_suggestions", "Peticiones y sugerencias"
+
+
+class ContactRecipient(models.Model):
+    category = models.CharField(max_length=30, choices=ContactCategory.choices, unique=True)
+    email = models.EmailField()
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category"]
+
+    def __str__(self):
+        return f"{self.get_category_display()}: {self.email}"
+
+
+class ContactMessage(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="contact_messages",
+    )
+    category = models.CharField(max_length=30, choices=ContactCategory.choices)
+    subject = models.CharField(max_length=50)
+    message = models.CharField(max_length=1500)
+    recipient_email = models.EmailField()
+    email_sent = models.BooleanField(default=False)
+    email_error = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"ContactMessage({self.pk}: {self.subject})"

@@ -5,6 +5,8 @@ from django.db.models import Avg, Count
 from django.utils import timezone
 from .models import (
     AppBranding,
+    ContactMessage,
+    ContactRecipient,
     Post,
     Rating,
     Follow,
@@ -23,6 +25,31 @@ from .models import (
     StreamingProviderLink,
     VideoComment,
 )
+
+
+@admin.register(ContactRecipient)
+class ContactRecipientAdmin(admin.ModelAdmin):
+    list_display = ("category", "email", "is_active", "updated_at")
+    list_filter = ("category", "is_active")
+    search_fields = ("email",)
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ContactMessage)
+class ContactMessageAdmin(admin.ModelAdmin):
+    list_display = (
+        "user", "category", "subject", "recipient_email", "email_sent", "created_at"
+    )
+    list_filter = ("category", "email_sent", "created_at")
+    search_fields = ("user__username", "user__email", "subject", "recipient_email")
+    readonly_fields = (
+        "user", "category", "subject", "message", "recipient_email", "email_sent",
+        "email_error", "created_at",
+    )
+    list_select_related = ("user",)
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(Post)
