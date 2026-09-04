@@ -99,6 +99,10 @@ class GuestModeTests(TestCase):
         self.assertIn("results", response.data)
         self.assertGreaterEqual(len(response.data["results"]), 1)
         self.assertLessEqual(len(queries), 3)
+        pagination_sql = "\n".join(query["sql"].lower() for query in queries.captured_queries[:2])
+        self.assertNotIn("avg(", pagination_sql)
+        self.assertNotIn("group by", pagination_sql)
+        self.assertNotIn("core_comment", pagination_sql)
         sql = "\n".join(query["sql"].lower() for query in queries.captured_queries)
         for private_table in (
             "core_userdailyfeedpool",
@@ -111,6 +115,57 @@ class GuestModeTests(TestCase):
         ):
             self.assertNotIn(private_table, sql)
         self.assertNotIn('core_movierating"."user_id" =', sql)
+
+    def test_anonymous_movie_feed_prioritizes_persisted_rating_then_poster(self):
+        unrated_with_poster = Movie.objects.create(
+            author=self.owner,
+            title_english="Unrated with poster",
+            type=Movie.MOVIE,
+            external_rating=None,
+            image="https://example.com/unrated.jpg",
+        )
+        lower_rated_with_poster = Movie.objects.create(
+            author=self.owner,
+            title_english="Lower rated with poster",
+            type=Movie.SERIES,
+            external_rating="7.8",
+            image="https://example.com/lower.jpg",
+        )
+        equal_rated_without_poster = Movie.objects.create(
+            author=self.owner,
+            title_english="Equal rated without poster",
+            type=Movie.MOVIE,
+            external_rating="9.1",
+            image="",
+        )
+        equal_rated_with_poster = Movie.objects.create(
+            author=self.owner,
+            title_english="Equal rated with poster",
+            type=Movie.SERIES,
+            external_rating="9.1",
+            image="https://example.com/top.jpg",
+        )
+
+        response = self.client.get(reverse("feed-movies"), {"page_size": 50})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("results", response.data)
+        result_ids = [item["id"] for item in response.data["results"]]
+        self.assertLess(
+            result_ids.index(equal_rated_with_poster.id),
+            result_ids.index(equal_rated_without_poster.id),
+        )
+        self.assertLess(
+            result_ids.index(equal_rated_without_poster.id),
+            result_ids.index(lower_rated_with_poster.id),
+        )
+        self.assertLess(
+            result_ids.index(lower_rated_with_poster.id),
+            result_ids.index(unrated_with_poster.id),
+        )
+        returned_types = {item["type"] for item in response.data["results"]}
+        self.assertIn(Movie.MOVIE, returned_types)
+        self.assertIn(Movie.SERIES, returned_types)
 
     def test_anonymous_movie_feed_supports_single_and_repeated_genres(self):
         action_scifi = Movie.objects.create(

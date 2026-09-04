@@ -11,7 +11,7 @@ from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, NullIf
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
@@ -4115,7 +4115,17 @@ class FeedMoviesView(generics.ListAPIView):
             if movie_type := self.request.query_params.get("type"):
                 queryset = queryset.filter(type=movie_type)
             queryset = apply_feed_genre_filters(queryset, parse_feed_genre_filters(self.request))
-            return queryset.order_by("-release_year", "-id")
+            # ``display_rating`` is the value exposed by the feed, but it
+            # includes aggregate user ratings and cannot safely rank the full
+            # public catalogue.  ``external_rating`` is its persisted public
+            # catalogue input, so it can use the matching database index.
+            # NULLIF also treats both supported "no poster" representations
+            # (NULL and an empty URLField) alike.
+            return queryset.only("id").order_by(
+                F("external_rating").desc(nulls_last=True),
+                NullIf("image", Value("")).desc(nulls_last=True),
+                "-id",
+            )
 
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
         if self._feed_profile_enabled and not hasattr(self, "_feed_profile_timings"):
