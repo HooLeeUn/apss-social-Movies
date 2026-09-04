@@ -11,7 +11,7 @@ from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, NullIf
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
 from rest_framework import generics, permissions, status
@@ -4105,22 +4105,27 @@ class FeedMoviesView(generics.ListAPIView):
 
     def get_queryset(self):
         if not self.request.user.is_authenticated:
-            queryset = (
-                Movie.objects.with_display_rating()
-                .with_my_rating(self.request.user)
-                .with_in_my_list(self.request.user)
-                .with_in_my_recommendations(self.request.user)
-                .with_comment_stats()
-                .with_following_rating_stats(self.request.user)
-                .select_related("author", "author__profile")
-                .annotate(general_rating=F("display_rating"))
-            )
+            # Keep pagination over the public catalogue deliberately lean.  In
+            # production this queryset contains close to one million rows: if
+            # rating aggregates are attached here, Django's paginator includes
+            # them in its COUNT and PostgreSQL reaches the statement timeout.
+            queryset = Movie.objects.all()
             if search := self.request.query_params.get("search"):
                 queryset = apply_movie_search(queryset, search)
             if movie_type := self.request.query_params.get("type"):
                 queryset = queryset.filter(type=movie_type)
             queryset = apply_feed_genre_filters(queryset, parse_feed_genre_filters(self.request))
-            return queryset.order_by("-display_rating", "-created_at", "-id")
+            # ``display_rating`` is the value exposed by the feed, but it
+            # includes aggregate user ratings and cannot safely rank the full
+            # public catalogue.  ``external_rating`` is its persisted public
+            # catalogue input, so it can use the matching database index.
+            # NULLIF also treats both supported "no poster" representations
+            # (NULL and an empty URLField) alike.
+            return queryset.only("id").order_by(
+                F("external_rating").desc(nulls_last=True),
+                NullIf("image", Value("")).desc(nulls_last=True),
+                "-id",
+            )
 
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
         if self._feed_profile_enabled and not hasattr(self, "_feed_profile_timings"):
@@ -4170,12 +4175,41 @@ class FeedMoviesView(generics.ListAPIView):
             movie.comments_count = comments_count_by_movie.get(movie.id, 0)
             movie.my_rating = ratings_by_movie.get(movie.id)
 
+    def _hydrate_anonymous_page(self, page_items):
+        """Annotate only the visitor's current page, never the full catalogue."""
+        if not page_items:
+            return []
+
+        movie_ids = [movie.id for movie in page_items]
+        ordering_case = Case(
+            *[When(id=movie_id, then=position) for position, movie_id in enumerate(movie_ids)],
+            output_field=IntegerField(),
+        )
+        return list(
+            Movie.objects.filter(id__in=movie_ids)
+            .with_display_rating()
+            .with_my_rating(self.request.user)
+            .with_in_my_list(self.request.user)
+            .with_in_my_recommendations(self.request.user)
+            .with_comment_stats()
+            .with_following_rating_stats(self.request.user)
+            .select_related("author", "author__profile")
+            .annotate(general_rating=F("display_rating"))
+            .order_by(ordering_case)
+        )
+
     def list(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
-            # Do not resolve a DailyFeedPool/UserTasteProfile or use a
-            # user-specific cache for a visitor.  The generic feed is public
-            # and its personalized fields are neutral queryset annotations.
-            return generics.ListAPIView.list(self, request, *args, **kwargs)
+            # Paginate the cheap public queryset first and run aggregates only
+            # for the handful of rows that will actually be serialized.
+            queryset = self.filter_queryset(self.get_queryset())
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                page_items = self._hydrate_anonymous_page(list(page))
+                serializer = self.get_serializer(page_items, many=True)
+                return self.get_paginated_response(serializer.data)
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
 
         self._feed_profile_enabled = self._is_feed_profiling_enabled()
         if self._feed_profile_enabled:

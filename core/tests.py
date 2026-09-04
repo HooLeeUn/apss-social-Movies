@@ -1284,9 +1284,10 @@ class FeedMoviesEndpointTests(TestCase):
             batch_size=1000,
         )
 
-    def test_feed_requires_authentication_and_returns_200_for_authenticated_user(self):
+    def test_feed_returns_200_for_anonymous_and_authenticated_users(self):
         anon_response = self.client.get(self.url)
-        self.assertEqual(anon_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(anon_response.status_code, status.HTTP_200_OK)
+        self.assertIn("results", anon_response.data)
 
         Movie.objects.create(
             author=self.author,
