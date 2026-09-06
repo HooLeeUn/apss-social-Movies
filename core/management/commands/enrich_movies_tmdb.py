@@ -33,6 +33,7 @@ class Command(BaseCommand):
         parser.add_argument("--overwrite-synopsis", action="store_true")
         parser.add_argument("--only-missing-image", action="store_true")
         parser.add_argument("--only-missing-synopsis", action="store_true")
+        parser.add_argument("--backfill-missing-images", action="store_true")
         parser.add_argument("--only-missing-tmdb-id", action="store_true")
         parser.add_argument("--use-existing-tmdb-id-only", action="store_true")
         parser.add_argument("--retry-not-found", action="store_true")
@@ -71,14 +72,18 @@ class Command(BaseCommand):
                     )
                 )
 
-        if options["affected_csv"]:
+        if options["affected_csv"] and not options["backfill_missing_images"]:
             return self._handle_affected_csv(options, stats, sleep_seconds, started_at)
 
         local_index = None
-        if options["use_local_exports"] or options["second_pass_relaxed_match"]:
+        if not options["backfill_missing_images"] and (
+            options["use_local_exports"] or options["second_pass_relaxed_match"]
+        ):
             local_index = self._build_local_export_index(options["exports_dir"])
 
         movies = list(self._get_movies_queryset(options))
+        if options["backfill_missing_images"]:
+            stats["backfill_missing_image_candidates"] = len(movies)
         stats["eligible_with_tmdb_id"] = len([m for m in movies if m.tmdb_id])
         updates = []
         updated_images = 0
@@ -135,6 +140,9 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("Proceso finalizado."))
         self.stdout.write(f"Procesadas: {len(movies)}")
         self.stdout.write(f"eligible_with_tmdb_id: {stats['eligible_with_tmdb_id']}")
+        self.stdout.write(
+            f"backfill_missing_image_candidates: {stats['backfill_missing_image_candidates']}"
+        )
         self.stdout.write(f"skipped_missing_tmdb_id: {stats['skipped_missing_tmdb_id']}")
         self.stdout.write(f"tmdb_ids_updated: {updated_tmdb_ids}")
         self.stdout.write(f"Imágenes actualizadas: {updated_images}")
@@ -362,7 +370,9 @@ class Command(BaseCommand):
             qs = qs.filter(id__gte=options["start_id"])
         if options["movie_id"] is not None:
             qs = qs.filter(id=options["movie_id"])
-        if options["use_existing_tmdb_id_only"]:
+        if options["backfill_missing_images"]:
+            qs = qs.filter(tmdb_id__gt=0).filter(Q(image__isnull=True) | Q(image=""))
+        elif options["use_existing_tmdb_id_only"]:
             qs = qs.filter(tmdb_id__isnull=False)
         elif options["second_pass_relaxed_match"]:
             qs = qs.filter(tmdb_id__isnull=True)
@@ -375,13 +385,19 @@ class Command(BaseCommand):
         else:
             qs = qs.filter(Q(tmdb_id__isnull=False) | (Q(imdb_id__isnull=False) & ~Q(imdb_id="")))
 
-        missing_filters = Q()
-        if options["only_missing_image"]:
-            missing_filters |= Q(image__isnull=True) | Q(image="")
-        if options["only_missing_synopsis"]:
-            missing_filters |= Q(synopsis__isnull=True) | Q(synopsis="") | Q(synopsis_es__isnull=True) | Q(synopsis_es="")
-        if missing_filters:
-            qs = qs.filter(missing_filters)
+        if not options["backfill_missing_images"]:
+            missing_filters = Q()
+            if options["only_missing_image"]:
+                missing_filters |= Q(image__isnull=True) | Q(image="")
+            if options["only_missing_synopsis"]:
+                missing_filters |= (
+                    Q(synopsis__isnull=True)
+                    | Q(synopsis="")
+                    | Q(synopsis_es__isnull=True)
+                    | Q(synopsis_es="")
+                )
+            if missing_filters:
+                qs = qs.filter(missing_filters)
         if options["limit"]:
             qs = qs[: options["limit"]]
         return qs
@@ -394,7 +410,12 @@ class Command(BaseCommand):
                 stats["skipped"] += 1
                 return result
 
-            needs_tmdb_id = not movie.tmdb_id and not options["use_existing_tmdb_id_only"]
+            backfill_missing_images = options["backfill_missing_images"]
+            needs_tmdb_id = (
+                not movie.tmdb_id
+                and not options["use_existing_tmdb_id_only"]
+                and not backfill_missing_images
+            )
             if (
                 needs_tmdb_id
                 and not options["second_pass_relaxed_match"]
@@ -418,7 +439,14 @@ class Command(BaseCommand):
                 needs_synopsis = not movie.synopsis
                 needs_synopsis_es = not movie.synopsis_es
 
-            if options["only_missing_tmdb_id"] or options["second_pass_relaxed_match"]:
+            if backfill_missing_images:
+                needs_image = not movie.image
+                needs_synopsis = not movie.synopsis
+                needs_synopsis_es = not movie.synopsis_es
+
+            if not backfill_missing_images and (
+                options["only_missing_tmdb_id"] or options["second_pass_relaxed_match"]
+            ):
                 needs_image = needs_synopsis = needs_synopsis_es = False
 
             tmdb_id = movie.tmdb_id

@@ -8770,6 +8770,65 @@ class EnrichMoviesTmdbCommandTests(TestCase):
 
     @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
     @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
+    def test_backfill_missing_images_filters_before_limit_and_fills_only_missing_fields(
+        self, mock_tmdb, _mock_sleep
+    ):
+        missing_tmdb = self._create_movie(tmdb_id=None, image=None)
+        invalid_tmdb = self._create_movie(tmdb_id=0, image="")
+        existing_image = self._create_movie(tmdb_id=100, image="https://existing/poster.jpg")
+        first_candidate = self._create_movie(
+            tmdb_id=101, image=None, synopsis="Existing EN", synopsis_es=""
+        )
+        second_candidate = self._create_movie(
+            tmdb_id=102, image="", synopsis="", synopsis_es="Existing ES"
+        )
+        mock_tmdb.side_effect = [
+            {"poster_path": "/first.jpg", "overview": "Unused EN"},
+            {"overview": "Primera ES"},
+            {"poster_path": "/second.jpg", "overview": "Second EN"},
+        ]
+
+        out = io.StringIO()
+        call_command(
+            "enrich_movies_tmdb",
+            "--backfill-missing-images",
+            "--start-id",
+            str(missing_tmdb.id),
+            "--limit",
+            "2",
+            "--sleep",
+            "0",
+            stdout=out,
+        )
+
+        for movie in (missing_tmdb, invalid_tmdb, existing_image, first_candidate, second_candidate):
+            movie.refresh_from_db()
+        self.assertIsNone(missing_tmdb.tmdb_id)
+        self.assertEqual(invalid_tmdb.image, "")
+        self.assertEqual(existing_image.image, "https://existing/poster.jpg")
+        self.assertEqual(first_candidate.tmdb_id, 101)
+        self.assertEqual(first_candidate.image, "https://image.tmdb.org/t/p/w500/first.jpg")
+        self.assertEqual(first_candidate.synopsis, "Existing EN")
+        self.assertEqual(first_candidate.synopsis_es, "Primera ES")
+        self.assertEqual(second_candidate.tmdb_id, 102)
+        self.assertEqual(second_candidate.image, "https://image.tmdb.org/t/p/w500/second.jpg")
+        self.assertEqual(second_candidate.synopsis, "Second EN")
+        self.assertEqual(second_candidate.synopsis_es, "Existing ES")
+        self.assertEqual(mock_tmdb.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in mock_tmdb.call_args_list],
+            ["/movie/101", "/movie/101", "/movie/102"],
+        )
+        self.assertEqual(
+            [call.kwargs["params"]["language"] for call in mock_tmdb.call_args_list],
+            ["en-US", "es-ES", "en-US"],
+        )
+        self.assertNotIn("/find/", str(mock_tmdb.call_args_list))
+        self.assertIn("Procesadas: 2", out.getvalue())
+        self.assertIn("backfill_missing_image_candidates: 2", out.getvalue())
+
+    @patch("core.management.commands.enrich_movies_tmdb.time.sleep", return_value=None)
+    @patch("core.management.commands.enrich_movies_tmdb.get_tmdb_json")
     def test_verify_persistence_reports_no_mismatch_after_batch_image_save(self, mock_tmdb, _mock_sleep):
         movie = self._create_movie(tmdb_id=96721, image="")
         mock_tmdb.return_value = {"poster_path": "/persisted.jpg"}
