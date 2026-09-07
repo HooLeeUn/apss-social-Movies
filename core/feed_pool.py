@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import random
 from time import perf_counter
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from core.models import (
     UserTypePreference,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class FeedPoolPayload:
@@ -34,7 +37,7 @@ class DailyFeedPoolService:
     POOL_SIZE_DEFAULT = 10000
     POOL_SIZE_MIN = 5000
     RETAIN_RATIO = 0.45
-    POOL_ALGO_VERSION = "v2_genre_depth_20260423"
+    POOL_ALGO_VERSION = "v3_bounded_genre_universe_20260907"
     STRONG_GENRE_MAX_GENRES = 6
 
     SOURCE_TARGETS = {
@@ -217,46 +220,91 @@ class DailyFeedPoolService:
         base_qs = Movie.objects.exclude(id__in=Subquery(rated_ids))
         source_buckets = []
 
-        def fetch_ids(queryset, limit):
+        def fetch_ids(queryset, limit, *, bucket):
             if limit <= 0:
                 return []
-            return list(queryset.values_list("id", flat=True)[:limit])
+            query = queryset.values_list("id", flat=True)[:limit]
+            started_at = perf_counter()
+            logger.info("feed.pool.candidate_bucket.start bucket=%s limit=%s sql=%s", bucket, limit, query.query)
+            rows = list(query)
+            logger.info(
+                "feed.pool.candidate_bucket.done bucket=%s limit=%s rows=%s seconds=%.6f",
+                bucket,
+                limit,
+                len(rows),
+                perf_counter() - started_at,
+            )
+            return rows
 
         if has_preferences and top_genres:
             per_genre_target = max(260, self.SOURCE_TARGETS["strong_genre"] // max(1, len(top_genres)))
             pair_target = max(120, per_genre_target // 2)
             broad_target = max(400, self.SOURCE_TARGETS["strong_genre"] // 3)
 
+            # All genre and genre-pair buckets previously repeated the same
+            # non-sargable token-boundary predicates and sort against the full
+            # catalogue (up to 22 scans for six preferences). Fetch one bounded
+            # lightweight universe and reuse it for every genre bucket.
+            genre_query = (
+                base_qs.filter(self._genres_or_query(top_genres))
+                .order_by("-release_year", "-external_votes", "-id")
+                .values_list("id", "genre_key")[: self.pool_size]
+            )
+            genre_started_at = perf_counter()
+            logger.info(
+                "feed.pool.candidate_bucket.start bucket=genre_universe limit=%s sql=%s",
+                self.pool_size,
+                genre_query.query,
+            )
+            genre_rows = list(genre_query)
+            logger.info(
+                "feed.pool.candidate_bucket.done bucket=genre_universe limit=%s rows=%s seconds=%.6f",
+                self.pool_size,
+                len(genre_rows),
+                perf_counter() - genre_started_at,
+            )
+
+            matches_by_genre = {
+                genre: [movie_id for movie_id, genre_key in genre_rows if self._genre_key_matches(genre_key, genre)]
+                for genre in top_genres
+            }
             for genre in top_genres:
-                source_buckets.append(
-                    fetch_ids(
-                        base_qs.filter(self._genre_lookup_query(genre)).order_by("-release_year", "-external_votes", "-id"),
-                        per_genre_target,
-                    )
+                bucket = matches_by_genre[genre][:per_genre_target]
+                source_buckets.append(bucket)
+                logger.info(
+                    "feed.pool.candidate_bucket.done bucket=genre:%s limit=%s rows=%s source=reused_genre_universe",
+                    genre,
+                    per_genre_target,
+                    len(bucket),
                 )
 
             for idx, left in enumerate(top_genres):
+                left_ids = set(matches_by_genre[left])
                 for right in top_genres[idx + 1 :]:
-                    source_buckets.append(
-                        fetch_ids(
-                            base_qs.filter(self._genre_lookup_query(left)).filter(self._genre_lookup_query(right)).order_by("-release_year", "-external_votes", "-id"),
-                            pair_target,
-                        )
+                    bucket = [movie_id for movie_id in matches_by_genre[right] if movie_id in left_ids][:pair_target]
+                    source_buckets.append(bucket)
+                    logger.info(
+                        "feed.pool.candidate_bucket.done bucket=genre_pair:%s:%s limit=%s rows=%s source=reused_genre_universe",
+                        left,
+                        right,
+                        pair_target,
+                        len(bucket),
                     )
 
-            source_buckets.append(
-                fetch_ids(
-                    base_qs.filter(self._genres_or_query(top_genres)).order_by("-release_year", "-external_votes", "-id"),
-                    broad_target,
-                )
+            broad_bucket = [movie_id for movie_id, _ in genre_rows][:broad_target]
+            source_buckets.append(broad_bucket)
+            logger.info(
+                "feed.pool.candidate_bucket.done bucket=broad_genres limit=%s rows=%s source=reused_genre_universe",
+                broad_target,
+                len(broad_bucket),
             )
 
         if has_preferences and top_type:
-            source_buckets.append(fetch_ids(base_qs.filter(type=top_type).order_by("-release_year", "-external_votes", "-id"), self.SOURCE_TARGETS["type"]))
+            source_buckets.append(fetch_ids(base_qs.filter(type=top_type).order_by("-release_year", "-external_votes", "-id"), self.SOURCE_TARGETS["type"], bucket="type"))
 
         if has_preferences and top_directors:
             source_buckets.append(
-                fetch_ids(base_qs.filter(director__in=top_directors).order_by("-release_year", "-external_votes", "-id"), self.SOURCE_TARGETS["director"])
+                fetch_ids(base_qs.filter(director__in=top_directors).order_by("-release_year", "-external_votes", "-id"), self.SOURCE_TARGETS["director"], bucket="director")
             )
 
         current_year = today.year
@@ -265,10 +313,10 @@ class DailyFeedPoolService:
             source_buckets.append(
                 fetch_ids(
                     recent_qs.filter(self._genres_or_query(top_genres)),
-                    int(self.SOURCE_TARGETS["recent"] * 0.65),
+                    int(self.SOURCE_TARGETS["recent"] * 0.65), bucket="recent_genres",
                 )
             )
-        source_buckets.append(fetch_ids(recent_qs, self.SOURCE_TARGETS["recent"]))
+        source_buckets.append(fetch_ids(recent_qs, self.SOURCE_TARGETS["recent"], bucket="recent"))
 
         exploration_bucket = (self._compute_daily_seed(today) % 23) + 3
         exploration_qs = base_qs.annotate(exploration_mod=(F("id") % Value(exploration_bucket))).filter(exploration_mod=0).order_by(
@@ -280,15 +328,15 @@ class DailyFeedPoolService:
             source_buckets.append(
                 fetch_ids(
                     exploration_qs.filter(self._genres_or_query(top_genres)),
-                    int(self.SOURCE_TARGETS["exploration"] * 0.6),
+                    int(self.SOURCE_TARGETS["exploration"] * 0.6), bucket="exploration_genres",
                 )
             )
-        source_buckets.append(fetch_ids(exploration_qs, self.SOURCE_TARGETS["exploration"]))
+        source_buckets.append(fetch_ids(exploration_qs, self.SOURCE_TARGETS["exploration"], bucket="exploration"))
 
         source_buckets.append(
             self._retained_previous_ids(today=today, excluded=set())[: self.SOURCE_TARGETS["retained"]]
         )
-        source_buckets.append(fetch_ids(base_qs.order_by("-external_votes", "-release_year", "-id"), self.pool_size))
+        source_buckets.append(fetch_ids(base_qs.order_by("-external_votes", "-release_year", "-id"), self.pool_size, bucket="external_volume"))
 
         return self._merge_source_buckets(source_buckets)
 
@@ -324,6 +372,13 @@ class DailyFeedPoolService:
     def _genre_lookup_query(self, genre):
         return Q(genre_key=genre) | Q(genre_key__startswith=f"{genre}|") | Q(genre_key__endswith=f"|{genre}") | Q(genre_key__contains=f"|{genre}|")
 
+    @staticmethod
+    def _genre_key_matches(genre_key, genre):
+        if not genre_key or not genre:
+            return False
+        padded_key = f"|{genre_key}|"
+        return f"|{genre}|" in padded_key
+
     def _genres_or_query(self, genres):
         query = Q()
         for genre in genres:
@@ -338,12 +393,21 @@ class DailyFeedPoolService:
 
         retain_limit = max(30, int(self.pool_size * self.RETAIN_RATIO))
         rated_ids = self._rated_ids_subquery()
-        prev_ids = list(
+        query = (
             UserDailyFeedCandidate.objects.filter(pool_id=prev_pool.id)
             .exclude(movie_id__in=Subquery(rated_ids))
             .exclude(movie_id__in=excluded)
             .order_by("base_rank")
             .values_list("movie_id", flat=True)[:retain_limit]
+        )
+        started_at = perf_counter()
+        logger.info("feed.pool.candidate_bucket.start bucket=retained limit=%s sql=%s", retain_limit, query.query)
+        prev_ids = list(query)
+        logger.info(
+            "feed.pool.candidate_bucket.done bucket=retained limit=%s rows=%s seconds=%.6f",
+            retain_limit,
+            len(prev_ids),
+            perf_counter() - started_at,
         )
         return prev_ids
 

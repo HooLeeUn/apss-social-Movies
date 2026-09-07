@@ -26,3 +26,17 @@ Sin acceso a una copia del catálogo PostgreSQL de producción no es responsable
 4. El count usa la longitud del subconjunto de IDs y su caché existente; no agrega ni recorre las ~900k producciones.
 
 La primera regeneración todavía hace consultas acotadas de selección contra el catálogo para obtener los 10 000 candidatos. Los índices y planes reales deben validarse en staging mediante la instrumentación añadida. No se tocó el endpoint semanal ni el frontend.
+
+## Diagnóstico de reconstrucción en catálogo productivo
+
+La traza de preview del 7 de septiembre de 2026 acotó el timeout a `fetch_ids()` dentro de `_build_candidate_ids()`, antes del scoring. El SQL generado para cada preferencia combinaba cuatro predicados de límites de token sobre `genre_key` (`=`, `LIKE 'valor|%'`, `LIKE '%|valor'` y `LIKE '%|valor|%'`) con `NOT IN` de ratings y `ORDER BY release_year DESC, external_votes DESC, id DESC LIMIT n`. Los dos patrones con comodín inicial no pueden usar el B-tree de `genre_key`. Con seis preferencias, el código emitía 6 consultas individuales, 15 de pares y una broad —hasta 22 escaneos/sorts de género— además de recent/exploration y fallback por volumen.
+
+Los índices declarados antes de este cambio eran `genre_key`, `(genre_key, type, release_year, id)`, `(type, release_year, id)` y `(release_year, id)`; no existía uno que satisficiera el fallback `ORDER BY external_votes DESC, release_year DESC, id DESC`. Los índices trigram existentes cubren `genre`, no `genre_key`, y no solucionan a la vez el orden solicitado.
+
+No hay credenciales de la base productiva en este workspace, por lo que no se presenta un `EXPLAIN ANALYZE` inventado. La evidencia disponible demuestra que PostgreSQL seguía ejecutando una consulta de bucket al producirse el aborto; el logging incremental ahora emite `start` con el SQL antes de cada cursor y `done` con duración/filas inmediatamente después. Esto permite identificar el bucket exacto aun si el worker muere. En una base de staging debe ejecutarse `EXPLAIN (ANALYZE, BUFFERS)` sobre el SQL registrado.
+
+### Optimización de selección
+
+Los buckets individuales, de pares y broad ahora reutilizan un solo universo ligero de hasta 10.000 pares `(id, genre_key)`. Las mismas comprobaciones de límites de token distribuyen ese universo en memoria entre los buckets, eliminando hasta 21 consultas repetidas sin eliminar ningún tipo de bucket. Recent y exploration continúan siendo fuentes independientes para diversidad, y el fallback completa el pool hasta 10.000.
+
+Se añaden concurrentemente dos índices de orden: `(external_votes DESC, release_year DESC, id DESC)`, que coincide exactamente con el fallback por volumen, y `(release_year DESC, external_votes DESC, id DESC)`, que coincide con los buckets personalizados/recent. `CREATE INDEX CONCURRENTLY` evita bloquear escrituras durante el despliegue. No se añadieron índices para cada combinación de género: el cuello repetitivo se eliminó consolidando consultas en lugar de crear índices grandes para patrones con comodín inicial.

@@ -426,6 +426,8 @@ class Movie(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
+            models.Index(fields=["-external_votes", "-release_year", "-id"], name="movie_votes_year_id_idx"),
+            models.Index(fields=["-release_year", "-external_votes", "-id"], name="movie_year_votes_id_idx"),
             models.Index(fields=["type", "release_year", "id"], name="movie_type_year_id_idx"),
             models.Index(fields=["genre_key", "type", "release_year", "id"], name="movie_genre_type_year_id_idx"),
             models.Index(fields=["title_english", "release_year", "id"], name="movie_title_en_auto_idx"),

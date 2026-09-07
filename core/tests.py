@@ -1809,6 +1809,40 @@ class DailyFeedPoolServiceTests(TestCase):
         documentary_movie = Movie.objects.get(title_english="Documentary Candidate")
         self.assertIn(documentary_movie.id, candidate_ids)
 
+    def test_genre_token_matching_preserves_individual_and_pair_semantics(self):
+        matcher = DailyFeedPoolService._genre_key_matches
+
+        self.assertTrue(matcher("Action|Comedy|Drama", "Action"))
+        self.assertTrue(matcher("Action|Comedy|Drama", "Action|Comedy"))
+        self.assertFalse(matcher("Action|Comedy|Drama", "Action|Horror"))
+        self.assertFalse(matcher("Action Adventure|Drama", "Action"))
+
+    def test_candidate_selection_reuses_one_genre_universe(self):
+        UserTasteProfile.objects.create(user=self.user, ratings_count=20)
+        genres = ["Action", "Comedy", "Drama", "Horror", "Sci-Fi", "Documentary"]
+        for genre in genres:
+            UserGenrePreference.objects.create(user=self.user, genre=genre, count_10=2)
+            self._create_movie(title_english=f"{genre} Query Candidate", genre=genre)
+
+        service = DailyFeedPoolService(user=self.user)
+        with CaptureQueriesContext(connection) as captured:
+            service._build_candidate_ids(today=timezone.localdate())
+
+        catalog_genre_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "core_movie" in query["sql"] and "genre_key" in query["sql"]
+        ]
+        # One broad genre universe plus the intentionally separate recent and
+        # exploration diversity buckets, regardless of preference/pair count.
+        self.assertLessEqual(len(catalog_genre_queries), 3)
+
+    def test_default_pool_size_remains_ten_thousand(self):
+        service = DailyFeedPoolService(user=self.user)
+
+        self.assertEqual(service.pool_size, 10000)
+        self.assertEqual(len(service._merge_source_buckets([list(range(15000))])), 10000)
+
 
 class MovieRatingEndpointTests(TestCase):
     def setUp(self):
