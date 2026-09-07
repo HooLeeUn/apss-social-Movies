@@ -1675,8 +1675,6 @@ class FeedMoviesEndpointTests(TestCase):
         self.assertEqual(response.data["results"][0]["synopsis"], "")
 
     def test_feed_reuses_ranking_cache_between_pages(self):
-        from core.views import FeedMoviesView
-
         for index in range(40):
             self._create_movie(
                 title_english=f"Cache Candidate {index}",
@@ -1687,18 +1685,19 @@ class FeedMoviesEndpointTests(TestCase):
             )
 
         self.client.force_authenticate(user=self.user)
-        original_builder = FeedMoviesView._build_ranking_cache_payload
+        original_scorer = DailyFeedPoolService._score_candidates
         with patch.object(
-            FeedMoviesView,
-            "_build_ranking_cache_payload",
-            wraps=original_builder,
-        ) as ranking_builder:
+            DailyFeedPoolService,
+            "_score_candidates",
+            autospec=True,
+            side_effect=original_scorer,
+        ) as ranking_scorer:
             first_page = self.client.get(self.url, {"exclude_rated": "false", "page_size": 10, "page": 1})
             second_page = self.client.get(self.url, {"exclude_rated": "false", "page_size": 10, "page": 2})
 
         self.assertEqual(first_page.status_code, status.HTTP_200_OK)
         self.assertEqual(second_page.status_code, status.HTTP_200_OK)
-        self.assertEqual(ranking_builder.call_count, 1)
+        self.assertEqual(ranking_scorer.call_count, 1)
 
     def test_feed_rotation_changes_close_scores_without_displacing_clear_winner(self):
         winner = self._create_movie(
@@ -1775,6 +1774,19 @@ class DailyFeedPoolServiceTests(TestCase):
         self.assertEqual(pool.pool_version, service._current_pool_version())
         self.assertEqual(UserDailyFeedPool.objects.filter(user=self.user, pool_date=today).count(), 1)
 
+    def test_profile_update_invalidates_same_day_pool(self):
+        profile = UserTasteProfile.objects.create(user=self.user, ratings_count=1)
+        self._create_movie(title_english="Candidate Before Preference Change")
+        service = DailyFeedPoolService(user=self.user, pool_size=5000)
+        first_pool = service.get_daily_pool()
+
+        profile.ratings_count = 2
+        profile.save(update_fields=["ratings_count", "last_updated_at"])
+        rebuilt_pool = DailyFeedPoolService(user=self.user, pool_size=5000).get_daily_pool()
+
+        self.assertNotEqual(rebuilt_pool.id, first_pool.id)
+        self.assertNotEqual(rebuilt_pool.pool_version, first_pool.pool_version)
+
     def test_builds_strong_genre_candidates_for_sixth_preference(self):
         UserTasteProfile.objects.create(user=self.user, ratings_count=20)
         ranked_genres = ["Action", "Drama", "Comedy", "Horror", "Sci-Fi", "Documentary"]
@@ -1796,6 +1808,40 @@ class DailyFeedPoolServiceTests(TestCase):
 
         documentary_movie = Movie.objects.get(title_english="Documentary Candidate")
         self.assertIn(documentary_movie.id, candidate_ids)
+
+    def test_genre_token_matching_preserves_individual_and_pair_semantics(self):
+        matcher = DailyFeedPoolService._genre_key_matches
+
+        self.assertTrue(matcher("Action|Comedy|Drama", "Action"))
+        self.assertTrue(matcher("Action|Comedy|Drama", "Action|Comedy"))
+        self.assertFalse(matcher("Action|Comedy|Drama", "Action|Horror"))
+        self.assertFalse(matcher("Action Adventure|Drama", "Action"))
+
+    def test_candidate_selection_reuses_one_genre_universe(self):
+        UserTasteProfile.objects.create(user=self.user, ratings_count=20)
+        genres = ["Action", "Comedy", "Drama", "Horror", "Sci-Fi", "Documentary"]
+        for genre in genres:
+            UserGenrePreference.objects.create(user=self.user, genre=genre, count_10=2)
+            self._create_movie(title_english=f"{genre} Query Candidate", genre=genre)
+
+        service = DailyFeedPoolService(user=self.user)
+        with CaptureQueriesContext(connection) as captured:
+            service._build_candidate_ids(today=timezone.localdate())
+
+        catalog_genre_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "core_movie" in query["sql"] and "genre_key" in query["sql"]
+        ]
+        # One broad genre universe plus the intentionally separate recent and
+        # exploration diversity buckets, regardless of preference/pair count.
+        self.assertLessEqual(len(catalog_genre_queries), 3)
+
+    def test_default_pool_size_remains_ten_thousand(self):
+        service = DailyFeedPoolService(user=self.user)
+
+        self.assertEqual(service.pool_size, 10000)
+        self.assertEqual(len(service._merge_source_buckets([list(range(15000))])), 10000)
 
 
 class MovieRatingEndpointTests(TestCase):
