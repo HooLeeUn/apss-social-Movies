@@ -4073,7 +4073,13 @@ class FeedMoviesView(generics.ListAPIView):
     def _get_pool_payload(self):
         if hasattr(self, "_pool_payload"):
             return self._pool_payload
-        service = DailyFeedPoolService(user=self.request.user)
+        def pool_profiler(key, value, marker=False):
+            if marker:
+                self._record_profile_marker(key, value)
+            else:
+                self._record_profile_timing(key, value)
+
+        service = DailyFeedPoolService(user=self.request.user, profiler=pool_profiler)
         start = perf_counter()
         payload = service.get_rotated_ids(rotation_bucket=self._resolve_rotation_bucket())
         self._record_profile_timing("pool_resolve_seconds", perf_counter() - start)
@@ -4199,6 +4205,21 @@ class FeedMoviesView(generics.ListAPIView):
         )
 
     def list(self, request, *args, **kwargs):
+        if request.user.is_authenticated and self._is_feed_profiling_enabled():
+            self._profile_sql_query_count = 0
+
+            def count_query(execute, sql, params, many, context):
+                self._profile_sql_query_count += 1
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(count_query):
+                response = self._list_impl(request, *args, **kwargs)
+            self._record_profile_marker("sql_queries", self._profile_sql_query_count)
+            self._log_feed_profile_summary()
+            return response
+        return self._list_impl(request, *args, **kwargs)
+
+    def _list_impl(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             # Paginate the cheap public queryset first and run aggregates only
             # for the handful of rows that will actually be serialized.
@@ -4223,25 +4244,39 @@ class FeedMoviesView(generics.ListAPIView):
             self._record_profile_marker("page_cache", "hit")
             if self._feed_profile_enabled:
                 self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
-                self._log_feed_profile_summary()
             return Response(cached_payload)
         self._record_profile_marker("page_cache", "miss")
 
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
+        # The daily pool already contains the expensive personalized ranking.
+        # Paginate its lightweight IDs first; constructing a CASE expression
+        # for all 10k candidates made PostgreSQL aggregate and order the entire
+        # pool again on every scroll request.
+        filter_start = perf_counter()
+        self._build_pool_filtered_queryset(include_search_relevance=True)
+        ordered_ids = getattr(self, "_filtered_rotated_ids", [])
+        self._record_profile_timing("candidate_filter_seconds", perf_counter() - filter_start)
+        self._record_profile_marker("filtered_candidates_count", len(ordered_ids))
+        page = self.paginate_queryset(ordered_ids)
         if page is not None:
-            page_queryset = getattr(page, "object_list", None)
-            if page_queryset is not None:
-                self._log_profile_sql("page_queryset_sql", page_queryset)
-                self._log_profile_explain("page_queryset", page_queryset)
-            self._log_profile_sql("count_queryset_sql", self._build_pool_filtered_queryset(include_search_relevance=False))
-            self._log_profile_explain("count_queryset", self._build_pool_filtered_queryset(include_search_relevance=False))
-
             page_fetch_start = perf_counter()
-            page_items = list(page)
+            page_ids = list(page)
             self._record_profile_timing("page_results_sql_seconds", perf_counter() - page_fetch_start)
 
             page_hydration_start = perf_counter()
+            ordering_case = Case(
+                *[When(id=movie_id, then=position) for position, movie_id in enumerate(page_ids)],
+                output_field=IntegerField(),
+            )
+            page_items = list(
+                Movie.objects.filter(id__in=page_ids)
+                .with_display_rating()
+                .annotate(general_rating=F("display_rating"))
+                .with_in_my_list(request.user)
+                .with_in_my_recommendations(request.user)
+                .with_following_rating_stats(request.user)
+                .select_related("author", "author__profile")
+                .order_by(ordering_case)
+            )
             self._hydrate_page_metrics(page_items)
             self._record_profile_timing("page_hydration_seconds", perf_counter() - page_hydration_start)
 
@@ -4254,10 +4289,12 @@ class FeedMoviesView(generics.ListAPIView):
             cache.set(cache_key, response.data, timeout=self.FEED_PAGE_CACHE_TTL_SECONDS)
             if self._feed_profile_enabled:
                 self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
-                self._log_feed_profile_summary()
             return response
 
         serializer_start = perf_counter()
+        # FeedMoviesPagination is always configured, but retain a safe
+        # non-paginated path for custom settings/tests.
+        queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
         serialized_data = serializer.data
         self._record_profile_timing("serializer_seconds", perf_counter() - serializer_start)
@@ -4265,7 +4302,6 @@ class FeedMoviesView(generics.ListAPIView):
         cache.set(cache_key, serialized_data, timeout=self.FEED_PAGE_CACHE_TTL_SECONDS)
         if self._feed_profile_enabled:
             self._record_profile_timing("endpoint_total_seconds", perf_counter() - total_start)
-            self._log_feed_profile_summary()
         return response
 
 

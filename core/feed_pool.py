@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import random
+from time import perf_counter
 from dataclasses import dataclass
 from datetime import timedelta
 
 from django.db import transaction
+from django.core.cache import cache
 from django.db.models import F, FloatField, IntegerField, OuterRef, Q, Subquery, Value
 from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
@@ -46,25 +48,49 @@ class DailyFeedPoolService:
 
     ROTATION_BAND = 0.25
 
-    def __init__(self, user, *, pool_size: int | None = None):
+    def __init__(self, user, *, pool_size: int | None = None, profiler=None):
         self.user = user
+        self.profiler = profiler
         resolved_size = pool_size or self.POOL_SIZE_DEFAULT
         self.pool_size = max(self.POOL_SIZE_MIN, resolved_size)
 
+    def _profile(self, key, started_at):
+        if self.profiler:
+            self.profiler(key, perf_counter() - started_at)
+
+    def _profile_value(self, key, value):
+        if self.profiler:
+            self.profiler(key, value, marker=True)
+
     def get_daily_pool(self) -> UserDailyFeedPool:
+        started_at = perf_counter()
         today = timezone.localdate()
         pool = UserDailyFeedPool.objects.filter(user_id=self.user.id, pool_date=today).first()
+        self._profile("daily_pool_lookup_seconds", started_at)
         if pool and pool.pool_version == self._current_pool_version():
+            self._profile_value("daily_pool", "hit")
             return pool
+        self._profile_value("daily_pool", "rebuild")
         return self._rebuild_pool(today=today)
 
     def get_rotated_ids(self, *, rotation_bucket: int) -> FeedPoolPayload:
         pool = self.get_daily_pool()
+        cache_key = f"daily_feed_rotated:v1:{pool.id}:{pool.pool_version}:{rotation_bucket}"
+        cached_ids = cache.get(cache_key)
+        if cached_ids is not None:
+            self._profile_value("rotated_ids_cache", "hit")
+            self._profile_value("rotated_candidates_count", len(cached_ids))
+            return FeedPoolPayload(pool=pool, ordered_ids=cached_ids)
+
+        self._profile_value("rotated_ids_cache", "miss")
+        started_at = perf_counter()
         candidates = list(
             UserDailyFeedCandidate.objects.filter(pool_id=pool.id)
             .order_by("base_rank", "-base_score", "id")
             .values_list("movie_id", "base_score")
         )
+        self._profile("candidate_pool_read_seconds", started_at)
+        self._profile_value("rotated_candidates_count", len(candidates))
 
         if not candidates:
             return FeedPoolPayload(pool=pool, ordered_ids=[])
@@ -88,9 +114,12 @@ class DailyFeedPoolService:
                 rng.shuffle(chunk)
                 rotated[start_idx:idx] = chunk
 
-        return FeedPoolPayload(pool=pool, ordered_ids=[movie_id for movie_id, _ in rotated])
+        ordered_ids = [movie_id for movie_id, _ in rotated]
+        cache.set(cache_key, ordered_ids, timeout=60 * 60 * 3)
+        return FeedPoolPayload(pool=pool, ordered_ids=ordered_ids)
 
     def _rebuild_pool(self, *, today):
+        rebuild_started_at = perf_counter()
         with transaction.atomic():
             UserDailyFeedPool.objects.filter(user_id=self.user.id, pool_date=today).delete()
             pool = UserDailyFeedPool.objects.create(
@@ -101,11 +130,17 @@ class DailyFeedPoolService:
                 rotation_seed=self._compute_daily_seed(today),
             )
 
+            candidate_started_at = perf_counter()
             candidate_ids = self._build_candidate_ids(today)
+            self._profile("candidate_selection_seconds", candidate_started_at)
+            self._profile_value("ranking_candidates_count", len(candidate_ids))
             if not candidate_ids:
                 return pool
 
+            score_started_at = perf_counter()
             score_by_movie = self._score_candidates(candidate_ids)
+            self._profile("affinity_quality_scoring_seconds", score_started_at)
+            sort_started_at = perf_counter()
             sorted_ids = sorted(
                 candidate_ids,
                 key=lambda movie_id: (
@@ -113,6 +148,7 @@ class DailyFeedPoolService:
                     movie_id,
                 ),
             )
+            self._profile("ranking_sort_seconds", sort_started_at)
             UserDailyFeedCandidate.objects.bulk_create(
                 [
                     UserDailyFeedCandidate(
@@ -125,6 +161,7 @@ class DailyFeedPoolService:
                 ],
                 batch_size=1000,
             )
+            self._profile("daily_pool_rebuild_seconds", rebuild_started_at)
             return pool
 
     def _compute_daily_seed(self, day):
@@ -132,6 +169,12 @@ class DailyFeedPoolService:
         return int(digest[:8], 16)
 
     def _current_pool_version(self):
+        profile_started_at = perf_counter()
+        profile = UserTasteProfile.objects.filter(user_id=self.user.id).values("ratings_count", "last_updated_at").first()
+        self._profile("taste_profile_load_seconds", profile_started_at)
+        profile_version = "0"
+        if profile:
+            profile_version = f"{profile['ratings_count']}:{profile['last_updated_at'].timestamp()}"
         digest = hashlib.sha256(
             (
                 f"{self.POOL_ALGO_VERSION}|"
@@ -139,6 +182,7 @@ class DailyFeedPoolService:
                 f"{self.RETAIN_RATIO}|"
                 f"{sorted(self.SOURCE_TARGETS.items())}|"
                 f"{self.STRONG_GENRE_MAX_GENRES}"
+                f"|profile:{profile_version}"
             ).encode("utf-8")
         ).hexdigest()
         return f"{self.POOL_ALGO_VERSION}-{digest[:10]}"
