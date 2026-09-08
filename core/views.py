@@ -3371,7 +3371,33 @@ class MovieSearchView(generics.ListAPIView):
         return qs
 
     def _build_title_boost_annotations(self, normalized_query):
+        if not normalized_query:
+            no_match = Q(pk__isnull=True)
+            return {
+                name: Case(
+                    When(no_match, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+                for name in (
+                    "exact_title_match",
+                    "complete_word_title_match",
+                    "prefix_title_match",
+                    "year_match",
+                )
+            }
+
         exact_title_filter = Q(title_english_search=normalized_query) | Q(title_spanish_search=normalized_query)
+        complete_word_title_filter = (
+            Q(title_english_search=normalized_query)
+            | Q(title_english_search__startswith=f"{normalized_query} ")
+            | Q(title_english_search__endswith=f" {normalized_query}")
+            | Q(title_english_search__contains=f" {normalized_query} ")
+            | Q(title_spanish_search=normalized_query)
+            | Q(title_spanish_search__startswith=f"{normalized_query} ")
+            | Q(title_spanish_search__endswith=f" {normalized_query}")
+            | Q(title_spanish_search__contains=f" {normalized_query} ")
+        )
         prefix_title_filter = Q(title_english_search__startswith=normalized_query) | Q(title_spanish_search__startswith=normalized_query)
         year_terms = [int(term) for term in split_search_terms(normalized_query) if term.isdigit()]
         year_filter = Q(release_year__in=year_terms) if year_terms else Q(pk__isnull=True)
@@ -3379,6 +3405,11 @@ class MovieSearchView(generics.ListAPIView):
         return {
             "exact_title_match": Case(
                 When(exact_title_filter, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            "complete_word_title_match": Case(
+                When(complete_word_title_filter, then=Value(1)),
                 default=Value(0),
                 output_field=IntegerField(),
             ),
@@ -3446,10 +3477,12 @@ class MovieSearchView(generics.ListAPIView):
         release_year_desc = F("release_year").desc(nulls_last=True)
         return qs.order_by(
             "-exact_title_match",
+            "-complete_word_title_match",
             "-prefix_title_match",
             "-year_match",
             "-search_rank",
-            "-display_rating",
+            F("external_rating").desc(nulls_last=True),
+            "-external_votes",
             release_year_desc,
             "-id",
         )

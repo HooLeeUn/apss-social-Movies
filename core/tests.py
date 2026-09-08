@@ -5314,6 +5314,116 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertIn(matched.id, result_ids)
 
+    def test_movie_search_prioritizes_exact_then_complete_word_then_prefix_title(self):
+        exact = self._create_movie("Duna", external_rating=6.0)
+        complete_word = self._create_movie("La Duna", external_rating=8.0)
+        prefix = self._create_movie(
+            "Dunamis",
+            director="Duna",
+            external_rating=10.0,
+        )
+
+        response = self.client.get(self.search_url, {"q": "Duna"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:3], [exact.id, complete_word.id, prefix.id])
+
+    def test_movie_search_keeps_year_match_for_explicit_year_query(self):
+        requested_year = self._create_movie("Duna", release_year=2021)
+        self._create_movie("Duna", release_year=1984)
+
+        response = self.client.get(self.search_url, {"q": "Duna 2021"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], requested_year.id)
+
+    def test_movie_search_orders_rating_before_votes_for_textual_ties(self):
+        higher_rating = self._create_movie(
+            "Movie A",
+            director="Shared Search",
+            external_rating=9.0,
+            external_votes=1000,
+        )
+        self._create_movie(
+            "Movie B",
+            director="Shared Search",
+            external_rating=8.5,
+            external_votes=50000,
+        )
+
+        response = self.client.get(self.search_url, {"q": "Shared Search"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], higher_rating.id)
+
+    def test_movie_search_uses_votes_to_break_equal_rating_ties(self):
+        most_voted = self._create_movie(
+            "Movie A",
+            director="Equal Rating Search",
+            external_rating=8.5,
+            external_votes=50000,
+        )
+        self._create_movie(
+            "Movie B",
+            director="Equal Rating Search",
+            external_rating=8.5,
+            external_votes=1000,
+        )
+
+        response = self.client.get(self.search_url, {"q": "Equal Rating Search"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], most_voted.id)
+
+    def test_movie_search_places_null_rating_after_equivalent_rated_movie(self):
+        rated = self._create_movie(
+            "Rated Movie",
+            director="Nullable Rating Search",
+            external_rating=7.0,
+        )
+        self._create_movie(
+            "Unrated Movie",
+            director="Nullable Rating Search",
+            external_rating=None,
+            external_votes=50000,
+        )
+
+        response = self.client.get(self.search_url, {"q": "Nullable Rating Search"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"][0]["id"], rated.id)
+
+    def test_movie_search_treats_zero_as_a_valid_lowest_rating(self):
+        zero_rating = self._create_movie(
+            "Zero Movie",
+            director="Zero Rating Search",
+            external_rating=0,
+            external_votes=1000,
+        )
+        unrated = self._create_movie(
+            "Null Movie",
+            director="Zero Rating Search",
+            external_rating=None,
+            external_votes=50000,
+        )
+
+        response = self.client.get(self.search_url, {"q": "Zero Rating Search"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertLess(result_ids.index(zero_rating.id), result_ids.index(unrated.id))
+
+    def test_movie_search_still_matches_existing_director_and_cast_vector(self):
+        director_match = self._create_movie("Director Result", director="Denis Villeneuve")
+        cast_match = self._create_movie("Cast Result", cast_members="Rebecca Ferguson")
+
+        director_response = self.client.get(self.search_url, {"q": "Denis Villeneuve"})
+        cast_response = self.client.get(self.search_url, {"q": "Rebecca Ferguson"})
+
+        self.assertIn(director_match.id, [movie["id"] for movie in director_response.data["results"]])
+        self.assertIn(cast_match.id, [movie["id"] for movie in cast_response.data["results"]])
+
     def test_autocomplete_still_uses_autocomplete_serializer_without_search_vector(self):
         matched = self._create_movie("The Matrix", title_spanish="Matrix", release_year=1999)
 
