@@ -5648,6 +5648,76 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         result_ids = [movie["id"] for movie in response.data["results"]]
         self.assertEqual(result_ids[:2], [title_match.id, metadata_match.id])
 
+    def test_autocomplete_ranks_exact_then_complete_word_then_prefix(self):
+        prefix = self._create_movie(
+            "Dunamis",
+            release_year=2025,
+            external_rating=9.8,
+            external_votes=900000,
+        )
+        complete_word = self._create_movie(
+            "La Duna",
+            release_year=2024,
+            external_rating=9.5,
+            external_votes=800000,
+        )
+        exact = self._create_movie(
+            "Duna",
+            release_year=1984,
+            external_rating=6.3,
+            external_votes=100,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "duna", "limit": 10},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertEqual(result_ids[:3], [exact.id, complete_word.id, prefix.id])
+        self.assertIn(prefix.id, result_ids)
+
+    def test_autocomplete_uses_external_rating_before_external_votes(self):
+        higher_rating = self._create_movie(
+            "Duna Roja",
+            external_rating=9.0,
+            external_votes=10,
+        )
+        more_votes = self._create_movie(
+            "Duna Azul",
+            external_rating=8.5,
+            external_votes=100000,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "duna", "limit": 10},
+        )
+
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertLess(result_ids.index(higher_rating.id), result_ids.index(more_votes.id))
+
+    def test_autocomplete_uses_external_votes_for_equal_ratings(self):
+        fewer_votes = self._create_movie(
+            "Duna Clara",
+            external_rating=8.5,
+            external_votes=100,
+        )
+        more_votes = self._create_movie(
+            "Duna Oscura",
+            external_rating=8.5,
+            external_votes=1000,
+        )
+
+        response = self.client.get(
+            self.url,
+            {"autocomplete": "true", "q": "duna", "limit": 10},
+        )
+
+        result_ids = [movie["id"] for movie in response.data["results"]]
+        self.assertLess(result_ids.index(more_votes.id), result_ids.index(fewer_votes.id))
+
     def test_autocomplete_paginates_without_capping_total_results_to_limit(self):
         for index in range(5):
             self._create_movie(f"Matrix Infinite {index}", release_year=1999 + index)
@@ -5845,7 +5915,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
             },
         )
 
-    def test_autocomplete_adds_recency_score_only_without_explicit_year(self):
+    def test_autocomplete_uses_release_year_after_external_rating_and_votes(self):
         older = self._create_movie("Matrix Recency", release_year=1996)
         recent = self._create_movie("Matrix Recency", release_year=2024)
 
@@ -5859,13 +5929,7 @@ class MovieListViewSearchAndFiltersTests(TestCase):
         self.assertEqual(result_ids[:2], [recent.id, older.id])
 
         qs = build_movie_autocomplete_fast_queryset(Movie.objects.all(), "matrix recency")
-        self.assertIn("recency_score", qs.query.annotations)
-
-        qs_with_year = build_movie_autocomplete_fast_queryset(
-            Movie.objects.all(),
-            "matrix recency 1996",
-        )
-        self.assertNotIn("recency_score", qs_with_year.query.annotations)
+        self.assertNotIn("recency_score", qs.query.annotations)
 
     def test_autocomplete_splits_year_terms_into_release_year_filter(self):
         titanic_1997 = self._create_movie("Titanic", release_year=1997)

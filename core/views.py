@@ -602,16 +602,81 @@ def _build_autocomplete_group_match(terms, fields):
     return _build_autocomplete_terms_filter(text_terms, fields)
 
 
+def _build_title_boost_annotations(normalized_query):
+    """Build local-column title ranking signals shared by movie searches."""
+    if not normalized_query:
+        no_match = Q(pk__isnull=True)
+        return {
+            name: Case(
+                When(no_match, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+            for name in (
+                "exact_title_match",
+                "complete_word_title_match",
+                "prefix_title_match",
+            )
+        }
+
+    exact_title_filter = Q(title_english_search=normalized_query) | Q(
+        title_spanish_search=normalized_query
+    )
+    complete_word_title_filter = (
+        Q(title_english_search=normalized_query)
+        | Q(title_english_search__startswith=f"{normalized_query} ")
+        | Q(title_english_search__endswith=f" {normalized_query}")
+        | Q(title_english_search__contains=f" {normalized_query} ")
+        | Q(title_spanish_search=normalized_query)
+        | Q(title_spanish_search__startswith=f"{normalized_query} ")
+        | Q(title_spanish_search__endswith=f" {normalized_query}")
+        | Q(title_spanish_search__contains=f" {normalized_query} ")
+    )
+    prefix_title_filter = Q(title_english_search__startswith=normalized_query) | Q(
+        title_spanish_search__startswith=normalized_query
+    )
+    return {
+        "exact_title_match": Case(
+            When(exact_title_filter, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+        "complete_word_title_match": Case(
+            When(complete_word_title_filter, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+        "prefix_title_match": Case(
+            When(prefix_title_filter, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+    }
+
+
+def _autocomplete_relevance_ordering():
+    return (
+        "-exact_title_match",
+        "-complete_word_title_match",
+        "-prefix_title_match",
+        "-autocomplete_title_match",
+        "-autocomplete_director_match",
+        F("external_rating").desc(nulls_last=True),
+        "-external_votes",
+        F("release_year").desc(nulls_last=True),
+        "-id",
+    )
+
+
 def _order_autocomplete_fast_queryset(queryset, terms, year_terms=None):
-    year_terms = year_terms or []
     title_fields = _map_autocomplete_fields(("title_spanish", "title_english"))
     director_fields = _map_autocomplete_fields(("director",))
     title_match = _build_autocomplete_group_match(terms, title_fields)
     director_match = _build_autocomplete_group_match(terms, director_fields)
-    release_year_desc = F("release_year").desc(nulls_last=True)
-    queryset, recency_ordering = _get_autocomplete_recency_ordering(queryset, year_terms)
+    normalized_query = " ".join(terms)
 
     return queryset.annotate(
+        **_build_title_boost_annotations(normalized_query),
         autocomplete_title_match=Case(
             When(title_match, then=Value(1)),
             default=Value(0),
@@ -622,13 +687,7 @@ def _order_autocomplete_fast_queryset(queryset, terms, year_terms=None):
             default=Value(0),
             output_field=IntegerField(),
         ),
-    ).order_by(
-        "-autocomplete_title_match",
-        "-autocomplete_director_match",
-        *recency_ordering,
-        release_year_desc,
-        "-id",
-    )
+    ).order_by(*_autocomplete_relevance_ordering())
 
 
 def build_movie_autocomplete_fast_queryset(queryset, search):
@@ -662,12 +721,21 @@ def build_movie_autocomplete_extended_queryset(queryset, search, fast_queryset=N
     extended_queryset = _apply_autocomplete_year_filters(queryset, year_terms).filter(filters)
     if fast_queryset is not None:
         extended_queryset = extended_queryset.exclude(pk__in=fast_queryset.values("pk"))
-    release_year_desc = F("release_year").desc(nulls_last=True)
-    extended_queryset, recency_ordering = _get_autocomplete_recency_ordering(
-        extended_queryset,
-        year_terms,
-    )
-    return extended_queryset.order_by(*recency_ordering, release_year_desc, "-id")
+    title_fields = _map_autocomplete_fields(("title_spanish", "title_english"))
+    director_fields = _map_autocomplete_fields(("director",))
+    return extended_queryset.annotate(
+        **_build_title_boost_annotations(" ".join(text_terms)),
+        autocomplete_title_match=Case(
+            When(_build_autocomplete_group_match(text_terms, title_fields), then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+        autocomplete_director_match=Case(
+            When(_build_autocomplete_group_match(text_terms, director_fields), then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        ),
+    ).order_by(*_autocomplete_relevance_ordering())
 
 
 def apply_movie_autocomplete_search(queryset, search):
@@ -3371,59 +3439,15 @@ class MovieSearchView(generics.ListAPIView):
         return qs
 
     def _build_title_boost_annotations(self, normalized_query):
-        if not normalized_query:
-            no_match = Q(pk__isnull=True)
-            return {
-                name: Case(
-                    When(no_match, then=Value(1)),
-                    default=Value(0),
-                    output_field=IntegerField(),
-                )
-                for name in (
-                    "exact_title_match",
-                    "complete_word_title_match",
-                    "prefix_title_match",
-                    "year_match",
-                )
-            }
-
-        exact_title_filter = Q(title_english_search=normalized_query) | Q(title_spanish_search=normalized_query)
-        complete_word_title_filter = (
-            Q(title_english_search=normalized_query)
-            | Q(title_english_search__startswith=f"{normalized_query} ")
-            | Q(title_english_search__endswith=f" {normalized_query}")
-            | Q(title_english_search__contains=f" {normalized_query} ")
-            | Q(title_spanish_search=normalized_query)
-            | Q(title_spanish_search__startswith=f"{normalized_query} ")
-            | Q(title_spanish_search__endswith=f" {normalized_query}")
-            | Q(title_spanish_search__contains=f" {normalized_query} ")
-        )
-        prefix_title_filter = Q(title_english_search__startswith=normalized_query) | Q(title_spanish_search__startswith=normalized_query)
+        annotations = _build_title_boost_annotations(normalized_query)
         year_terms = [int(term) for term in split_search_terms(normalized_query) if term.isdigit()]
         year_filter = Q(release_year__in=year_terms) if year_terms else Q(pk__isnull=True)
-
-        return {
-            "exact_title_match": Case(
-                When(exact_title_filter, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            "complete_word_title_match": Case(
-                When(complete_word_title_filter, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            "prefix_title_match": Case(
-                When(prefix_title_filter, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            "year_match": Case(
-                When(year_filter, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-        }
+        annotations["year_match"] = Case(
+            When(year_filter, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        )
+        return annotations
 
     def get_queryset(self):
         raw_query = (self.request.query_params.get("q") or self.request.query_params.get("search") or "").strip()
