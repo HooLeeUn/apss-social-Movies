@@ -70,7 +70,6 @@ from .models import (
     VideoCommentReaction,
     ContactCategory,
     ContactMessage,
-    ContactRecipient,
 )
 from .permissions import IsAuthorOrReadOnly, IsCommentAuthorOrReadOnly
 from .video_comments import validate_video_upload
@@ -137,28 +136,42 @@ class ContactView(APIView):
         ContactCategory.COMMERCIAL: "Commercial",
         ContactCategory.REQUESTS_SUGGESTIONS: "Requests and Suggestions",
     }
+    category_recipient_settings = {
+        ContactCategory.TECHNICAL: "CONTACT_EMAIL_SUPPORT",
+        ContactCategory.COMMERCIAL: "CONTACT_EMAIL_COMMERCIAL",
+        ContactCategory.REQUESTS_SUGGESTIONS: "CONTACT_EMAIL_SUGGESTIONS",
+    }
 
     def post(self, request):
         serializer = ContactMessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        recipient = ContactRecipient.objects.filter(
-            category=data["category"], is_active=True
-        ).first()
-        if recipient is None:
-            return Response(
-                {"detail": "No active recipient is configured for this category."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+        recipient_setting = self.category_recipient_settings[data["category"]]
+        recipient_email = getattr(settings, recipient_setting, "").strip()
 
         contact_message = ContactMessage.objects.create(
             user=request.user,
             category=data["category"],
             subject=data["subject"],
             message=data["message"],
-            recipient_email=recipient.email,
+            recipient_email=recipient_email,
         )
+        if not recipient_email:
+            error = f"Contact recipient setting {recipient_setting} is not configured."
+            logger.error(
+                "%s category=%s message_id=%s",
+                error,
+                data["category"],
+                contact_message.pk,
+            )
+            contact_message.email_error = error
+            contact_message.save(update_fields=["email_error"])
+            return Response(
+                {"detail": "No recipient email is configured for this category."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         category_label = self.category_email_labels[data["category"]]
         email_subject = f"[RecCool][{category_label}] {contact_message.subject}"
         email_body = (
@@ -177,7 +190,7 @@ class ContactView(APIView):
                 subject=email_subject,
                 message=email_body,
                 from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[contact_message.recipient_email],
+                recipient_list=[recipient_email],
                 fail_silently=False,
             )
             if sent_count != 1:
@@ -1099,10 +1112,10 @@ class RegisterView(generics.CreateAPIView):
 
         try:
             sent_count = send_mail(
-                subject="Confirma tu email en Social Movies",
+                subject="Confirma tu email en ReCCool",
                 message=(
-                    "Hola,\n\n"
-                    "Para terminar tu registro en Social Movies, confirma tu email desde este enlace:\n"
+                    "Bienvenido a ReCCool\n\n"
+                    "Para terminar tu registro, confirma tu email desde este enlace:\n"
                     f"{confirmation_url}\n\n"
                     "El enlace vence en 24 horas."
                 ),
