@@ -24,6 +24,7 @@ from .models import (
     UserDirectorPreference,
     StreamingProviderLink,
     VideoComment,
+    ContentReport,
 )
 
 
@@ -408,9 +409,10 @@ class VideoCommentAdmin(admin.ModelAdmin):
         "duration_seconds",
         "mime_type",
         "file_size",
+        "is_hidden",
         "created_at",
     )
-    list_filter = ("mime_type", "created_at")
+    list_filter = ("is_hidden", "mime_type", "created_at")
     search_fields = ("user__username", "movie__title_spanish", "movie__title_english")
     readonly_fields = (
         "user",
@@ -432,6 +434,24 @@ class VideoCommentAdmin(admin.ModelAdmin):
     def delete_queryset(self, request, queryset):
         for obj in queryset.select_related("user", "movie"):
             obj.delete()
+
+
+@admin.register(ContentReport)
+class ContentReportAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "reporter", "reported_user", "content_type", "object_id",
+        "reason", "status", "created_at", "reviewed_at", "reviewed_by",
+    )
+    list_filter = ("status", "reason", "content_type", "created_at")
+    search_fields = ("reporter__username", "reported_user__username")
+    readonly_fields = ("reporter", "reported_user", "content_type", "object_id", "reason", "details", "created_at")
+    list_select_related = ("reporter", "reported_user", "reviewed_by")
+
+    def save_model(self, request, obj, form, change):
+        if change and "status" in form.changed_data and obj.status != ContentReport.Status.PENDING:
+            obj.reviewed_at = timezone.now()
+            obj.reviewed_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(StreamingProviderLink)

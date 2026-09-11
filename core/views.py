@@ -40,6 +40,7 @@ from .serializers import (
     MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
     OnboardingUpdateSerializer,
     ContactMessageCreateSerializer,
+    ContentReportCreateSerializer,
 )
 from .models import (
     AppBranding,
@@ -1235,7 +1236,9 @@ class RegisterConfirmEmailView(APIView):
             profile, _ = Profile.objects.get_or_create(user=user)
             profile.birth_date = pending_registration.birth_date
             profile.birth_date_locked = True
-            profile.save(update_fields=["birth_date", "birth_date_locked"])
+            profile.terms_accepted_at = pending_registration.terms_accepted_at
+            profile.terms_version = pending_registration.terms_version
+            profile.save(update_fields=["birth_date", "birth_date_locked", "terms_accepted_at", "terms_version"])
             pending_registration.delete()
 
         return self._frontend_redirect("1")
@@ -2330,7 +2333,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = (
-            VideoComment.objects.filter(movie_id=self.kwargs["pk"])
+            VideoComment.objects.visible().filter(movie_id=self.kwargs["pk"])
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(self.request.user)
             .annotate(followers_count=Count("user__followers", distinct=True))
@@ -2357,7 +2360,7 @@ class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
     http_method_names = ["get", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = VideoComment.objects.select_related("user", "user__profile", "movie").with_reaction_stats(self.request.user)
+        queryset = VideoComment.objects.visible().select_related("user", "user__profile", "movie").with_reaction_stats(self.request.user)
         return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
 
     def perform_destroy(self, instance):
@@ -2371,7 +2374,7 @@ class VideoCommentReactionView(APIView):
 
     def get_video_comment(self, pk):
         queryset = filter_out_authors_who_blocked_viewer(
-            VideoComment.objects.all(),
+            VideoComment.objects.visible(),
             self.request.user,
             author_field="user",
         )
@@ -2436,6 +2439,13 @@ class VideoCommentReactionView(APIView):
             user=request.user,
         ).delete()
         return Response(self.response_data(video_comment), status=status.HTTP_200_OK)
+
+
+class ContentReportCreateView(generics.CreateAPIView):
+    serializer_class = ContentReportCreateSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["post", "options"]
+
 
 class PostCommentsListCreateView(MovieCommentsListCreateView):
     deprecated_warning = '299 - "Deprecated endpoint. Use /api/movies/<pk>/comments/ instead."'

@@ -1100,6 +1100,8 @@ class Profile(models.Model):
     )
     detail_movie_tour_version = models.PositiveIntegerField(default=1)
     detail_movie_tour_current_step = models.PositiveIntegerField(null=True, blank=True)
+    terms_accepted_at = models.DateTimeField(null=True, blank=True)
+    terms_version = models.CharField(max_length=50, blank=True, default="")
 
     def __str__(self):
         return f"Profile({self.user.username})"
@@ -1116,6 +1118,8 @@ class PendingUserRegistration(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(db_index=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
+    terms_accepted_at = models.DateTimeField(null=True, blank=True)
+    terms_version = models.CharField(max_length=50, blank=True, default="")
 
     class Meta:
         indexes = [
@@ -1309,6 +1313,9 @@ class Comment(models.Model):
 
 
 class VideoCommentQuerySet(models.QuerySet):
+    def visible(self):
+        return self.filter(is_hidden=False)
+
     def with_reaction_stats(self, user):
         queryset = self.annotate(
             likes_count=Count(
@@ -1341,6 +1348,7 @@ class VideoComment(models.Model):
     duration_seconds = models.FloatField()
     mime_type = models.CharField(max_length=100)
     file_size = models.PositiveBigIntegerField()
+    is_hidden = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1363,6 +1371,46 @@ class VideoComment(models.Model):
 
     def __str__(self):
         return f"VideoComment({self.user_id} -> {self.movie_id})"
+
+
+class ContentReport(models.Model):
+    class ContentType(models.TextChoices):
+        COMMENT = "comment", "Comment"
+        VIDEO_COMMENT = "video_comment", "Video comment"
+        USER = "user", "User"
+
+    class Reason(models.TextChoices):
+        INAPPROPRIATE_CONTENT = "inappropriate_content", "Inappropriate content"
+        HARASSMENT_OR_THREATS = "harassment_or_threats", "Harassment or threats"
+        SEXUAL_CONTENT = "sexual_content", "Sexual content"
+        SPAM_OR_SCAM = "spam_or_scam", "Spam or scam"
+        HATE_OR_DISCRIMINATION = "hate_or_discrimination", "Hate or discrimination"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        UNDER_REVIEW = "under_review", "Under review"
+        RESOLVED = "resolved", "Resolved"
+        REJECTED = "rejected", "Rejected"
+
+    reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="submitted_reports")
+    reported_user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="received_reports", null=True, blank=True)
+    content_type = models.CharField(max_length=20, choices=ContentType.choices)
+    object_id = models.PositiveBigIntegerField(null=True, blank=True)
+    reason = models.CharField(max_length=30, choices=Reason.choices)
+    details = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="reviewed_content_reports", null=True, blank=True)
+    admin_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["content_type", "object_id", "status"], name="core_report_target_status_idx")]
+
+    def __str__(self):
+        return f"ContentReport({self.pk}, {self.content_type}, {self.status})"
 
 
 class VideoCommentReaction(models.Model):

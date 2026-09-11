@@ -18,9 +18,11 @@ from .views import (
     ProfileFavoritesView, UserProfileFavoritesView, ProfileFavoriteSlotDetailView, ProfilePrivacyView, ProfilePrivacyBlockedUsersView,
     ProfilePrivacyBlockedUserDetailView, LegalPoliciesView, TMDbPersonDetailView,
     ContactView,
+    ContentReportCreateView,
 )
 
 urlpatterns = [
+    path("reports/", ContentReportCreateView.as_view(), name="content-report-create"),
     path("contact/", ContactView.as_view(), name="contact"),
     path("legal/policies/", LegalPoliciesView.as_view(), name="legal-policies"),
     path("branding/", AppBrandingView.as_view(), name="app-branding"),
