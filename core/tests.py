@@ -139,6 +139,14 @@ class PendingUserRegistrationTests(TestCase):
         self.assertFalse(get_user_model().objects.filter(username="availableuser").exists())
         self.assertTrue(PendingUserRegistration.objects.filter(username="availableuser").exists())
         self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "Confirma tu email en ReCCool")
+        self.assertTrue(mail.outbox[0].body.startswith("Bienvenido a ReCCool\n\n"))
+        self.assertIn(
+            "Para terminar tu registro, confirma tu email desde este enlace:",
+            mail.outbox[0].body,
+        )
+        self.assertIn("El enlace vence en 24 horas.", mail.outbox[0].body)
+        self.assertNotIn("Social Movies", mail.outbox[0].body)
         self.assertIn("/api/register/confirm-email/", mail.outbox[0].body)
 
     def test_valid_confirmation_creates_user(self):
