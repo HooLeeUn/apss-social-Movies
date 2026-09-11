@@ -81,6 +81,8 @@ class PendingUserRegistrationTests(TestCase):
             "password": "strongpass123",
             "password_confirmation": "strongpass123",
             "birth_date": "2000-01-01",
+            "accept_terms": True,
+            "terms_version": "test-v1",
         }
 
     def _create_pending(self, username="pendinguser", email="pending@example.com", expires_at=None):

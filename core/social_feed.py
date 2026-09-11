@@ -1061,7 +1061,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def video_created_candidates_queryset(cls, *, actor, viewer):
-        return VideoComment.objects.filter(user_id=actor.id).annotate(
+        return VideoComment.objects.visible().filter(user_id=actor.id).annotate(
             candidate_activity_at=F("created_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_CREATED])
         ).only(
             "id", "user_id", "movie_id", "created_at"
@@ -1483,7 +1483,7 @@ class SocialActivityFeedService:
             movie_id_ref="movie_id",
         )
         return (
-            VideoComment.objects.filter(user_id=actor.id)
+            VideoComment.objects.visible().filter(user_id=actor.id)
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(viewer)
             .annotate(

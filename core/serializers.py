@@ -7,11 +7,13 @@ from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.validators import UniqueValidator
 from .models import (
     AppBranding,
     Comment,
     CommentReaction,
+    ContentReport,
     Friendship,
     Movie,
     MovieListItem,
@@ -884,6 +886,8 @@ class RegisterSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True, allow_blank=False)
     last_name = serializers.CharField(required=True, allow_blank=False)
     birth_date = serializers.DateField(required=True)
+    accept_terms = serializers.BooleanField(write_only=True, required=True)
+    terms_version = serializers.CharField(write_only=True, required=True, allow_blank=False, max_length=50)
 
     class Meta:
         model = User
@@ -896,12 +900,17 @@ class RegisterSerializer(serializers.ModelSerializer):
             "password",
             "password_confirmation",
             "birth_date",
+            "accept_terms",
+            "terms_version",
         ]
         read_only_fields = ["id"]
 
 
     def validate(self, attrs):
         cleanup_expired_pending_registrations()
+
+        if attrs.get("accept_terms") is not True:
+            raise serializers.ValidationError({"accept_terms": "You must accept the Terms and Policies."})
 
         username = attrs.get("username")
         email = attrs.get("email")
@@ -945,6 +954,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        validated_data.pop("accept_terms")
+        validated_data["terms_accepted_at"] = timezone.now()
         validated_data.pop("password_confirmation", None)
         password = validated_data.pop("password")
         username = validated_data["username"]
@@ -960,6 +971,62 @@ class RegisterSerializer(serializers.ModelSerializer):
             **validated_data,
             password=make_password(password),
         )
+
+
+class ContentReportCreateSerializer(serializers.ModelSerializer):
+    type = serializers.ChoiceField(source="content_type", choices=ContentReport.ContentType.choices, write_only=True)
+    reported_user = serializers.IntegerField(required=False, allow_null=True, write_only=True)
+
+    class Meta:
+        model = ContentReport
+        fields = ["id", "type", "object_id", "reported_user", "reason", "details", "status", "created_at"]
+        read_only_fields = ["id", "status", "created_at"]
+        extra_kwargs = {
+            "object_id": {"required": False, "allow_null": True, "write_only": True},
+            "details": {"required": False, "allow_blank": True, "write_only": True},
+            "reason": {"write_only": True},
+        }
+
+    def validate(self, attrs):
+        reporter = self.context["request"].user
+        content_type = attrs["content_type"]
+        object_id = attrs.get("object_id")
+        reported_user_id = attrs.get("reported_user")
+
+        if content_type == ContentReport.ContentType.USER:
+            if object_id is not None or reported_user_id is None:
+                raise serializers.ValidationError("User reports require reported_user and no object_id.")
+            try:
+                target_user = User.objects.get(pk=reported_user_id)
+            except User.DoesNotExist:
+                raise NotFound("The reported user does not exist.")
+            attrs["reported_user"] = target_user
+            duplicate_filter = {"reported_user": target_user, "object_id__isnull": True}
+        else:
+            if object_id is None or reported_user_id is not None:
+                raise serializers.ValidationError("Content reports require object_id and no reported_user.")
+            model = Comment if content_type == ContentReport.ContentType.COMMENT else VideoComment
+            try:
+                target = model.objects.get(pk=object_id)
+            except model.DoesNotExist:
+                raise NotFound("The reported object does not exist.")
+            target_user = target.author if content_type == ContentReport.ContentType.COMMENT else target.user
+            duplicate_filter = {"object_id": object_id, "reported_user__isnull": True}
+
+        if target_user.pk == reporter.pk:
+            raise PermissionDenied("You cannot report yourself or your own content.")
+
+        if ContentReport.objects.filter(
+            reporter=reporter,
+            content_type=content_type,
+            status__in=[ContentReport.Status.PENDING, ContentReport.Status.UNDER_REVIEW],
+            **duplicate_filter,
+        ).exists():
+            raise serializers.ValidationError("An active report for this target already exists.")
+        return attrs
+
+    def create(self, validated_data):
+        return ContentReport.objects.create(reporter=self.context["request"].user, **validated_data)
 
 
 class VideoCommentUserSerializer(serializers.ModelSerializer):
