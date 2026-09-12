@@ -998,7 +998,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def public_comment_candidates_queryset(cls, *, actor_ids, viewer):
-        return Comment.objects.filter(
+        return Comment.objects.visible().filter(
             author_id__in=actor_ids, visibility=Comment.VISIBILITY_PUBLIC
         ).annotate(
             candidate_activity_at=F("created_at"),
@@ -1008,7 +1008,10 @@ class SocialActivityFeedService:
     @classmethod
     def public_reaction_candidates_queryset(cls, *, actor_ids, viewer):
         queryset = (
-            CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+            CommentReaction.objects.filter(
+                comment__visibility=Comment.VISIBILITY_PUBLIC,
+                comment__is_hidden=False,
+            )
             .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
             .exclude(user_id=F("comment__author_id"))
             .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PUBLIC_COMMENT_REACTION]))
@@ -1087,6 +1090,7 @@ class SocialActivityFeedService:
             CommentReaction.objects.filter(
                 comment__visibility=Comment.VISIBILITY_PUBLIC,
                 comment__author_id=viewer.id,
+                comment__is_hidden=False,
             )
             .exclude(user_id=F("comment__author_id"))
             .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
@@ -1564,7 +1568,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def _public_comment_activity_queryset(cls, *, actor_ids, viewer):
-        queryset = Comment.objects.filter(visibility=Comment.VISIBILITY_PUBLIC)
+        queryset = Comment.objects.visible().filter(visibility=Comment.VISIBILITY_PUBLIC)
         if actor_ids is not None:
             queryset = queryset.filter(author_id__in=actor_ids)
         queryset = queryset.select_related("author", "author__profile", "movie")
@@ -1584,7 +1588,10 @@ class SocialActivityFeedService:
 
     @classmethod
     def _public_reaction_activity_queryset(cls, *, actor_ids, viewer):
-        queryset = CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+        queryset = CommentReaction.objects.filter(
+            comment__visibility=Comment.VISIBILITY_PUBLIC,
+            comment__is_hidden=False,
+        )
         if actor_ids is not None:
             queryset = queryset.filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
         queryset = queryset.exclude(user_id=F("comment__author_id"))
