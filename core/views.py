@@ -1008,7 +1008,10 @@ def mark_friend_request_notifications_read(user, friendship_ids=None):
     return updated
 
 def get_current_reaction_notifications_queryset(user):
-    base_queryset = UserNotification.objects.filter(recipient=user)
+    base_queryset = UserNotification.objects.filter(recipient=user).exclude(
+        comment__visibility=Comment.VISIBILITY_PUBLIC,
+        comment__is_hidden=True,
+    )
     reaction_types = {
         UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
         UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
@@ -1057,6 +1060,10 @@ def get_current_reaction_notifications_queryset(user):
 
 
 def filter_comments_visible_to_user(queryset, user):
+    queryset = queryset.exclude(
+        visibility=Comment.VISIBILITY_PUBLIC,
+        is_hidden=True,
+    )
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
         return queryset.filter(visibility=Comment.VISIBILITY_PUBLIC)
@@ -2034,7 +2041,7 @@ class PublicCommentsFeedView(generics.ListAPIView):
             is_friend = Value(False)
 
         queryset = (
-            Comment.objects.filter(
+            Comment.objects.visible().filter(
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
@@ -2209,7 +2216,7 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = (
-            Comment.objects.filter(
+            Comment.objects.visible().filter(
                 movie_id=self.kwargs["pk"],
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
@@ -2462,7 +2469,7 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
+        queryset = Comment.objects.visible().select_related("author", "author__profile", "movie", "target_user")
 
         if self.request.method not in permissions.SAFE_METHODS:
             return annotate_comments_for_user(queryset.filter(author=self.request.user), self.request.user)
@@ -4248,7 +4255,7 @@ class FeedMoviesView(generics.ListAPIView):
 
         movie_ids = [movie.id for movie in page_items]
         comments_count_by_movie = dict(
-            Comment.objects.filter(movie_id__in=movie_ids)
+            Comment.objects.visible().filter(movie_id__in=movie_ids)
             .values_list("movie_id")
             .annotate(total=Count("id"))
         )

@@ -1,14 +1,16 @@
 from datetime import date
+from types import SimpleNamespace
 
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .admin import VideoCommentAdmin
+from .admin import CommentAdmin, ContentReportAdmin, VideoCommentAdmin
 from .models import Comment, ContentReport, Movie, PendingUserRegistration, VideoComment
 
 
@@ -90,6 +92,135 @@ class HiddenVideoCommentTests(TestCase):
         self.hidden.is_hidden = False
         self.hidden.save(update_fields=["is_hidden"])
         self.assertTrue(VideoComment.objects.visible().filter(pk=self.hidden.pk).exists())
+
+
+class ContentReportAdminReviewTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.reporter = user_model.objects.create_user(username="reportadminreporter")
+        self.staff = user_model.objects.create_user(username="reviewer", is_staff=True)
+        self.superuser = user_model.objects.create_superuser(username="superreviewer", password="password")
+        self.normal_user = user_model.objects.create_user(username="notareviewer")
+        self.report = ContentReport.objects.create(
+            reporter=self.reporter,
+            reported_user=self.normal_user,
+            content_type=ContentReport.ContentType.USER,
+            reason=ContentReport.Reason.OTHER,
+        )
+        self.model_admin = ContentReportAdmin(ContentReport, admin.site)
+        self.request = RequestFactory().post("/admin/core/contentreport/")
+        self.request.user = self.staff
+
+    def save_with_status(self, status):
+        report = ContentReport.objects.get(pk=self.report.pk)
+        report.status = status
+        self.model_admin.save_model(
+            self.request,
+            report,
+            SimpleNamespace(changed_data=["status"]),
+            change=True,
+        )
+        return ContentReport.objects.get(pk=self.report.pk)
+
+    def test_entering_review_assigns_staff_but_not_reviewed_at(self):
+        report = self.save_with_status(ContentReport.Status.UNDER_REVIEW)
+        self.assertEqual(report.reviewed_by, self.staff)
+        self.assertIsNone(report.reviewed_at)
+
+    def test_reviewer_choices_only_include_administrators(self):
+        field = self.model_admin.formfield_for_foreignkey(
+            ContentReport._meta.get_field("reviewed_by"), self.request
+        )
+        self.assertSetEqual(
+            set(field.queryset.values_list("pk", flat=True)),
+            {self.staff.pk, self.superuser.pk},
+        )
+        self.assertIn("reviewed_by", self.model_admin.readonly_fields)
+
+    def test_final_decision_sets_timestamp_once_and_preserves_reviewer(self):
+        report = self.save_with_status(ContentReport.Status.UNDER_REVIEW)
+        original_reviewer = report.reviewed_by
+        report = self.save_with_status(ContentReport.Status.RESOLVED)
+        reviewed_at = report.reviewed_at
+        self.assertIsNotNone(reviewed_at)
+        self.assertEqual(report.reviewed_by, original_reviewer)
+
+        report.admin_notes = "Saved again"
+        self.model_admin.save_model(
+            self.request,
+            report,
+            SimpleNamespace(changed_data=["admin_notes"]),
+            change=True,
+        )
+        report.refresh_from_db()
+        self.assertEqual(report.reviewed_at, reviewed_at)
+        self.assertEqual(report.reviewed_by, original_reviewer)
+
+    def test_rejected_decision_sets_timestamp(self):
+        self.save_with_status(ContentReport.Status.UNDER_REVIEW)
+        report = self.save_with_status(ContentReport.Status.REJECTED)
+        self.assertIsNotNone(report.reviewed_at)
+        self.assertEqual(report.reviewed_by, self.staff)
+
+    def test_pending_has_no_review_metadata(self):
+        self.assertIsNone(self.report.reviewed_by)
+        self.assertIsNone(self.report.reviewed_at)
+
+
+class HiddenCommentTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.author = user_model.objects.create_user(username="commentauthor")
+        self.recipient = user_model.objects.create_user(username="commentrecipient")
+        self.movie = Movie.objects.create(
+            author=self.author,
+            title_english="Comment moderation movie",
+            type=Movie.MOVIE,
+            release_year=2025,
+        )
+        self.visible = Comment.objects.create(author=self.author, movie=self.movie, body="visible")
+        self.hidden = Comment.objects.create(
+            author=self.author, movie=self.movie, body="hidden", is_hidden=True
+        )
+        self.directed = Comment.objects.create(
+            author=self.author,
+            target_user=self.recipient,
+            movie=self.movie,
+            body="directed",
+            visibility=Comment.VISIBILITY_MENTIONED,
+            is_hidden=True,
+        )
+        self.client = APIClient()
+
+    def test_hidden_public_comment_is_excluded_but_persisted_and_restorable(self):
+        response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.pk}))
+        self.assertEqual([item["id"] for item in response.data["results"]], [self.visible.pk])
+        self.assertEqual(
+            self.client.get(reverse("comment-detail", kwargs={"pk": self.hidden.pk})).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertTrue(Comment.objects.filter(pk=self.hidden.pk).exists())
+
+        self.hidden.is_hidden = False
+        self.hidden.save(update_fields=["is_hidden"])
+        response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.pk}))
+        self.assertIn(self.hidden.pk, [item["id"] for item in response.data["results"]])
+
+    def test_directed_visibility_semantics_are_unchanged(self):
+        self.client.force_authenticate(self.recipient)
+        response = self.client.get(reverse("directed-comments-received"))
+        self.assertIn(self.directed.pk, [item["id"] for item in response.data["results"]])
+        self.assertEqual(self.directed.visibility, Comment.VISIBILITY_MENTIONED)
+
+    def test_comment_admin_exposes_hidden_controls(self):
+        self.assertIn("is_hidden", CommentAdmin.list_display)
+        self.assertIn("is_hidden", CommentAdmin.list_filter)
+
+
+class ModerationTimezoneTests(TestCase):
+    def test_colombia_timezone_remains_aware(self):
+        self.assertEqual(settings.TIME_ZONE, "America/Bogota")
+        self.assertIs(settings.USE_TZ, True)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")

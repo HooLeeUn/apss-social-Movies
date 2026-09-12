@@ -1,7 +1,8 @@
 from django.contrib import admin
+from django.contrib.auth import get_user_model
 from django import forms
 from django.utils.html import format_html
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q
 from django.utils import timezone
 from .models import (
     AppBranding,
@@ -101,9 +102,9 @@ class FriendshipAdmin(admin.ModelAdmin):
 
 @admin.register(Comment)
 class CommentAdmin(admin.ModelAdmin):
-    list_display = ("id", "movie", "author", "visibility", "target_user", "created_at", "updated_at")
+    list_display = ("id", "movie", "author", "visibility", "target_user", "is_hidden", "created_at", "updated_at")
     search_fields = ("body", "author__username", "target_user__username", "movie__title_english", "movie__title_spanish")
-    list_filter = ("visibility", "created_at")
+    list_filter = ("visibility", "is_hidden", "created_at")
     autocomplete_fields = ("movie", "author", "target_user")
     list_select_related = ("movie", "author", "target_user")
 
@@ -444,13 +445,35 @@ class ContentReportAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "reason", "content_type", "created_at")
     search_fields = ("reporter__username", "reported_user__username")
-    readonly_fields = ("reporter", "reported_user", "content_type", "object_id", "reason", "details", "created_at")
+    readonly_fields = (
+        "reporter", "reported_user", "content_type", "object_id", "reason",
+        "details", "created_at", "reviewed_at", "reviewed_by",
+    )
     list_select_related = ("reporter", "reported_user", "reviewed_by")
 
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "reviewed_by":
+            kwargs["queryset"] = get_user_model().objects.filter(
+                Q(is_staff=True) | Q(is_superuser=True)
+            )
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
     def save_model(self, request, obj, form, change):
-        if change and "status" in form.changed_data and obj.status != ContentReport.Status.PENDING:
+        previous_status = None
+        if change and obj.pk:
+            previous_status = ContentReport.objects.only("status").get(pk=obj.pk).status
+
+        status_changed = change and "status" in form.changed_data
+        if status_changed and previous_status == ContentReport.Status.PENDING and obj.status == ContentReport.Status.UNDER_REVIEW:
+            if obj.reviewed_by_id is None and (request.user.is_staff or request.user.is_superuser):
+                obj.reviewed_by = request.user
+        elif (
+            status_changed
+            and previous_status == ContentReport.Status.UNDER_REVIEW
+            and obj.status in {ContentReport.Status.RESOLVED, ContentReport.Status.REJECTED}
+            and obj.reviewed_at is None
+        ):
             obj.reviewed_at = timezone.now()
-            obj.reviewed_by = request.user
         super().save_model(request, obj, form, change)
 
 

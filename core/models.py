@@ -266,6 +266,7 @@ class MovieQuerySet(models.QuerySet):
     def with_comment_stats(self):
         comments_count_subquery = (
             Comment.objects.filter(movie_id=OuterRef("pk"))
+            .exclude(visibility=Comment.VISIBILITY_PUBLIC, is_hidden=True)
             .values("movie_id")
             .annotate(total=Count("id"))
             .values("total")[:1]
@@ -1227,6 +1228,13 @@ class UserVisibilityBlock(models.Model):
 
 class CommentQuerySet(models.QuerySet):
 
+    def visible(self):
+        """Exclude moderated public comments without affecting directed messages."""
+        return self.exclude(
+            visibility=Comment.VISIBILITY_PUBLIC,
+            is_hidden=True,
+        )
+
     def with_reaction_stats(self, user):
         qs = self.annotate(
             likes_count=Count("reactions", filter=Q(reactions__reaction_type=CommentReaction.REACT_LIKE), distinct=True),
@@ -1271,6 +1279,7 @@ class Comment(models.Model):
         default=VISIBILITY_PUBLIC,
     )
     is_read = models.BooleanField(default=False)
+    is_hidden = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
