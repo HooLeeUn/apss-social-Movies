@@ -93,6 +93,7 @@ from .visibility import (
     filter_out_users_with_any_restriction,
     filter_out_users_who_restricted_viewer,
     has_restricted_viewer,
+    restricted_user_ids,
     restricted_profile_response,
     users_have_any_restriction,
 )
@@ -1805,14 +1806,12 @@ class FriendsListView(ListAPIView):
     serializer_class = FriendshipSerializer
 
     def get_queryset(self):
-        restricting_user_ids = UserVisibilityBlock.objects.filter(
-            blocked_user=self.request.user,
-        ).values_list("owner_id", flat=True)
+        hidden_user_ids = restricted_user_ids(self.request.user)
         return (
             Friendship.objects
             .filter(status=Friendship.STATUS_ACCEPTED)
             .filter(Q(user1=self.request.user) | Q(user2=self.request.user))
-            .exclude(Q(user1_id__in=restricting_user_ids) | Q(user2_id__in=restricting_user_ids))
+            .exclude(Q(user1_id__in=hidden_user_ids) | Q(user2_id__in=hidden_user_ids))
             .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
         )
 
