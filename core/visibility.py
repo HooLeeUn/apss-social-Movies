@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, When
 
 from .models import Friendship, Profile, UserVisibilityBlock
 
@@ -7,14 +7,44 @@ from .models import Friendship, Profile, UserVisibilityBlock
 User = get_user_model()
 
 
+def are_users_restricted(user_a, user_b):
+    """Return whether either user has restricted the other.
+
+    The persisted row remains directional so its owner can remove only their
+    own restriction.  Visibility, however, is deliberately bilateral.
+    """
+    if not user_a or not user_b:
+        return False
+    if not getattr(user_a, "is_authenticated", False) or not getattr(user_b, "is_authenticated", False):
+        return False
+    if user_a.id == user_b.id:
+        return False
+    return UserVisibilityBlock.objects.filter(
+        Q(owner_id=user_a.id, blocked_user_id=user_b.id)
+        | Q(owner_id=user_b.id, blocked_user_id=user_a.id)
+    ).exists()
+
+
+def restricted_user_ids(user):
+    """Return IDs connected to ``user`` by a restriction in either direction."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return User.objects.none().values_list("id", flat=True)
+    return (
+        UserVisibilityBlock.objects.filter(Q(owner_id=user.id) | Q(blocked_user_id=user.id))
+        .annotate(
+            restricted_user_id=Case(
+                When(owner_id=user.id, then=F("blocked_user_id")),
+                default=F("owner_id"),
+                output_field=IntegerField(),
+            )
+        )
+        .values_list("restricted_user_id", flat=True)
+    )
+
+
 def has_restricted_viewer(target_user, viewer):
-    if target_user is None:
-        return False
-    if not viewer or not getattr(viewer, "is_authenticated", False):
-        return False
-    if viewer.id == target_user.id:
-        return False
-    return UserVisibilityBlock.objects.filter(owner_id=target_user.id, blocked_user_id=viewer.id).exists()
+    """Backward-compatible name for the bilateral visibility check."""
+    return are_users_restricted(target_user, viewer)
 
 
 is_blocked_from_user_content = has_restricted_viewer
@@ -32,7 +62,7 @@ def annotate_restricted_current_user_for_users(users, viewer, attr_name="restric
             setattr(user, attr_name, False)
         return users
     user_ids = {user.id for user in users if getattr(user, "id", None) and user.id != viewer.id}
-    restricted_ids = set(UserVisibilityBlock.objects.filter(owner_id__in=user_ids, blocked_user_id=viewer.id).values_list("owner_id", flat=True))
+    restricted_ids = set(restricted_user_ids(viewer).filter(restricted_user_id__in=user_ids))
     for user in users:
         setattr(user, attr_name, user.id in restricted_ids)
     return users
@@ -51,8 +81,8 @@ def filter_out_users_who_restricted_viewer(queryset, viewer):
     if not viewer or not getattr(viewer, "is_authenticated", False):
         return queryset
     blocks = UserVisibilityBlock.objects.filter(
-        owner_id=OuterRef("id"),
-        blocked_user_id=viewer.id,
+        Q(owner_id=OuterRef("id"), blocked_user_id=viewer.id)
+        | Q(owner_id=viewer.id, blocked_user_id=OuterRef("id"))
     )
     return queryset.annotate(_viewer_restricted_by_user=Exists(blocks)).filter(_viewer_restricted_by_user=False)
 
@@ -61,22 +91,10 @@ def filter_out_users_with_any_restriction(queryset, viewer):
     """Exclude users with an active visibility restriction in either direction."""
     if not viewer or not getattr(viewer, "is_authenticated", False):
         return queryset
-    restricted_user_ids = UserVisibilityBlock.objects.filter(
-        owner_id=viewer.id,
-    ).values_list("blocked_user_id", flat=True)
-    restricting_user_ids = UserVisibilityBlock.objects.filter(
-        blocked_user_id=viewer.id,
-    ).values_list("owner_id", flat=True)
-    return queryset.exclude(id__in=restricted_user_ids).exclude(id__in=restricting_user_ids)
+    return queryset.exclude(id__in=restricted_user_ids(viewer))
 
 
-def users_have_any_restriction(user_a, user_b):
-    if not user_a or not user_b or user_a.id == user_b.id:
-        return False
-    return UserVisibilityBlock.objects.filter(
-        Q(owner_id=user_a.id, blocked_user_id=user_b.id)
-        | Q(owner_id=user_b.id, blocked_user_id=user_a.id)
-    ).exists()
+users_have_any_restriction = are_users_restricted
 
 
 def can_view_user_profile(target_user, viewer):
@@ -110,7 +128,7 @@ def filter_out_authors_who_blocked_viewer(queryset, viewer, author_field="author
         return queryset
 
     blocks = UserVisibilityBlock.objects.filter(
-        owner_id=OuterRef(f"{author_field}_id"),
-        blocked_user_id=viewer.id,
+        Q(owner_id=OuterRef(f"{author_field}_id"), blocked_user_id=viewer.id)
+        | Q(owner_id=viewer.id, blocked_user_id=OuterRef(f"{author_field}_id"))
     )
     return queryset.annotate(_viewer_blocked_by_author=Exists(blocks)).filter(_viewer_blocked_by_author=False)

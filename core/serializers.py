@@ -31,6 +31,7 @@ from .models import (
     VideoCommentReaction,
     ContactCategory,
 )
+from .visibility import are_users_restricted
 
 # Importas tus modelos solo si los necesitas aquí.
 # OJO: para esta versión no necesitas Avg ni consultas en serializer,
@@ -286,7 +287,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated or obj == request.user:
             return False
-        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=request.user).exists()
+        return are_users_restricted(obj, request.user)
 
     def get_avatar(self, obj):
         if hasattr(obj, "profile") and obj.profile.avatar:
@@ -1157,7 +1158,7 @@ class DirectedConversationOtherUserSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated or obj == user:
             return False
-        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=user).exists()
+        return are_users_restricted(obj, user)
 
 
 class DirectedMessageMovieSerializer(serializers.ModelSerializer):
@@ -1308,7 +1309,7 @@ class MeMessageAuthorSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated or obj == user:
             return False
-        return UserVisibilityBlock.objects.filter(owner=obj, blocked_user=user).exists()
+        return are_users_restricted(obj, user)
 
 
 class MeMessageMovieSerializer(DirectedMessageMovieSerializer):
