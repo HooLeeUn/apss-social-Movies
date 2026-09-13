@@ -15,10 +15,10 @@ from .models import (
     Friendship,
     Movie,
     MovieRating,
-    UserVisibilityBlock,
     VideoComment,
     VideoCommentReaction,
 )
+from .visibility import restricted_user_ids
 
 
 SocialFeedScope = Literal["following", "friends", "me"]
@@ -949,12 +949,7 @@ class SocialActivityFeedService:
                 Follow.objects.filter(follower_id=user.id)
                 .values_list("following_id", flat=True)
             )
-            blocked_actor_ids = set(
-                UserVisibilityBlock.objects.filter(
-                    blocked_user_id=user.id,
-                    owner_id__in=actor_ids,
-                ).values_list("owner_id", flat=True)
-            )
+            blocked_actor_ids = set(restricted_user_ids(user))
             return [actor_id for actor_id in actor_ids if actor_id not in blocked_actor_ids]
 
         if scope == cls.SCOPE_FRIENDS:
@@ -973,12 +968,7 @@ class SocialActivityFeedService:
                     )
                 ).values_list("friend_id", flat=True)
             )
-            blocked_actor_ids = set(
-                UserVisibilityBlock.objects.filter(
-                    blocked_user_id=user.id,
-                    owner_id__in=actor_ids,
-                ).values_list("owner_id", flat=True)
-            )
+            blocked_actor_ids = set(restricted_user_ids(user))
             return [actor_id for actor_id in actor_ids if actor_id not in blocked_actor_ids]
 
         # build_feed() valida scope antes de llegar aquí.
@@ -998,7 +988,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def public_comment_candidates_queryset(cls, *, actor_ids, viewer):
-        return Comment.objects.filter(
+        return Comment.objects.visible().filter(
             author_id__in=actor_ids, visibility=Comment.VISIBILITY_PUBLIC
         ).annotate(
             candidate_activity_at=F("created_at"),
@@ -1008,7 +998,10 @@ class SocialActivityFeedService:
     @classmethod
     def public_reaction_candidates_queryset(cls, *, actor_ids, viewer):
         queryset = (
-            CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+            CommentReaction.objects.filter(
+                comment__visibility=Comment.VISIBILITY_PUBLIC,
+                comment__is_hidden=False,
+            )
             .filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
             .exclude(user_id=F("comment__author_id"))
             .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_PUBLIC_COMMENT_REACTION]))
@@ -1028,10 +1021,11 @@ class SocialActivityFeedService:
         """
         if not viewer or not viewer.is_authenticated:
             return queryset
+        hidden_user_ids = restricted_user_ids(viewer)
         return (
             queryset
-            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(comment__author_id__in=hidden_user_ids)
+            .exclude(user_id__in=hidden_user_ids)
         )
 
     @classmethod
@@ -1061,7 +1055,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def video_created_candidates_queryset(cls, *, actor, viewer):
-        return VideoComment.objects.filter(user_id=actor.id).annotate(
+        return VideoComment.objects.visible().filter(user_id=actor.id).annotate(
             candidate_activity_at=F("created_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_CREATED])
         ).only(
             "id", "user_id", "movie_id", "created_at"
@@ -1069,13 +1063,14 @@ class SocialActivityFeedService:
 
     @classmethod
     def video_reaction_candidates_queryset(cls, *, viewer):
+        hidden_user_ids = restricted_user_ids(viewer)
         return (
             VideoCommentReaction.objects.filter(
                 Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
             )
             .exclude(user_id=F("video_comment__user_id"))
-            .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(video_comment__user_id__in=hidden_user_ids)
+            .exclude(user_id__in=hidden_user_ids)
             .annotate(candidate_activity_at=F("updated_at"), candidate_family_rank=Value(cls.LEGACY_FAMILY_RANK[cls.ACTIVITY_VIDEO_REACTION_GIVEN]))
             .only("id", "user_id", "video_comment_id", "created_at", "updated_at")
         )
@@ -1083,14 +1078,16 @@ class SocialActivityFeedService:
     @classmethod
     def _public_received_reaction_rows(cls, *, viewer):
         """Authorized public received rows, before any grouping."""
+        hidden_user_ids = restricted_user_ids(viewer)
         return (
             CommentReaction.objects.filter(
                 comment__visibility=Comment.VISIBILITY_PUBLIC,
                 comment__author_id=viewer.id,
+                comment__is_hidden=False,
             )
             .exclude(user_id=F("comment__author_id"))
-            .exclude(comment__author__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(comment__author_id__in=hidden_user_ids)
+            .exclude(user_id__in=hidden_user_ids)
         )
 
     @classmethod
@@ -1107,11 +1104,12 @@ class SocialActivityFeedService:
     @classmethod
     def _video_received_reaction_rows(cls, *, viewer):
         """Authorized video received rows, before any grouping."""
+        hidden_user_ids = restricted_user_ids(viewer)
         return (
             VideoCommentReaction.objects.filter(video_comment__user_id=viewer.id)
             .exclude(user_id=F("video_comment__user_id"))
-            .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
-            .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+            .exclude(video_comment__user_id__in=hidden_user_ids)
+            .exclude(user_id__in=hidden_user_ids)
         )
 
     @classmethod
@@ -1483,7 +1481,7 @@ class SocialActivityFeedService:
             movie_id_ref="movie_id",
         )
         return (
-            VideoComment.objects.filter(user_id=actor.id)
+            VideoComment.objects.visible().filter(user_id=actor.id)
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(viewer)
             .annotate(
@@ -1564,7 +1562,7 @@ class SocialActivityFeedService:
 
     @classmethod
     def _public_comment_activity_queryset(cls, *, actor_ids, viewer):
-        queryset = Comment.objects.filter(visibility=Comment.VISIBILITY_PUBLIC)
+        queryset = Comment.objects.visible().filter(visibility=Comment.VISIBILITY_PUBLIC)
         if actor_ids is not None:
             queryset = queryset.filter(author_id__in=actor_ids)
         queryset = queryset.select_related("author", "author__profile", "movie")
@@ -1584,7 +1582,10 @@ class SocialActivityFeedService:
 
     @classmethod
     def _public_reaction_activity_queryset(cls, *, actor_ids, viewer):
-        queryset = CommentReaction.objects.filter(comment__visibility=Comment.VISIBILITY_PUBLIC)
+        queryset = CommentReaction.objects.filter(
+            comment__visibility=Comment.VISIBILITY_PUBLIC,
+            comment__is_hidden=False,
+        )
         if actor_ids is not None:
             queryset = queryset.filter(Q(comment__author_id__in=actor_ids) | Q(user_id__in=actor_ids))
         queryset = queryset.exclude(user_id=F("comment__author_id"))
@@ -1655,11 +1656,12 @@ class SocialActivityFeedService:
 
     @classmethod
     def _video_reaction_activity_queryset(cls, *, viewer):
+        hidden_user_ids = restricted_user_ids(viewer)
         queryset = (VideoCommentReaction.objects.filter(
             Q(user_id=viewer.id) | Q(video_comment__user_id=viewer.id)
         ).exclude(user_id=F("video_comment__user_id"))
-          .exclude(video_comment__user__visibility_blocks__blocked_user_id=viewer.id)
-          .exclude(user__visibility_blocks__blocked_user_id=viewer.id)
+          .exclude(video_comment__user_id__in=hidden_user_ids)
+          .exclude(user_id__in=hidden_user_ids)
           .select_related("user", "user__profile", "video_comment", "video_comment__user", "video_comment__user__profile", "video_comment__movie"))
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="video_comment__movie_id").order_by("-updated_at", "-id")
 

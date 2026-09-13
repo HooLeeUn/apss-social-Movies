@@ -81,6 +81,8 @@ class PendingUserRegistrationTests(TestCase):
             "password": "strongpass123",
             "password_confirmation": "strongpass123",
             "birth_date": "2000-01-01",
+            "accept_terms": True,
+            "terms_version": "test-v1",
         }
 
     def _create_pending(self, username="pendinguser", email="pending@example.com", expires_at=None):
@@ -6869,9 +6871,8 @@ class ProfilePrivacyVisibilityTests(TestCase):
 
         self.client.force_authenticate(self.viewer)
         blocked_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
-        self.assertEqual(blocked_response.status_code, status.HTTP_200_OK)
-        self.assertFalse(blocked_response.data["can_view_full_profile"])
-        self.assertTrue(blocked_response.data["is_restricted_by_visited_user"])
+        self.assertEqual(blocked_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(blocked_response.data["code"], "restricted_by_user")
 
         self.client.force_authenticate(self.owner)
         own_response = self.client.get(reverse("user-profile", kwargs={"username": self.owner.username}))
@@ -7070,7 +7071,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         self.assertEqual(after.data["display_rating"], before_display)
         self.assertEqual(after.data["real_ratings_count"], before_count)
 
-    def test_user_search_endpoint_returns_partial_matches_without_self_and_keeps_users_restricted_by_viewer(self):
+    def test_user_search_endpoint_returns_partial_matches_without_self_or_bilaterally_restricted_users(self):
         dennisse = get_user_model().objects.create_user(
             username="Dennisse",
             email="dennisse@example.com",
@@ -7098,7 +7099,7 @@ class ProfilePrivacyVisibilityTests(TestCase):
         usernames = [item["username"] for item in response.data]
         self.assertIn("dennys", usernames)
         self.assertNotIn(self.owner.username, usernames)
-        self.assertIn("Dennisse", usernames)
+        self.assertNotIn("Dennisse", usernames)
         self.assertEqual(set(response.data[0].keys()), {"id", "username", "first_name", "last_name"})
 
     def test_user_search_endpoint_is_case_insensitive(self):
@@ -10267,7 +10268,7 @@ class DeleteMoviesFromCsvCommandTests(TestCase):
 
         self.assertTrue(Movie.objects.filter(id=movie.id).exists())
 
-class DirectionalUserRestrictionVisibilityTests(TestCase):
+class BilateralUserRestrictionVisibilityTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.julian = get_user_model().objects.create_user(username="Julian", email="julian@example.com", password="test1234")
@@ -10300,14 +10301,14 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         self.assertFalse(private_response.data["is_restricted_by_visited_user"])
         self.assertNotEqual(private_response.data.get("code"), "restricted_by_user")
 
-    def test_restriction_is_directional_and_only_filters_visibility_not_relationships(self):
+    def test_restriction_is_bilateral_and_only_filters_visibility_not_relationships(self):
         self.client.force_authenticate(self.julian)
         response = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("me-following")).data])
-        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("social-friends-list")).data])
-        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("user-friends", kwargs={"username": self.julian.username})).data])
-        self.assertIn("Peck", [item["username"] for item in self.client.get(reverse("user-search"), {"q": "Peck"}).data])
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["code"], "restricted_by_user")
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("me-following")).data])
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("social-friends-list")).data])
+        self.assertNotIn("Peck", [item["username"] for item in self.client.get(reverse("user-search"), {"q": "Peck"}).data])
 
         self.client.force_authenticate(self.peck)
         following_response = self.client.get(reverse("me-following"))
@@ -10412,6 +10413,69 @@ class DirectionalUserRestrictionVisibilityTests(TestCase):
         flags = {item["other_user"]["username"]: item["other_user"]["restricted_current_user"] for item in conversations}
         self.assertTrue(flags["Julian"])
         self.assertFalse(flags["Dennisse"])
+
+    def test_public_comments_and_videos_are_hidden_in_both_directions(self):
+        julian_comment = Comment.objects.create(author=self.julian, movie=self.movie, body="Julian public")
+        peck_comment = Comment.objects.create(author=self.peck, movie=self.movie, body="Peck public")
+        julian_video = VideoComment.objects.create(
+            user=self.julian, movie=self.movie,
+            video=SimpleUploadedFile("julian.mp4", b"video", content_type="video/mp4"),
+        )
+        peck_video = VideoComment.objects.create(
+            user=self.peck, movie=self.movie,
+            video=SimpleUploadedFile("peck.mp4", b"video", content_type="video/mp4"),
+        )
+
+        for viewer, hidden_comment, hidden_video in (
+            (self.peck, julian_comment, julian_video),
+            (self.julian, peck_comment, peck_video),
+        ):
+            self.client.force_authenticate(viewer)
+            comments = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.id})).data["results"]
+            videos = self.client.get(reverse("movie-video-comments", kwargs={"pk": self.movie.id})).data["results"]
+            self.assertNotIn(hidden_comment.id, [item["id"] for item in comments])
+            self.assertNotIn(hidden_video.id, [item["id"] for item in videos])
+
+    def test_following_and_friends_activity_hide_each_user_from_the_other(self):
+        julian_rating = MovieRating.objects.create(user=self.julian, movie=self.movie, score=8)
+        peck_rating = MovieRating.objects.create(user=self.peck, movie=self.movie, score=7)
+
+        for viewer, hidden_rating in ((self.peck, julian_rating), (self.julian, peck_rating)):
+            self.client.force_authenticate(viewer)
+            for scope in ("following", "friends"):
+                response = self.client.get(reverse("profile-feed-activity"), {"scope": scope})
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertNotIn(f"rating:{hidden_rating.id}", [item["id"] for item in response.data["results"]])
+
+        self.assertEqual(Follow.objects.filter(follower=self.peck, following=self.julian).count(), 1)
+        self.assertEqual(Follow.objects.filter(follower=self.julian, following=self.peck).count(), 1)
+        self.assertTrue(Friendship.between(self.peck, self.julian).filter(status=Friendship.STATUS_ACCEPTED).exists())
+
+    def test_restricted_list_preserves_direction_and_delete_restores_visibility(self):
+        self.client.force_authenticate(self.julian)
+        julian_list = self.client.get(reverse("profile-privacy-blocked-users"))
+        self.assertEqual([item["username"] for item in julian_list.data], ["Peck"])
+
+        self.client.force_authenticate(self.peck)
+        self.assertEqual(self.client.get(reverse("profile-privacy-blocked-users")).data, [])
+
+        self.client.force_authenticate(self.julian)
+        response = self.client.delete(reverse("profile-privacy-blocked-user-detail", kwargs={"user_id": self.peck.id}))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(
+            self.client.get(reverse("user-profile", kwargs={"username": self.peck.username})).status_code,
+            status.HTTP_200_OK,
+        )
+
+    def test_deleting_own_row_keeps_bilateral_restriction_when_reverse_row_exists(self):
+        UserVisibilityBlock.objects.create(owner=self.peck, blocked_user=self.julian)
+        self.client.force_authenticate(self.julian)
+        response = self.client.delete(reverse("profile-privacy-blocked-user-detail", kwargs={"user_id": self.peck.id}))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(UserVisibilityBlock.objects.filter(owner=self.julian, blocked_user=self.peck).exists())
+        self.assertTrue(UserVisibilityBlock.objects.filter(owner=self.peck, blocked_user=self.julian).exists())
+        profile = self.client.get(reverse("user-profile", kwargs={"username": self.peck.username}))
+        self.assertEqual(profile.status_code, status.HTTP_403_FORBIDDEN)
 
 @override_settings(MEDIA_ROOT="/tmp/apss-test-media", VIDEO_COMMENT_MAX_SIZE_MB=1)
 class MoviePublicCommentOrderingTests(TestCase):

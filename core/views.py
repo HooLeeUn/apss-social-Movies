@@ -40,6 +40,7 @@ from .serializers import (
     MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
     OnboardingUpdateSerializer,
     ContactMessageCreateSerializer,
+    ContentReportCreateSerializer,
 )
 from .models import (
     AppBranding,
@@ -92,6 +93,7 @@ from .visibility import (
     filter_out_users_with_any_restriction,
     filter_out_users_who_restricted_viewer,
     has_restricted_viewer,
+    restricted_user_ids,
     restricted_profile_response,
     users_have_any_restriction,
 )
@@ -1007,7 +1009,10 @@ def mark_friend_request_notifications_read(user, friendship_ids=None):
     return updated
 
 def get_current_reaction_notifications_queryset(user):
-    base_queryset = UserNotification.objects.filter(recipient=user)
+    base_queryset = UserNotification.objects.filter(recipient=user).exclude(
+        comment__visibility=Comment.VISIBILITY_PUBLIC,
+        comment__is_hidden=True,
+    )
     reaction_types = {
         UserNotification.TYPE_PUBLIC_COMMENT_REACTION,
         UserNotification.TYPE_PRIVATE_COMMENT_REACTION,
@@ -1056,6 +1061,10 @@ def get_current_reaction_notifications_queryset(user):
 
 
 def filter_comments_visible_to_user(queryset, user):
+    queryset = queryset.exclude(
+        visibility=Comment.VISIBILITY_PUBLIC,
+        is_hidden=True,
+    )
     queryset = filter_out_authors_who_blocked_viewer(queryset, user, author_field="author")
     if not user or not user.is_authenticated:
         return queryset.filter(visibility=Comment.VISIBILITY_PUBLIC)
@@ -1235,7 +1244,9 @@ class RegisterConfirmEmailView(APIView):
             profile, _ = Profile.objects.get_or_create(user=user)
             profile.birth_date = pending_registration.birth_date
             profile.birth_date_locked = True
-            profile.save(update_fields=["birth_date", "birth_date_locked"])
+            profile.terms_accepted_at = pending_registration.terms_accepted_at
+            profile.terms_version = pending_registration.terms_version
+            profile.save(update_fields=["birth_date", "birth_date_locked", "terms_accepted_at", "terms_version"])
             pending_registration.delete()
 
         return self._frontend_redirect("1")
@@ -1795,14 +1806,12 @@ class FriendsListView(ListAPIView):
     serializer_class = FriendshipSerializer
 
     def get_queryset(self):
-        restricting_user_ids = UserVisibilityBlock.objects.filter(
-            blocked_user=self.request.user,
-        ).values_list("owner_id", flat=True)
+        hidden_user_ids = restricted_user_ids(self.request.user)
         return (
             Friendship.objects
             .filter(status=Friendship.STATUS_ACCEPTED)
             .filter(Q(user1=self.request.user) | Q(user2=self.request.user))
-            .exclude(Q(user1_id__in=restricting_user_ids) | Q(user2_id__in=restricting_user_ids))
+            .exclude(Q(user1_id__in=hidden_user_ids) | Q(user2_id__in=hidden_user_ids))
             .select_related("user1", "user2", "user1__profile", "user2__profile", "requester")
         )
 
@@ -2031,7 +2040,7 @@ class PublicCommentsFeedView(generics.ListAPIView):
             is_friend = Value(False)
 
         queryset = (
-            Comment.objects.filter(
+            Comment.objects.visible().filter(
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
             .select_related("author", "author__profile", "movie", "target_user")
@@ -2206,7 +2215,7 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = (
-            Comment.objects.filter(
+            Comment.objects.visible().filter(
                 movie_id=self.kwargs["pk"],
                 visibility=Comment.VISIBILITY_PUBLIC,
             )
@@ -2330,7 +2339,7 @@ class MovieVideoCommentsListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = (
-            VideoComment.objects.filter(movie_id=self.kwargs["pk"])
+            VideoComment.objects.visible().filter(movie_id=self.kwargs["pk"])
             .select_related("user", "user__profile", "movie")
             .with_reaction_stats(self.request.user)
             .annotate(followers_count=Count("user__followers", distinct=True))
@@ -2357,7 +2366,7 @@ class VideoCommentDetailView(generics.RetrieveDestroyAPIView):
     http_method_names = ["get", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = VideoComment.objects.select_related("user", "user__profile", "movie").with_reaction_stats(self.request.user)
+        queryset = VideoComment.objects.visible().select_related("user", "user__profile", "movie").with_reaction_stats(self.request.user)
         return filter_out_authors_who_blocked_viewer(queryset, self.request.user, author_field="user")
 
     def perform_destroy(self, instance):
@@ -2371,7 +2380,7 @@ class VideoCommentReactionView(APIView):
 
     def get_video_comment(self, pk):
         queryset = filter_out_authors_who_blocked_viewer(
-            VideoComment.objects.all(),
+            VideoComment.objects.visible(),
             self.request.user,
             author_field="user",
         )
@@ -2437,6 +2446,13 @@ class VideoCommentReactionView(APIView):
         ).delete()
         return Response(self.response_data(video_comment), status=status.HTTP_200_OK)
 
+
+class ContentReportCreateView(generics.CreateAPIView):
+    serializer_class = ContentReportCreateSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["post", "options"]
+
+
 class PostCommentsListCreateView(MovieCommentsListCreateView):
     deprecated_warning = '299 - "Deprecated endpoint. Use /api/movies/<pk>/comments/ instead."'
 
@@ -2452,7 +2468,7 @@ class CommentDetailView(generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "put", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        queryset = Comment.objects.select_related("author", "author__profile", "movie", "target_user")
+        queryset = Comment.objects.visible().select_related("author", "author__profile", "movie", "target_user")
 
         if self.request.method not in permissions.SAFE_METHODS:
             return annotate_comments_for_user(queryset.filter(author=self.request.user), self.request.user)
@@ -4238,7 +4254,7 @@ class FeedMoviesView(generics.ListAPIView):
 
         movie_ids = [movie.id for movie in page_items]
         comments_count_by_movie = dict(
-            Comment.objects.filter(movie_id__in=movie_ids)
+            Comment.objects.visible().filter(movie_id__in=movie_ids)
             .values_list("movie_id")
             .annotate(total=Count("id"))
         )
