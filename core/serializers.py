@@ -1045,6 +1045,13 @@ class VideoCommentUserSerializer(serializers.ModelSerializer):
         return None
 
 
+class VideoCommentMovieSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Movie
+        fields = ["id", "title_spanish", "title_english", "type", "image"]
+        read_only_fields = fields
+
+
 class VideoCommentSerializer(serializers.ModelSerializer):
     user = VideoCommentUserSerializer(read_only=True)
     video_url = serializers.SerializerMethodField()
@@ -1073,6 +1080,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         return bool(user and user.is_authenticated and obj.user_id == user.id)
+
+
+class FollowingVideoReactionSerializer(VideoCommentSerializer):
+    """Video comment representation enriched for the following feed."""
+
+    movie = VideoCommentMovieSerializer(read_only=True)
+
+    class Meta(VideoCommentSerializer.Meta):
+        fields = [*VideoCommentSerializer.Meta.fields, "movie"]
+        read_only_fields = fields
 
 
 class VideoCommentUploadSerializer(serializers.Serializer):
