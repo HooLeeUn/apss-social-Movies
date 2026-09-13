@@ -37,7 +37,7 @@ from .serializers import (
     SocialListUserSerializer, PersonalDataSerializer, DirectedConversationSerializer, DirectedConversationMessageSerializer,
     FriendRequestUserSummarySerializer,
     MovieWatchProvidersSerializer,
-    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
+    MovieCreditsSerializer, TMDbPersonBriefSerializer, VideoCommentSerializer, FollowingVideoReactionSerializer, VideoCommentUploadSerializer, VideoCommentReactionSerializer,
     OnboardingUpdateSerializer,
     ContactMessageCreateSerializer,
     ContentReportCreateSerializer,
@@ -2107,6 +2107,28 @@ class ProfileFeedActivityView(generics.ListAPIView):
         context = super().get_serializer_context()
         context["request"] = self.request
         return context
+
+
+class FollowingVideoReactionsView(generics.ListAPIView):
+    """Video comments published by users followed by the authenticated user."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = FollowingVideoReactionSerializer
+    pagination_class = DefaultPagination
+
+    def get_queryset(self):
+        followed_user_ids = Follow.objects.filter(
+            follower=self.request.user,
+        ).values("following_id")
+        return (
+            VideoComment.objects.visible()
+            .filter(user_id__in=followed_user_ids)
+            .exclude(user_id=self.request.user.id)
+            .exclude(user_id__in=restricted_user_ids(self.request.user))
+            .select_related("user", "user__profile", "movie")
+            .with_reaction_stats(self.request.user)
+            .order_by("-created_at", "-id")
+        )
 
 
 class UserProfileActivityView(generics.ListAPIView):
