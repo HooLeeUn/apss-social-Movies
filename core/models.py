@@ -22,6 +22,7 @@ from django.utils import timezone
 
 
 EMAIL_CONFIRMATION_TTL = timedelta(hours=24)
+ACCOUNT_DELETION_TTL = timedelta(hours=24)
 
 
 def normalize_email_address(value):
@@ -392,7 +393,15 @@ class Movie(models.Model):
         (SERIES, "Series"),
     ]
 
-    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="movies")
+    # Catalog entries are shared resources, not user UGC.  If the importing
+    # account is erased, retain the movie without retaining an identity link.
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="movies",
+        null=True,
+        blank=True,
+    )
     title_english = models.CharField(max_length=255)
     title_spanish = models.CharField(max_length=255, null=True, blank=True)
     type = models.CharField(max_length=10, choices=TYPE_CHOICES, null=True, blank=True)
@@ -1188,6 +1197,40 @@ class PendingEmailChange(models.Model):
 
     def __str__(self):
         return f"PendingEmailChange(user_id={self.user_id})"
+
+
+class PendingAccountDeletion(models.Model):
+    """One-use, hashed credential for the public account-deletion flow."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="pending_account_deletions",
+        null=True,
+        blank=True,
+    )
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at", "-id"]
+
+    @staticmethod
+    def hash_token(token):
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def new_token(cls):
+        return secrets.token_urlsafe(32)
+
+    @property
+    def is_active(self):
+        return self.user_id is not None and self.used_at is None and self.expires_at > timezone.now()
+
+    def __str__(self):
+        return f"PendingAccountDeletion(id={self.pk}, user_id={self.user_id})"
 
 
 class UserVisibilityBlock(models.Model):

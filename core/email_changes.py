@@ -83,9 +83,8 @@ def create_email_change(*, user, new_email):
 
 
 def send_email_change_confirmation(*, request, pending, token):
-    backend_base_url = getattr(settings, "BACKEND_BASE_URL", "").rstrip("/")
-    path = f"/api/me/confirm-email-change/{token}/"
-    confirmation_url = f"{backend_base_url}{path}" if backend_base_url else request.build_absolute_uri(path)
+    frontend_base_url = settings.FRONTEND_BASE_URL.rstrip("/")
+    confirmation_url = f"{frontend_base_url}/confirm-email-change/{token}"
     try:
         sent_count = send_mail(
             subject="Confirma tu nuevo email en Social Movies",
