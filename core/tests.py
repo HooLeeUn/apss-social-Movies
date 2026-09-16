@@ -2,6 +2,7 @@ import csv
 import io
 import gzip
 import json
+import re
 import time
 import os
 from datetime import datetime, timedelta
