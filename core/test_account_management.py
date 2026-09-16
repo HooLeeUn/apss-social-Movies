@@ -19,6 +19,7 @@ from .models import (
     Movie,
     MovieRating,
     PendingAccountDeletion,
+    UserTasteProfile,
     VideoComment,
     VideoCommentReaction,
 )
@@ -55,6 +56,7 @@ class AccountManagementTests(TestCase):
         self.assertFalse(User.objects.filter(pk=self.user.pk).exists())
         self.assertFalse(Token.objects.filter(key=self.token.key).exists())
         self.assertFalse(MovieRating.objects.filter(pk=rating.pk).exists())
+        self.assertFalse(UserTasteProfile.objects.filter(user_id=self.user.pk).exists())
         self.assertFalse(Comment.objects.filter(pk=comment.pk).exists())
         self.assertFalse(Follow.objects.filter(follower_id=self.user.pk).exists())
         self.assertFalse(Friendship.objects.filter(requester_id=self.user.pk).exists())
