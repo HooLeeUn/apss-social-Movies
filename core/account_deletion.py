@@ -30,7 +30,7 @@ def _delete_file_safely(storage, name):
 @transaction.atomic
 def delete_user_account(user):
     """Delete an account and every user-owned record; schedule media cleanup on commit."""
-    locked_user = User.objects.select_for_update().select_related("profile").get(pk=user.pk)
+    locked_user = User.objects.select_for_update().get(pk=user.pk)
     files = []
 
     profile = getattr(locked_user, "profile", None)
@@ -94,7 +94,6 @@ def send_account_deletion_confirmation(*, pending, token):
 def confirm_account_deletion(token):
     pending = (
         PendingAccountDeletion.objects.select_for_update()
-        .select_related("user")
         .filter(token_hash=PendingAccountDeletion.hash_token(token))
         .first()
     )
