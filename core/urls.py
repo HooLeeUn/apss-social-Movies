@@ -19,6 +19,7 @@ from .views import (
     ProfilePrivacyBlockedUserDetailView, LegalPoliciesView, TMDbPersonDetailView,
     ContactView,
     ContentReportCreateView,
+    DeleteAccountView, ChangePasswordView, AccountDeletionRequestView, AccountDeletionConfirmView,
 )
 
 urlpatterns = [
@@ -36,6 +37,10 @@ urlpatterns = [
     path("users/<str:username>/friend-request/", FriendshipRequestCreateView.as_view(), name="user-friend-request"),
     path("users/<str:username>/posts/", UserPostsListView.as_view(), name="user-posts"),
     path("me/", MeView.as_view(), name="me"), 
+    path("me/delete-account/", DeleteAccountView.as_view(), name="delete-account"),
+    path("me/change-password/", ChangePasswordView.as_view(), name="change-password"),
+    path("account-deletion/request/", AccountDeletionRequestView.as_view(), name="account-deletion-request"),
+    path("account-deletion/confirm/<str:token>/", AccountDeletionConfirmView.as_view(), name="account-deletion-confirm"),
     path("me/onboarding/", MeOnboardingView.as_view(), name="me-onboarding"),
     path("me/personal-data/", MePersonalDataView.as_view(), name="me-personal-data"),
     path("me/confirm-email-change/<str:token>/", ConfirmEmailChangeView.as_view(), name="confirm-email-change"),

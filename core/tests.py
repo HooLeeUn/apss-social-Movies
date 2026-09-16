@@ -186,6 +186,7 @@ class PendingUserRegistrationTests(TestCase):
 @override_settings(
     EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
     BACKEND_BASE_URL="http://testserver",
+    FRONTEND_BASE_URL="https://reccool.example",
 )
 class PendingEmailChangeTests(TestCase):
     def setUp(self):
@@ -201,7 +202,7 @@ class PendingEmailChangeTests(TestCase):
         response = self.client.patch(self.personal_url, {"email": email, **extra}, format="json")
         token = None
         if mail.outbox:
-            match = re.search(r"/api/me/confirm-email-change/([^/]+)/", mail.outbox[-1].body)
+            match = re.search(r"https://reccool\.example/confirm-email-change/([^\s/]+)", mail.outbox[-1].body)
             token = match.group(1) if match else None
         return response, token
 
@@ -226,6 +227,8 @@ class PendingEmailChangeTests(TestCase):
         pending = PendingEmailChange.objects.get(user=self.user)
         self.assertNotEqual(pending.token_hash, token)
         self.assertEqual(pending.token_hash, PendingEmailChange.hash_token(token))
+        self.assertIn(f"https://reccool.example/confirm-email-change/{token}", mail.outbox[-1].body)
+        self.assertNotIn("/api/me/confirm-email-change/", mail.outbox[-1].body)
 
     def test_confirmation_changes_email_and_is_single_use(self):
         _, token = self.request_change()
