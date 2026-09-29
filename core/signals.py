@@ -39,7 +39,14 @@ def sync_preferences_after_movie_rating_save(sender, instance, **kwargs):
 
 
 @receiver(post_delete, sender=MovieRating)
-def sync_preferences_after_movie_rating_delete(sender, instance, **kwargs):
+def sync_preferences_after_movie_rating_delete(sender, instance, origin, **kwargs):
+    # Django's deletion collector removes related objects before it removes the
+    # User that started the cascade. Recalculating here would therefore recreate
+    # the UserTasteProfile that the collector has just deleted, only for its FK
+    # to become orphaned when the collector subsequently deletes the User.
+    if isinstance(origin, User) or getattr(origin, "model", None) is User:
+        return
+
     remove_user_preferences_for_movie_rating(
         user=instance.user,
         movie=instance.movie,

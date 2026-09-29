@@ -4,6 +4,7 @@ import random
 from datetime import datetime, time
 from time import perf_counter
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.conf import settings
 from django.core.cache import cache
@@ -21,6 +22,8 @@ from rest_framework.response import Response
 from rest_framework.utils.urls import remove_query_param, replace_query_param
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.authentication import TokenAuthentication
+from rest_framework.authtoken.models import Token
 from rest_framework.throttling import SimpleRateThrottle
 from .serializers import (
     AppBrandingSerializer,
@@ -107,6 +110,13 @@ from .email_changes import (
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
+from .account_deletion import (
+    AccountDeletionTokenInvalid,
+    confirm_account_deletion,
+    create_account_deletion_request,
+    delete_user_account,
+    send_account_deletion_confirmation,
+)
 
 
 class EmailChangeRateThrottle(SimpleRateThrottle):
@@ -117,6 +127,94 @@ class EmailChangeRateThrottle(SimpleRateThrottle):
         if not request.user.is_authenticated:
             return None
         return self.cache_format % {"scope": self.scope, "ident": request.user.pk}
+
+
+class AccountDeletionRateThrottle(SimpleRateThrottle):
+    scope = "account_deletion"
+    rate = "5/hour"
+
+    def get_cache_key(self, request, view):
+        return self.get_ident(request) and self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
+
+
+class AccountDeletionConfirmRateThrottle(AccountDeletionRateThrottle):
+    scope = "account_deletion_confirm"
+    rate = "20/hour"
+
+
+class DeleteAccountView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        password = request.data.get("password")
+        if not isinstance(password, str) or not request.user.check_password(password):
+            return Response({"password": ["The current password is incorrect."]}, status=status.HTTP_400_BAD_REQUEST)
+        delete_user_account(request.user)
+        return Response({"detail": "Account deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class ChangePasswordView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        current_password = request.data.get("current_password")
+        new_password = request.data.get("new_password")
+        confirmation = request.data.get("new_password_confirmation")
+        if not isinstance(current_password, str) or not request.user.check_password(current_password):
+            return Response({"current_password": ["The current password is incorrect."]}, status=status.HTTP_400_BAD_REQUEST)
+        if new_password != confirmation:
+            return Response({"new_password_confirmation": ["The passwords do not match."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(new_password, str):
+            return Response({"new_password": ["This field is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(new_password, user=request.user)
+        except DjangoValidationError as exc:
+            return Response({"new_password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        request.user.set_password(new_password)
+        request.user.save(update_fields=["password"])
+        Token.objects.filter(user=request.user).delete()
+        return Response(
+            {"detail": "Password changed successfully. Please sign in again.", "reauthentication_required": True},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AccountDeletionRequestView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AccountDeletionRateThrottle]
+    generic_response = {"detail": "If an account exists for this email, we have sent deletion instructions."}
+
+    def post(self, request):
+        email = normalize_email_address(request.data.get("email"))
+        user = User.objects.filter(email__iexact=email, is_active=True).order_by("pk").first() if email else None
+        if user:
+            try:
+                pending, token = create_account_deletion_request(user)
+                send_account_deletion_confirmation(pending=pending, token=token)
+            except Exception:
+                if "pending" in locals():
+                    pending.delete()
+                logging.getLogger(__name__).exception("Account deletion confirmation delivery failed")
+        return Response(self.generic_response, status=status.HTTP_200_OK)
+
+
+class AccountDeletionConfirmView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [AccountDeletionConfirmRateThrottle]
+
+    def post(self, request, token):
+        try:
+            confirm_account_deletion(token)
+        except AccountDeletionTokenInvalid:
+            return Response({"detail": "This account deletion link is invalid or expired."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "Account deleted successfully."}, status=status.HTTP_200_OK)
 
 
 class ContactMessageRateThrottle(SimpleRateThrottle):
