@@ -1035,7 +1035,9 @@ class Profile(models.Model):
         PRIVATE = "private", "Private"
 
     class StreamingCountry(models.TextChoices):
+        AE = "AE", "United Arab Emirates"
         AR = "AR", "Argentina"
+        AU = "AU", "Australia"
         BO = "BO", "Bolivia"
         BZ = "BZ", "Belice"
         CA = "CA", "Canadá"
@@ -1043,6 +1045,7 @@ class Profile(models.Model):
         CO = "CO", "Colombia"
         CR = "CR", "Costa Rica"
         CU = "CU", "Cuba"
+        DE = "DE", "Germany"
         DO = "DO", "República Dominicana"
         EC = "EC", "Ecuador"
         ES = "ES", "España"
