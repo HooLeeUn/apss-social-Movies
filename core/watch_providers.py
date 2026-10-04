@@ -72,7 +72,8 @@ def get_cached_country_watch_providers(movie: Movie, country: str) -> dict[str, 
         return cached_payload
 
     tmdb_payload = fetch_tmdb_watch_providers(movie)
-    country_payload = tmdb_payload.get("results", {}).get(country, {})
+    tmdb_country = "GB" if country == "UK" else country
+    country_payload = tmdb_payload.get("results", {}).get(tmdb_country, {})
     if not isinstance(country_payload, dict):
         country_payload = {}
 
@@ -82,7 +83,7 @@ def get_cached_country_watch_providers(movie: Movie, country: str) -> dict[str, 
 
 def build_watch_provider_cache_key(movie: Movie, country: str) -> str:
     content_kind = get_tmdb_content_kind(movie)
-    return f"movie-watch-providers:v1:{movie.id}:{content_kind}:{movie.tmdb_id}:{country}"
+    return f"movie-watch-providers:v2:{movie.id}:{content_kind}:{movie.tmdb_id}:{country}"
 
 
 def fetch_tmdb_watch_providers(movie: Movie) -> dict[str, Any]:

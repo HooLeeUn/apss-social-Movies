@@ -7959,6 +7959,54 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb._SESSION.get")
+    def test_uses_gb_tmdb_region_but_keeps_uk_for_internal_provider_links(self, mock_get):
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix UK",
+            country_code="UK",
+            affiliate_url="https://affiliate.example/netflix-uk",
+        )
+        StreamingProviderLink.objects.create(
+            provider_id=8,
+            provider_name="Netflix GB",
+            country_code="GB",
+            affiliate_url="https://affiliate.example/netflix-gb",
+        )
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    "GB": {
+                        "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=GB",
+                        "flatrate": [
+                            {
+                                "provider_id": 8,
+                                "provider_name": "Netflix",
+                                "logo_path": "/netflix.jpg",
+                                "display_priority": 0,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+        response = self.client.get(self.url, {"country": "UK"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["country"], "UK")
+        self.assertEqual(response.data["flatrate"][0]["provider_id"], 8)
+        self.assertEqual(
+            response.data["flatrate"][0]["tmdb_watch_url"],
+            "https://www.themoviedb.org/movie/27205-inception/watch?locale=GB",
+        )
+        self.assertEqual(
+            response.data["flatrate"][0]["affiliate_url"],
+            "https://affiliate.example/netflix-uk",
+        )
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb._SESSION.get")
     def test_returns_country_watch_providers_grouped_by_monetization_type(self, mock_get):
         mock_get.return_value = SimpleNamespace(
             status_code=200,
