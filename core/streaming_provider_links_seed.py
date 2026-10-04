@@ -16,7 +16,9 @@ AMAZON_CHANNEL_LANDING_URL = "https://www.primevideo.com/"
 CLARO_VIDEO_LANDING_URL = "https://www.clarovideo.com/"
 LEGACY_AMAZON_CHANNEL_LANDING_URL = "https://www.amazon.com"
 QNEXT_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = (
+    "AE",
     "AR",
+    "AU",
     "BO",
     "BZ",
     "CA",
@@ -24,6 +26,7 @@ QNEXT_SUPPORTED_COUNTRY_CODES: tuple[str, ...] = (
     "CO",
     "CR",
     "CU",
+    "DE",
     "DO",
     "EC",
     "ES",
