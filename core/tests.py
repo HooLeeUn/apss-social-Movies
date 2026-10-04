@@ -7869,14 +7869,25 @@ class MeProfileStreamingCountryTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.CO)
 
-    def test_me_patch_updates_streaming_country(self):
-        response = self.client.patch(self.url, {"streaming_country": Profile.StreamingCountry.US}, format="json")
+    def test_me_patch_saves_and_returns_new_streaming_countries(self):
+        for country in (
+            Profile.StreamingCountry.DE,
+            Profile.StreamingCountry.AE,
+            Profile.StreamingCountry.AU,
+        ):
+            with self.subTest(country=country):
+                response = self.client.patch(self.url, {"streaming_country": country}, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.user.refresh_from_db()
-        self.assertEqual(self.user.profile.streaming_country, Profile.StreamingCountry.US)
-        self.assertEqual(response.data["streaming_country"], Profile.StreamingCountry.US)
-        self.assertEqual(response.data["country"], Profile.StreamingCountry.US)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.user.refresh_from_db()
+                self.assertEqual(self.user.profile.streaming_country, country)
+                self.assertEqual(response.data["streaming_country"], country)
+                self.assertEqual(response.data["country"], country)
+
+                get_response = self.client.get(self.url)
+                self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+                self.assertEqual(get_response.data["streaming_country"], country)
+                self.assertEqual(get_response.data["country"], country)
 
     def test_me_patch_updates_country_alias_for_supported_country(self):
         response = self.client.patch(self.url, {"country": Profile.StreamingCountry.MX}, format="json")
@@ -7912,6 +7923,39 @@ class MovieWatchProvidersEndpointTests(TestCase):
 
     def tearDown(self):
         cache.clear()
+
+    @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
+    @patch("core.tmdb._SESSION.get")
+    def test_selects_new_country_region_from_tmdb_results(self, mock_get):
+        regional_provider_ids = {"DE": 101, "AE": 102, "AU": 103}
+        mock_get.return_value = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "results": {
+                    country: {
+                        "link": f"https://www.themoviedb.org/movie/27205-inception/watch?locale={country}",
+                        "flatrate": [
+                            {
+                                "provider_id": provider_id,
+                                "provider_name": f"Provider {country}",
+                                "logo_path": f"/{country.lower()}.jpg",
+                                "display_priority": 0,
+                            }
+                        ],
+                    }
+                    for country, provider_id in regional_provider_ids.items()
+                }
+            },
+        )
+
+        for country, provider_id in regional_provider_ids.items():
+            with self.subTest(country=country):
+                response = self.client.get(self.url, {"country": country})
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["country"], country)
+                self.assertEqual(response.data["flatrate"][0]["provider_id"], provider_id)
+                self.assertEqual(response.data["flatrate"][0]["provider_name"], f"Provider {country}")
 
     @override_settings(TMDB_READ_ACCESS_TOKEN="test-token", TMDB_BASE_URL="https://api.themoviedb.org/3")
     @patch("core.tmdb._SESSION.get")
@@ -8455,7 +8499,9 @@ class StreamingProviderLinkCommandTests(TestCase):
         call_command("refresh_streaming_provider_links")
 
         supported_country_codes = (
+            "AE",
             "AR",
+            "AU",
             "BO",
             "BZ",
             "CA",
@@ -8463,6 +8509,7 @@ class StreamingProviderLinkCommandTests(TestCase):
             "CO",
             "CR",
             "CU",
+            "DE",
             "DO",
             "EC",
             "ES",
