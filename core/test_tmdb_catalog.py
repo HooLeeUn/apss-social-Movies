@@ -118,6 +118,63 @@ class CatalogEnricherTests(SimpleTestCase):
 
 
 class EnrichCatalogCommandTests(SimpleTestCase):
+    def test_preserves_original_columns_while_using_tmdb_media_kinds(self):
+        original_columns = (
+            "imdb_id", "title_english", "title_spanish", "type", "genre",
+            "release_year", "director", "cast_members", "external_rating", "external_votes",
+        )
+        input_rows = [
+            {
+                "imdb_id": "TT9", "title_english": "A Series", "title_spanish": "Una serie",
+                "type": "series", "genre": "Drama", "release_year": "2020",
+                "director": "Jane Doe", "cast_members": "Actor One, Actor Two",
+                "external_rating": "8.10", "external_votes": "00123", "synopsis": "Old series",
+            },
+            {
+                "imdb_id": "TT7", "title_english": "A Movie", "title_spanish": "Una película",
+                "type": "movie", "genre": "Comedy", "release_year": "2019",
+                "director": "John Doe", "cast_members": "Actor Three",
+                "external_rating": "7.00", "external_votes": "00456", "synopsis": "Old movie",
+            },
+        ]
+        fake = FakeTMDb({
+            "/find/tt9": {"tv_results": [{"id": 9}]},
+            "/tv/9": [
+                {"overview": "English series", "poster_path": "/series.jpg"},
+                {"overview": "Serie en español"},
+            ],
+            "/find/tt7": {"movie_results": [{"id": 7}]},
+            "/movie/7": [
+                {"overview": "English movie", "poster_path": "/movie.jpg"},
+                {"overview": "Película en español"},
+            ],
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = root / "in.csv", root / "out.csv"
+            with source.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=(*original_columns, "synopsis"))
+                writer.writeheader()
+                writer.writerows(input_rows)
+
+            with patch("core.tmdb_catalog.get_tmdb_json", new=fake):
+                call_command("enrich_catalog_csv", str(source), output=str(output), requests_per_second=0)
+
+            with output.open(encoding="utf-8") as fh:
+                enriched_rows = list(csv.DictReader(fh))
+
+        self.assertIn("/tv/9", [path for path, _ in fake.calls])
+        self.assertIn("/movie/7", [path for path, _ in fake.calls])
+        self.assertEqual([row["type"] for row in enriched_rows], ["series", "movie"])
+        for original, enriched in zip(input_rows, enriched_rows):
+            for column in original_columns:
+                self.assertEqual(enriched[column], original[column], column)
+        self.assertEqual(
+            [row["synopsis"] for row in enriched_rows],
+            ["English series", "English movie"],
+        )
+
     def test_incremental_output_report_resume_and_no_orm(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

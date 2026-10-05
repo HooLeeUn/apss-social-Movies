@@ -110,8 +110,6 @@ class Command(BaseCommand):
                     result = enricher.resolve(row)
                     enriched = {name: row.get(name, "") for name in fields}
                     enriched.update({
-                        "imdb_id": normalize_imdb_id(row.get("imdb_id")),
-                        "type": normalize_media_type(row.get("type")) or row.get("type", ""),
                         "tmdb_id": result.tmdb_id or "",
                         "image": result.image,
                         "synopsis": result.synopsis or str(row.get("synopsis") or "").strip(),
