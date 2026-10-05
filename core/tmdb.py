@@ -8,7 +8,18 @@ from django.conf import settings
 
 
 class TMDbServiceError(Exception):
-    """Raised when a TMDb request fails or configuration is invalid."""
+    """Raised when a TMDb request fails or configuration is invalid.
+
+    The optional attributes let batch consumers make a retry decision without
+    parsing the human-readable message.  Existing callers which only catch the
+    exception remain fully compatible.
+    """
+
+    def __init__(self, message, *, status_code=None, retry_after=None, retryable=False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.retryable = retryable
 
 
 _SESSION = requests.Session()
@@ -48,13 +59,17 @@ def get_tmdb_json(
             timeout=request_timeout,
         )
     except requests.Timeout as exc:
-        raise TMDbServiceError("TMDb request timed out") from exc
+        raise TMDbServiceError("TMDb request timed out", retryable=True) from exc
     except requests.RequestException as exc:
-        raise TMDbServiceError(f"TMDb request failed: {exc}") from exc
+        raise TMDbServiceError(f"TMDb request failed: {exc}", retryable=True) from exc
 
     if response.status_code != 200:
+        retry_after = response.headers.get("Retry-After")
         raise TMDbServiceError(
-            f"TMDb returned status {response.status_code}: {response.text[:200]}"
+            f"TMDb returned status {response.status_code}: {response.text[:200]}",
+            status_code=response.status_code,
+            retry_after=retry_after,
+            retryable=response.status_code == 429 or 500 <= response.status_code < 600,
         )
 
     try:
