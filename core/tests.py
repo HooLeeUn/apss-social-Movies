@@ -753,6 +753,73 @@ Arrival,La llegada,film,Sci-Fi,2016,Denis Villeneuve,Amy Adams,7.9
             call_command("import_movies", str(csv_path), author="missing_user")
 
 
+    def test_import_movies_imports_enriched_multiline_csv_and_is_idempotent(self):
+        alt_user = get_user_model().objects.create_user(username="catalog_import")
+        csv_content = '''imdb_id,title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,external_votes,synopsis,synopsis_es,tmdb_id,image
+tt100,First,Primera,movie,Drama,2020,Director,Cast,7.5,12,"First paragraph.
+
+Second paragraph.","Primero.",101,https://example.com/first.jpg
+tt200,Second,Segunda,series,Comedy,2021,Other,Actors,8.0,20,Next row,Siguiente,202,
+'''
+        csv_path = self._write_csv(csv_content)
+
+        call_command("import_movies", str(csv_path), author="catalog_import")
+        call_command("import_movies", str(csv_path), author="catalog_import")
+
+        self.assertEqual(Movie.objects.count(), 2)
+        first = Movie.objects.get(imdb_id="tt100")
+        self.assertEqual(first.author, alt_user)
+        self.assertEqual(first.tmdb_id, 101)
+        self.assertEqual(first.image, "https://example.com/first.jpg")
+        self.assertEqual(first.synopsis, "First paragraph.\n\nSecond paragraph.")
+        self.assertEqual(first.synopsis_es, "Primero.")
+        self.assertTrue(Movie.objects.filter(imdb_id="tt200", synopsis="Next row").exists())
+
+    def test_import_movies_matches_imdb_before_changed_fallback_and_preserves_on_blanks(self):
+        movie = Movie.objects.create(
+            author=self.author,
+            title_english="Old",
+            title_spanish="Viejo",
+            type=Movie.MOVIE,
+            genre="Drama",
+            release_year=1999,
+            director="Old Director",
+            imdb_id="tt300",
+            tmdb_id=300,
+            image="https://example.com/keep.jpg",
+            synopsis="Keep",
+            synopsis_es="Conservar",
+        )
+        csv_path = self._write_csv(
+            "imdb_id,title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,external_votes,tmdb_id,image,synopsis,synopsis_es\n"
+            "tt300,New,Nuevo,movie,Drama,2024,New Director,Cast,7,10,300,,,\n"
+        )
+        call_command("import_movies", str(csv_path))
+        movie.refresh_from_db()
+        self.assertEqual(Movie.objects.count(), 1)
+        self.assertEqual(movie.title_english, "Old")
+        self.assertEqual(movie.image, "https://example.com/keep.jpg")
+        self.assertEqual(movie.synopsis, "Keep")
+        self.assertEqual(movie.synopsis_es, "Conservar")
+
+    def test_import_movies_reports_duplicate_imdb_and_incompatible_tmdb(self):
+        common = dict(
+            author=self.author, type=Movie.MOVIE, genre="Drama", release_year=2020
+        )
+        Movie.objects.create(title_english="One", imdb_id="tt400", **common)
+        Movie.objects.create(title_english="Two", imdb_id="tt400", **common)
+        Movie.objects.create(title_english="Three", imdb_id="tt500", tmdb_id=1, **common)
+        csv_path = self._write_csv(
+            "imdb_id,title_english,title_spanish,type,genre,release_year,director,cast_members,external_rating,tmdb_id\n"
+            "tt400,Changed,,movie,Drama,2022,,,7,\n"
+            "tt500,Three,,movie,Drama,2020,,,7,2\n"
+        )
+        out = io.StringIO()
+        call_command("import_movies", str(csv_path), stdout=out)
+        self.assertEqual(Movie.objects.count(), 3)
+        self.assertIn("Conflictos: 2", out.getvalue())
+
+
 class ImportMoviePostersCsvCommandTests(TestCase):
     def setUp(self):
         self.author = get_user_model().objects.create_user(
