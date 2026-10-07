@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'core.apps.CoreConfig',
+    'reporting.apps.ReportingConfig',
     'rest_framework.authtoken',
     'corsheaders',
     'storages',
