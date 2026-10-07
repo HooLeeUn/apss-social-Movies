@@ -600,6 +600,20 @@ class MovieRecommendationItem(models.Model):
         return f"MovieRecommendationItem(user={self.user_id}, movie={self.movie_id})"
 
 
+class MovieRecommendationHistory(models.Model):
+    """Intervals of recommendation membership; pre-deployment history is partial."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="recommendation_history")
+    movie = models.ForeignKey(Movie, on_delete=models.CASCADE, related_name="recommendation_history")
+    started_at = models.DateTimeField(db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "movie"], condition=models.Q(ended_at__isnull=True), name="unique_open_recommendation"),
+            models.CheckConstraint(condition=models.Q(ended_at__isnull=True) | models.Q(ended_at__gte=models.F("started_at")), name="recommendation_interval_valid"),
+        ]
+
+
 class ProfileFavoriteMovie(models.Model):
     SLOT_1 = 1
     SLOT_2 = 2
