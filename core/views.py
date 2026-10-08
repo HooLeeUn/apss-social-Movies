@@ -45,6 +45,7 @@ from .serializers import (
     ContactMessageCreateSerializer,
     ContentReportCreateSerializer,
 )
+from .recommendation_history import set_recommendation
 from .models import (
     AppBranding,
     Comment,
@@ -3978,11 +3979,11 @@ class MovieRecommendationToggleView(APIView):
 
     def post(self, request, pk):
         movie = get_object_or_404(Movie, pk=pk)
-        _, created = MovieRecommendationItem.objects.get_or_create(user=request.user, movie=movie)
+        created = set_recommendation(request.user, movie.pk, True)
         return Response({"movie_id": movie.id, "is_in_my_recommendations": True, "created": created}, status=status.HTTP_200_OK)
 
     def delete(self, request, pk):
-        deleted_count, _ = MovieRecommendationItem.objects.filter(user=request.user, movie_id=pk).delete()
+        deleted_count = set_recommendation(request.user, pk, False)
         return Response({"movie_id": pk, "is_in_my_recommendations": False, "deleted": deleted_count > 0}, status=status.HTTP_200_OK)
 
 
@@ -4615,11 +4616,14 @@ class MovieRatingView(APIView):
         new_score = serializer.validated_data["score"]
 
         with transaction.atomic():
-            rating, created = MovieRating.objects.update_or_create(
-                user=request.user,
-                movie=movie,
-                defaults={"score": new_score},
+            # Lock the user to serialize first writes as well as score changes.
+            User.objects.select_for_update().get(pk=request.user.pk)
+            rating, created = MovieRating.objects.get_or_create(
+                user=request.user, movie=movie, defaults={"score": new_score},
             )
+            if not created and rating.score != new_score:
+                rating.score = new_score
+                rating.save(update_fields=["score", "updated_at"])
 
         return Response(
             {"movie": movie.id, "my_rating": rating.score, "created": created},
@@ -4630,6 +4634,7 @@ class MovieRatingView(APIView):
         movie = get_object_or_404(Movie, pk=pk)
 
         with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
             rating = MovieRating.objects.select_for_update().filter(user=request.user, movie=movie).first()
             if rating is None:
                 return Response({"detail": "Rating not found."}, status=status.HTTP_404_NOT_FOUND)
