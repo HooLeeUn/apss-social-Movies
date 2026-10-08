@@ -24,10 +24,10 @@ def month_period(value):
 
 
 def periods(filters):
-    if filters["report"] not in USER_REPORTS:
-        return [month_period(value) for value in sorted(set(filters["months"]))]
-    if filters["total"]:
+    if filters["report"] in USER_REPORTS and filters["total"]:
         return [Period("Acumulado total", None, None)]
-    if filters["custom"]:
+    if filters["report"] in USER_REPORTS and filters["custom"]:
         return [Period(f'{filters["since"]} — {filters["until"]}', midnight(filters["since"]), midnight(filters["until"] + timedelta(days=1)))]
-    return [month_period(f'{filters["year"]:04}-{filters["month"]:02}')]
+    return [month_period(f"{year:04}-{month:02}")
+            for year in sorted(set(filters["years"]))
+            for month in sorted(set(filters["months"]))]
