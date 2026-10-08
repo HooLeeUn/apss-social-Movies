@@ -8,15 +8,15 @@
 <p class="report-intro">Analiza usuarios, contenido y actividad. Las métricas sociales son de uso interno.</p>
 <form method="get" class="report-form">
 {{ form.non_field_errors }}
-{% for field in form %}<div class="report-field" data-field="{{ field.name }}">{{ field.errors }}{{ field.label_tag }}{{ field }}{% if field.field.widget.allow_multiple_selected %}<small>Ctrl/Cmd para seleccionar varios; sin selección equivale a Todos, excepto meses.</small>{% endif %}</div>{% endfor %}
+{% for field in form %}<div class="report-field" data-field="{{ field.name }}">{{ field.errors }}{{ field.label_tag }}{{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{% if field.field.widget.allow_multiple_selected %}<small>Ctrl/Cmd para seleccionar varios.{% if field.name != 'months' and field.name != 'years' %} Sin selección equivale a Todos.{% endif %}</small>{% endif %}</div>{% endfor %}
 <div class="report-submit"><button type="submit" class="default">GENERAR REPORTE</button></div>
 </form>
 {% if result %}
 <section class="report-results"><h2>{{ result.title }}</h2>
-<details><summary>Filtros y semántica del reporte</summary><dl>{% for label,value in result.metadata %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl></details>
+<details><summary>Filtros y semántica del reporte</summary><dl>{% for label,value in result.metadata %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}{% for label,value in result.methodology %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl></details>
 {% if result.blocked %}<p class="report-private" role="status">{{ privacy_message }}</p>
 {% else %}
-{% if result.population != None %}<p>Población analizada: <strong>{{ result.population }}</strong> usuarios únicos.</p>{% else %}<p>El total de población se reserva para proteger las celdas demográficas.</p>{% endif %}
+{% if result.show_population %}{% if result.population != None %}<p>Población analizada: <strong>{{ result.population }}</strong> usuarios únicos.</p>{% else %}<p>El total de población se reserva para proteger las celdas demográficas.</p>{% endif %}{% endif %}
 {% if can_export %}<div class="report-actions"><a class="button" href="?{{ query }}&amp;export=csv">Exportar CSV</a><a class="button" href="?{{ query }}&amp;export=xlsx">Exportar Excel</a></div>{% endif %}
 <div class="report-table"><table><thead><tr>{% for header in result.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% empty %}<tr><td colspan="99">No hay resultados para los filtros seleccionados.</td></tr>{% endfor %}</tbody></table></div>
 <nav class="report-pages">{% if previous_page %}<a href="?{{ query }}&amp;page={{ previous_page }}">Anterior</a>{% endif %} Página {{ page }} {% if next_page %}<a href="?{{ query }}&amp;page={{ next_page }}">Siguiente</a>{% endif %}</nav>
