@@ -39,6 +39,9 @@ def xlsx_response(result):
     sheet = workbook.create_sheet("Reporte")
     for row in export_rows(result):
         sheet.append([safe(value) for value in row])
+    methodology = workbook.create_sheet("Metodología")
+    for row in result.methodology:
+        methodology.append([safe(value) for value in row])
     output = SpooledTemporaryFile(max_size=8*1024*1024, mode="w+b")
     workbook.save(output)
     output.seek(0)

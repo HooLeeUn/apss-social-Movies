@@ -19,6 +19,46 @@ consolidados y comparaciones mensuales. Máximo 24 meses por solicitud. No hay P
 ni endpoints públicos. La tabla muestra totales por métrica/mes y diferencias
 entre meses seleccionados en orden cronológico, incluso si no son consecutivos.
 
+## Selección temporal y presentación
+
+Todos los reportes mensuales usan dos controles de selección múltiple: Meses
+(Enero–Diciembre) y Años (desde la primera alta real hasta el año actual).
+Se genera el producto cartesiano y se ordena cronológicamente: Enero y Febrero
+con 2025 y 2026 generan Enero 2025, Febrero 2025, Enero 2026 y Febrero 2026.
+La selección debe contener ambas dimensiones. Más de 24 combinaciones produce
+un error sin truncamiento. Una combinación que incluya meses futuros se rechaza
+completa con un error; el mes actual sí se permite y contiene datos parciales.
+
+Los cuatro reportes de usuarios ofrecen tres modos mutuamente excluyentes:
+
+- Acumulado total: semántica histórica existente, con edad a fecha actual;
+  deshabilita meses, años y Desde/Hasta.
+- Comparación mensual: ambos checkboxes apagados; una columna por mes/año,
+  usuarios cuyo `date_joined` pertenece a ese mes, sin acumular meses previos.
+- Personalizado: requiere Desde/Hasta, ambos inclusive en America/Bogota;
+  deshabilita Acumulado total, meses y años.
+
+El servidor rechaza combinaciones ambiguas incluso sin JavaScript. País e
+identidad siguen siendo actuales, edad mensual/personalizada corresponde al
+alta, inactivos cuentan y pendientes se excluyen. Se conserva el umbral de 10
+usuarios en segmentos protegidos y cada celda, también en CSV/XLSX. Si alguna
+celda comparada se suprime, diferencia y porcentaje también se suprimen.
+
+Las columnas identifican la métrica: «Dif. Usuarios», «Var. Usuarios %»,
+«Dif. Nº calificaciones», «Var. Nº calificaciones %», comentarios, follows,
+etc. En consolidados se indican eventos de la métrica de la fila. La diferencia
+es actual menos anterior; porcentaje = `(actual - anterior) / anterior * 100`,
+frente al periodo seleccionado anterior. Si anterior es cero, la diferencia
+se conserva y el porcentaje muestra «No aplica». 1→1 produce 0 y 0 %;
+2→0 produce -2 y -100 %. En rankings de ratings la comparación usa el número
+de calificaciones; cada mes mantiene su promedio aparte.
+
+La población analizada se omite de pantalla y exportaciones cuando coincide
+con la única cifra de usuarios registrados. Se conserva cuando aporta contexto
+en comparaciones y otros reportes, reservándola cuando permitiría inferir celdas.
+La metodología en pantalla aparece exclusivamente dentro del desplegable
+«Filtros y semántica del reporte», cerrado por defecto.
+
 ## Fuentes y semántica
 
 - Registrados: `auth.User` con `Profile`, incluidos inactivos, por `date_joined`.
@@ -132,8 +172,12 @@ suprimidas. Las exportaciones incluyen el mensaje, nunca su valor oculto.
 CSV: UTF-8 con BOM. XLSX real: `openpyxl==3.1.5`, verificado con Python 3.13 y
 Django 6.0.4; escritura optimizada y archivo temporal que pasa a disco a partir
 de 8 MiB. Textos potencialmente interpretables como fórmulas reciben apóstrofo.
-Los archivos contienen filtros, periodos, fecha/hora, zona, población publicable
-y advertencias semánticas. CSV usa streaming; SQL de contenido usa cursor por
+Los archivos contienen filtros, periodos, fecha/hora, zona y población cuando
+aporta contexto y es publicable. XLSX tiene las hojas «Reporte» (metadatos y
+resultados) y «Metodología» (fuentes, semántica y todas las advertencias históricas,
+incluidos updated_at, follows, Recomendadas y contenido oculto). CSV contiene
+metadatos y dataset sin filas metodológicas o «Limitación».
+CSV usa streaming; SQL de contenido usa cursor por
 bloques. Una nueva descarga ejecuta el mismo servicio con los mismos filtros;
 si los datos cambian entre pantalla y descarga, el resultado puede actualizarse.
 
@@ -190,7 +234,11 @@ python manage.py test reporting core --noinput
 
 ### Crear el analista
 
-Ejecutar primero `setup_report_analysts`. En `/admin/auth/user/add/`, crear usuario
+Después de `migrate`, ejecutar `python manage.py setup_report_analysts`.
+El comando configura el grupo Django estándar «Analistas de reportes», visible
+en Authentication and Authorization → Groups y asignable en Groups del User.
+No agrega campos a User ni modelos administrativos adicionales.
+En `/admin/auth/user/add/`, crear usuario
 con contraseña segura. Activar Active y Staff status; dejar Superuser status
 apagado. Asignar únicamente el grupo Analistas de reportes; no dar permisos CRUD
 sobre fuentes. El grupo creado recibe can_view_reports y can_export_reports.
@@ -237,6 +285,34 @@ reportes no revoca permisos existentes, por diseño.
   preferencias existentes.
 
 ## Validación realizada en este entorno
+
+### Iteración de periodos y UX (8 de octubre de 2026)
+
+Validación local con PostgreSQL, `DATABASE_URL` vacío, `DB_HOST=127.0.0.1`,
+`DEBUG=True` y almacenamiento R2 deshabilitado para las pruebas:
+
+```bash
+python manage.py test reporting core.tests.MovieRatingEndpointTests --noinput --keepdb
+python manage.py check
+python manage.py makemigrations --check --dry-run
+python manage.py collectstatic --noinput
+node --check reporting/static/reporting/reports.js
+git diff --check
+```
+
+69 tests aprobados, incluidos 9 casos nuevos de periodos, presentación y
+exportación. Las comprobaciones anteriores pasan; no se detectan migraciones.
+Los primeros intentos encontraron redirecciones HTTPS por configuración local
+y después un manifiesto estático sin recursos de reporting. Se resolvieron
+con configuración de desarrollo y collectstatic. No quedan fallos en la suite
+focalizada; no se repitió la suite completa de core en esta iteración.
+
+Pendiente verificar visualmente en preview: selectores largos con sidebar,
+desktop/móvil y zoom, exclusión de modos en JavaScript, selección múltiple con
+teclado y apertura de ambas hojas XLSX en Excel/LibreOffice. Los enlaces antiguos
+con `month`/`year` o meses `YYYY-MM` deben regenerarse con Meses/Años.
+
+### Validación de la implementación inicial
 
 Python 3.13.5, Django 6.0.4, PostgreSQL 17 y openpyxl 3.1.5. Se aplicaron
 todas las migraciones desde cero en una base local aislada. Pasaron `check`,

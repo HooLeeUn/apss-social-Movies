@@ -24,7 +24,16 @@ def dt(year, month, day=15):
 
 
 def filters(report="users", **kwargs):
-    return {"report": report, "countries": [], "ages": [], "genders": [], "content_type": "", "total": True, "custom": False, "month": 1, "year": 2026, "since": None, "until": None, "months": ["2026-01"], **kwargs}
+    data = {"report": report, "countries": [], "ages": [], "genders": [], "content_type": "", "total": True, "custom": False, "month": 1, "year": 2026, "since": None, "until": None, "months": ["2026-01"], **kwargs}
+    if "years" not in kwargs:
+        if report == "users" or report in {"countries", "ages", "genders"}:
+            data["months"] = [data["month"]]
+            data["years"] = [data["year"]]
+        else:
+            pairs = [value.split("-") for value in data["months"]]
+            data["months"] = sorted({int(m) for y, m in pairs})
+            data["years"] = sorted({int(y) for y, m in pairs})
+    return data
 
 
 class ReportFixtures:
@@ -462,7 +471,7 @@ class AdditionalReportTests(ReportFixtures, TestCase):
     def test_form_rejects_custom_nonmonthly_and_excess_comparison(self):
         self.assertFalse(ReportForm({"report":"ratings","custom":"on","since":"2026-01-01","until":"2026-01-31"}).is_valid())
         self.assertFalse(ReportForm({"report":"social","months":["2026-01"],"content_type":"movie"}).is_valid())
-        form=ReportForm({"report":"users","total":"on","month":"99"})
+        form=ReportForm({"report":"users","total":"on","months":["99"]})
         self.assertFalse(form.is_valid())
 
 
