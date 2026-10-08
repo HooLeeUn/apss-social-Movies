@@ -32,6 +32,8 @@ class Result:
     population: int | None
     blocked: bool
     row_factory: object
+    methodology: list
+    show_population: bool
 
     def rows(self, offset=0, limit=None):
         if self.blocked:
@@ -61,12 +63,18 @@ def generate(filters):
     if report in {"productions", "recommended"}:
         headers.append("Tipo")
     average = report in {"productions", "genres", "combinations"}
+    metric = ("Usuarios" if report in USER_REPORTS else "Nº calificaciones" if average or report == "ratings" else {
+        "recommended": "Usuarios que recomiendan", "comments": "Comentarios", "videos": "Video reacciones",
+        "added": "Altas en Recomendadas", "removed": "Retiros de Recomendadas", "follows": "Follows",
+        "comment_likes": "Likes a comentarios", "comment_dislikes": "Dislikes a comentarios",
+        "video_likes": "Likes a video reacciones", "video_dislikes": "Dislikes a video reacciones",
+    }.get(report, "Eventos de la métrica indicada en la fila"))
     for i, period in enumerate(ps):
         headers.append(period.label + (" · Calificaciones" if average else " · Total"))
         if average:
             headers.append(period.label + " · Promedio")
         if i:
-            headers.extend([period.label + " · Diferencia", period.label + " · Variación %"])
+            headers.extend([period.label + " · Dif. " + metric, period.label + " · Var. " + metric + " %"])
 
     from core.models import Profile
     countries = dict(Profile.StreamingCountry.choices)
@@ -80,30 +88,32 @@ def generate(filters):
         ("Edades", ", ".join(AGE_LABELS[k] for k in filters.get("ages", [])) or "Todos"),
         ("Identidades", ", ".join(genders[k] for k in filters.get("genders", [])) or "Todos"),
         ("Tipo de contenido", {"movie": "Películas", "series": "Series"}.get(filters.get("content_type"), "Todos")),
-    ] + [("Limitación", warning) for warning in WARNINGS]
+    ]
     populations = []
 
     if report in USER_REPORTS:
-        qs = users(filters, ps[0])
-        population = qs.count()
-        if report == "countries":
-            groups = qs.values(key=F("profile__streaming_country")).annotate(n=Count("pk")).order_by("key")
-            labels = countries
-        elif report == "genders":
-            groups = qs.annotate(key=F("profile__gender_identity")).values("key").annotate(n=Count("pk")).order_by("key")
-            labels = genders
-        elif report == "ages":
-            cases = [When(report_age__gte=lo, **({"report_age__lte": hi} if hi is not None else {}), then=Value(key)) for key, (lo, hi) in AGE_RANGES.items()]
-            groups = qs.annotate(key=Case(*cases, When(report_age__isnull=True, then=Value("unknown")), default=Value("outside"), output_field=CharField())).values("key").annotate(n=Count("pk")).order_by("key")
-            labels = {**AGE_LABELS, "unknown": "Sin dato", "outside": "Fuera de rangos definidos"}
-        else:
-            groups = [{"key": "users", "n": population}]
-            labels = {"users": "Usuarios registrados"}
+        grouped = []
+        for period in ps:
+            qs = users(filters, period)
+            populations.append(qs.values_list("pk", flat=True))
+            if report in {"countries", "genders"}:
+                field = "profile__streaming_country" if report == "countries" else "profile__gender_identity"
+                groups = qs.values(key=F(field)).annotate(n=Count("pk")).order_by("key")
+                labels = countries if report == "countries" else genders
+            elif report == "ages":
+                cases = [When(report_age__gte=lo, **({"report_age__lte": hi} if hi is not None else {}), then=Value(key)) for key, (lo, hi) in AGE_RANGES.items()]
+                groups = qs.annotate(key=Case(*cases, When(report_age__isnull=True, then=Value("unknown")), default=Value("outside"), output_field=CharField())).values("key").annotate(n=Count("pk")).order_by("key")
+                labels = {**AGE_LABELS, "unknown": "Sin dato", "outside": "Fuera de rangos definidos"}
+            else:
+                groups = [{"key": "users", "n": qs.count()}]
+                labels = {"users": "Usuarios registrados"}
+            grouped.append({g["key"]: g["n"] for g in groups})
+        population = populations[0].union(*populations[1:]).count()
+        keys = sorted(set().union(*(g.keys() for g in grouped)), key=lambda k: k or "")
         def rows(offset, limit):
-            iterable = groups[offset:None if limit is None else offset+limit]
-            for g in iterable:
-                valid = publishable(g["n"], protect)
-                yield [labels.get(g["key"], "Sin dato"), g["n"] if valid else MESSAGE]
+            for key in keys[offset:None if limit is None else offset+limit]:
+                cells = [(g.get(key, 0) if publishable(g.get(key, 0), protect) else None, None) for g in grouped]
+                yield compare_cells(labels.get(key, "Sin dato"), cells)
     elif report in CONTENT_REPORTS:
         # Compile narrow ORM source queries; identifiers are fixed here, user
         # supplied filters remain bound query parameters.
@@ -176,6 +186,11 @@ def generate(filters):
 
     blocked = not publishable(population, protect)
     # Publishing a grand total alongside suppressed cells enables subtraction.
-    hide_population = blocked or (protect and report != "users")
-    metadata.append(("Población analizada (usuarios únicos)", MESSAGE if hide_population else population))
-    return Result(REPORTS[report], headers, metadata, None if hide_population else population, blocked, rows)
+    hide_population = blocked or (protect and (report != "users" or len(ps) > 1))
+    # A single registered-user count already describes the entire population.
+    show_population = not (report == "users" and len(ps) == 1)
+    if show_population:
+        metadata.append(("Población analizada (usuarios únicos)", MESSAGE if hide_population else population))
+    methodology = [("Fuentes, semántica y limitaciones", warning) for warning in WARNINGS]
+    methodology.append(("Comparación", "Diferencia y porcentaje frente al periodo seleccionado anterior; base cero: No aplica. En rankings de ratings se compara el número de calificaciones, no el promedio."))
+    return Result(REPORTS[report], headers, metadata, None if hide_population else population, blocked, rows, methodology, show_population)
