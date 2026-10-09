@@ -8,3 +8,12 @@
 .report-field select[multiple]{height:180px;min-height:180px}
 .report-field select option{padding:4px}
 @media(max-width:600px){.report-form{grid-template-columns:minmax(0,1fr);padding:12px}.report-results dl{grid-template-columns:1fr}.report-results dd{overflow-wrap:anywhere}}
+
+/* Pivoted tables scroll only on demand and keep entity columns readable. */
+.report-table table{width:max-content;min-width:100%;border-collapse:collapse}
+.report-table th,.report-table td{min-width:100px;white-space:nowrap;padding:12px}
+.report-table thead th{text-align:center;border:1px solid var(--hairline-color)}
+.report-table tbody th{text-align:left;min-width:130px}
+.report-table tbody td{text-align:right}
+.report-table .report-total th,.report-table .report-total td{font-weight:700;border-top:2px solid var(--primary);background:var(--darkened-bg)}
+.report-column-context{color:var(--body-quiet-color)}

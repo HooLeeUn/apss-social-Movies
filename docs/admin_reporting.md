@@ -10,14 +10,15 @@ acciones CRUD. El Admin existente conserva sus registros y comportamiento.
 America/Bogota; `demographics.py` calcula edad histórica en PostgreSQL;
 `queries.py` define las fuentes reales; `services.py` agrega y suprime resultados;
 `privacy.py` aplica el umbral; `exports.py` produce CSV/XLSX del mismo resultado.
-`views.py` comprueba permisos en cada URL y pagina a 50 filas. Los recursos JS/CSS
+`views.py` comprueba permisos en cada URL y pagina a 50 entidades/columnas. Los recursos JS/CSS
 pertenecen exclusivamente al Django Admin; no se modificó el frontend.
 
 El catálogo incluye usuarios, rankings de producciones/géneros/combinaciones,
 producciones más recomendadas, cinco métricas directas y cinco sociales, con
 consolidados y comparaciones mensuales. Máximo 24 meses por solicitud. No hay PDF
-ni endpoints públicos. La tabla muestra totales por métrica/mes y diferencias
-entre meses seleccionados en orden cronológico, incluso si no son consecutivos.
+ni endpoints públicos. Los periodos diarios o mensuales aparecen en filas;
+entidades, segmentos y métricas en columnas. Se conservan todos los periodos,
+incluidos los vacíos, en orden cronológico, incluso meses no consecutivos.
 
 ## Selección temporal y presentación
 
@@ -33,7 +34,7 @@ Los cuatro reportes de usuarios ofrecen tres modos mutuamente excluyentes:
 
 - Acumulado total: semántica histórica existente, con edad a fecha actual;
   deshabilita meses, años y Desde/Hasta.
-- Comparación mensual: ambos checkboxes apagados; una columna por mes/año,
+- Comparación mensual: ambos checkboxes apagados; una fila por mes/año,
   usuarios cuyo `date_joined` pertenece a ese mes, sin acumular meses previos.
 - Personalizado: requiere Desde/Hasta, ambos inclusive en America/Bogota;
   un periodo por cada día con etiqueta `DD/MM/YYYY`, sin acumulado progresivo;
@@ -59,15 +60,78 @@ alta, inactivos cuentan y pendientes se excluyen. Se conserva el umbral de 10
 usuarios en segmentos protegidos y cada celda, también en CSV/XLSX. Si alguna
 celda comparada se suprime, diferencia y porcentaje también se suprimen.
 
-Las columnas identifican la métrica: «Dif. Usuarios», «Var. Usuarios %»,
-«Dif. Nº calificaciones», «Var. Nº calificaciones %», comentarios, follows,
-etc. En consolidados se indican eventos de la métrica de la fila. La diferencia
-es actual menos anterior; porcentaje = `(actual - anterior) / anterior * 100`,
-frente al periodo seleccionado anterior. Si anterior es cero, la diferencia
-se conserva y el porcentaje muestra «No aplica». 1→1 produce 0 y 0 %;
-2→0 produce -2 y -100 %. En rankings de ratings la comparación usa el número
-de calificaciones; cada mes o día mantiene su promedio aparte. En Personalizado,
-las diferencias y variaciones comparan días consecutivos del rango seleccionado.
+## Tablas pivotadas y totales
+
+La primera columna es «Fecha» en Personalizado y «Periodo» en mensual/acumulado.
+Los nombres de los periodos no llevan sufijos «· Total» ni «· Calificaciones».
+Un mes usa la misma orientación que varios meses; no hay alternativa horizontal.
+
+- Usuarios registrados: Fecha/Periodo, Registros, Diferencia y Variación %.
+- Usuarios por país, edad o identidad: una columna por segmento, TOTAL del
+  periodo, Diferencia y Variación %. Los segmentos son excluyentes; se conserva
+  el orden lógico del catálogo, incluyendo Sin dato/Fuera de rangos cuando aplica.
+- Ratings por producción, género o combinación: cada entidad tiene dos
+  subcolumnas «No calif.» y «Promedio Calif.», seguidas de TOTAL,
+  «Dif. Nº calificaciones» y «Var. Nº calificaciones %».
+- Recomendadas: una columna por producción. Sin diferencia, variación ni TOTAL
+  general. La suma final por producción cuenta contribuciones usuario-periodo,
+  no usuarios distintos de todo el rango: 8, 4 y 11 suman 23.
+- Actividad directa/social: las métricas son columnas; los individuales tienen
+  una sola columna de valor. Sin diferencia, variación ni TOTAL general.
+
+Cada tabla temporal termina en una fila TOTAL que suma las columnas de conteos
+a través de todos los periodos. En ratings, los Promedio Calif. de esta fila
+quedan vacíos: no se suman ni se calculan promedios consolidados. El modo
+Acumulado total conserva una única fila, sin repetir una sumatoria redundante.
+
+La columna TOTAL, exclusiva de usuarios segmentados y ratings, suma las celdas
+de conteos del periodo. En géneros representa contribuciones a géneros: un rating
+puede aparecer en más de un género, conforme a la agregación existente. No se
+presenta ese total como cantidad de ratings distintos.
+
+Solo usuarios y ratings muestran comparaciones. En filas normales se compara el
+total del periodo (Registros en usuarios registrados) con el periodo anterior:
+`actual - anterior` y `(actual - anterior) / anterior * 100`. La primera fila
+muestra «-». Base cero mantiene la diferencia y muestra «No aplica» en porcentaje.
+En Personalizado se comparan días consecutivos; en mensual, meses seleccionados.
+En la fila TOTAL se compara **último periodo contra primero**, sin usar la suma
+del rango. Registros 6, 5, 1, 2, 8 generan TOTAL 22, diferencia +2 y variación
+33,33 %. Un único periodo compara contra sí mismo en la fila TOTAL (0 y 0 %,
+o No aplica si su conteo es cero). Las comparaciones de ratings usan conteos,
+nunca promedios. HTML muestra signos/porcentajes; CSV conserva números y XLSX
+conserva valores numéricos con formato de porcentaje, sin cambiar su escala.
+
+La privacidad se aplica antes de pivotar y `privacy.protected_sum` propaga la
+supresión: cualquier fila/columna/gran total que contenga una celda protegida
+también se suprime. No se publica una suma parcial de celdas publicables que
+pueda confundirse con un total completo. Diferencias/porcentajes dependientes
+se suprimen. La comparación último/primero de TOTAL puede publicarse si ambos
+extremos son publicables, aunque un periodo intermedio suprima la sumatoria.
+
+HTML usa dos filas de encabezados para ratings, con colspan/rowspan y etiquetas
+de entidad escapadas; se mantiene el diseño del Admin y scroll horizontal manual,
+sin comprimir columnas ni desplazarlas automáticamente. Producciones incluyen
+tipo en su nombre y, solo ante títulos duplicados, un identificador estable.
+Títulos/tipos de entidades completamente protegidas se sustituyen por el mensaje
+de privacidad, sin publicar identificadores. Géneros tienen orden alfabético;
+producciones, combinaciones y Recomendadas ordenan actividad del rango descendente
+con desempate por clave. En reportes protegidos solo el conteo publicable participa
+en ese orden. HTML, CSV y XLSX comparten el mismo orden.
+
+CSV usa nombres planos («Acción - No calif.», «Acción - Promedio Calif.»).
+XLSX usa dos filas equivalentes, sin celdas combinadas para conservar la escritura
+optimizada; congela encabezados/periodos y conserva Reporte y Metodología.
+Todos los formatos consumen las mismas filas, totales y valores protegidos del
+Result, sin recalcular rangos en exportaciones.
+
+La paginación conserva 50 entidades, ahora como columnas, y muestra **todos los
+periodos y TOTAL en cada página**. El contexto indica el rango de entidades.
+TOTAL y sus comparaciones incluyen todas las entidades del reporte y permanecen
+idénticos al cambiar de página; se indica explícitamente en pantalla cuando hay
+más de 50 columnas. Una celda protegida en otra página suprime también ese TOTAL.
+Exportar incluye todas las columnas, como antes, aunque se pulse desde la página
+2. Los periodos no se paginan ni se truncan. Páginas fuera de rango se ajustan
+a la última página de entidades existente.
 
 La población analizada se omite de pantalla y exportaciones cuando coincide
 con la única cifra de usuarios registrados. Se conserva cuando aporta contexto
@@ -206,7 +270,8 @@ resultados) y «Metodología» (fuentes, semántica y todas las advertencias his
 incluidos updated_at, follows, Recomendadas y contenido oculto). CSV contiene
 metadatos y dataset sin filas metodológicas o «Limitación».
 CSV usa streaming; SQL de contenido usa cursor por
-bloques. Una nueva descarga ejecuta el mismo servicio con los mismos filtros;
+bloques. Para pivotar, servicios materializa exclusivamente las celdas agregadas
+entidad-periodo, nunca eventos individuales. Una nueva descarga ejecuta el mismo servicio con los mismos filtros;
 si los datos cambian entre pantalla y descarga, el resultado puede actualizarse.
 
 ## Archivos
@@ -292,13 +357,21 @@ reportes no revoca permisos existentes, por diseño.
 
 ## Mediciones pendientes y atención antes del merge
 
-- Personalizado amplía el número de consultas/agregaciones y columnas en función
-  de los días seleccionados. Los consolidados recorren cada métrica por día y
+- Personalizado amplía el número de consultas/agregaciones en función
+  de los días seleccionados; la tabla ahora amplía filas por día.
+  Los consolidados recorren cada métrica por día y
   contenido genera un fragmento SQL por día. El rango de 39 días se cubre en tests;
   medir latencia y ancho de exportaciones con datos representativos en preview.
   La tabla existente permite desplazamiento horizontal. Rangos muy largos pueden
-  exceder la capacidad del worker o las columnas de Excel; no se impuso un límite
+  exceder la capacidad del worker o las filas de Excel; no se impuso un límite
   arbitrario ni se consolidan días para evitarlos.
+- Pivotar necesita conocer todas las entidades y materializar sus celdas
+  agregadas: memoria proporcional a entidades × periodos, incluso para una
+  página HTML, porque los totales globales deben considerar también otras páginas.
+  Medir con un catálogo/rango representativo; el cursor sigue acotando lecturas
+  SQL y XLSX conserva escritura optimizada. Muchos títulos producen columnas
+  anchas; validar scroll en móvil/zoom y el límite de columnas de Excel para
+  exportaciones extraordinariamente grandes. No se introdujo un límite nuevo.
 
 - Medir scans temporales de MovieRating.updated_at, Comment.created_at, fechas de
   reacciones y Follow.created_at. Prioridad a MovieRating.updated_at; no se creó
@@ -321,6 +394,56 @@ reportes no revoca permisos existentes, por diseño.
   preferencias existentes.
 
 ## Validación realizada en este entorno
+
+### Pivot de periodos y entidades (9 de octubre de 2026)
+
+Cambios únicamente en el working tree de `codex/reporting-pivot-tables`, sin
+commit, push, PR, merge, despliegue, operaciones remotas, modelos ni migraciones.
+Las consultas/filtros temporales no cambian. Result comparte datos protegidos,
+encabezados agrupados/planos y sumatorias para todos los formatos.
+
+```powershell
+$env:DATABASE_URL=' '
+$env:DB_HOST='127.0.0.1'
+$env:DEBUG='True'
+$env:R2_ENDPOINT_URL=' '
+python manage.py test reporting core.tests.MovieRatingEndpointTests --noinput --keepdb
+python manage.py check
+python manage.py makemigrations --check --dry-run
+node --check reporting/static/reporting/reports.js
+node reporting/tests/test_reports_js.cjs
+git diff --check
+```
+
+96 tests focalizados aprobados: los 80 anteriores adaptados a la nueva
+orientación y 16 casos de pivot. Se cubren el ejemplo 6/5/1/2/8, bases cero,
+mes único y múltiples meses, segmentos, conteos/promedios, contribuciones de
+géneros, TOTAL último/primero, sumatorias protegidas, celda oculta en otra página,
+Recomendadas 8/4/11, los 12 reportes de actividad, agrupación de encabezados,
+paridad de valores HTML/CSV/XLSX, títulos duplicados, paginación y exports completos.
+Siguen pasando idempotencia de ratings, histórico/backfill de Recomendadas,
+concurrencia, privacidad, permisos y periodos diarios/mensuales. Checks aprobados;
+makemigrations no detecta cambios. JavaScript no necesita modificaciones.
+
+Suite completa: 745 casos descubiertos, 741 ejecutados en 66,504 segundos,
+55 fallos y 43 errores, todos en core; ningún fallo de reporting. Cuatro casos
+no se ejecutan por el error de preparación de ProfileActivityPhaseG3Tests.
+La lista normalizada de los 98 encabezados ERROR/FAIL coincide exactamente con
+el log de la validación diaria anterior; no aparecen casos problemáticos nuevos.
+Esto compara las ejecuciones locales registradas, sin cambiar de rama ni
+ejecutar otro commit. Ejemplos: fixtures MovieRating(rating=...), expectativas
+de feeds/autenticación/proveedores y ventanas semanales UTC frente a Bogotá.
+
+La suite completa usó MD5 únicamente como hasher del runner, PostgreSQL local,
+R2 deshabilitado y conexiones/resoluciones externas bloqueadas. Se ejecutó fuera
+del sandbox con la autorización existente para evitar problemas conocidos de
+temporales Windows. No hay PermissionError ni errores del bloqueo de red en el
+resultado. Log: `C:\Users\USUARIO\AppData\Local\Temp\reccool-pivot-full-tests.log`.
+No se modificaron módulos ajenos para resolver fallos históricos.
+
+Preview pendiente: encabezados agrupados y TOTAL en móvil/zoom, scroll manual,
+columnas largas, navegación entre páginas, apertura XLSX en Excel/LibreOffice,
+y memoria/latencia con entidades × periodos representativos del uso real.
 
 ### Personalizado diario (9 de octubre de 2026)
 

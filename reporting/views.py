@@ -26,16 +26,20 @@ def report_view(request, admin_site):
             if result.blocked:
                 raise PermissionDenied(MESSAGE)
             return csv_response(result) if export == "csv" else xlsx_response(result)
-        rows = list(result.rows((page-1)*50, 51))
+        # Preserve the 50-entity page size; periods now stay visible on every page.
+        page = min(page, max(1, (result.column_count + 49) // 50))
+        result = result.for_columns((page-1)*50, 50)
+        rows = list(result.rows())
     params = request.GET.copy()
     params.pop("page", None)
     params.pop("export", None)
     base = params.urlencode()
     context = {
         **admin_site.each_context(request), "title": "Generar reportes", "form": form,
-        "result": result, "rows": rows[:50], "page": page,
-        "next_page": page+1 if len(rows)>50 else None,
+        "result": result, "rows": rows, "page": page,
+        "next_page": page+1 if result and page*50 < result.column_count else None,
         "previous_page": page-1 if page>1 else None,
         "query": base, "can_export": can_export(request.user), "privacy_message": MESSAGE,
+        "column_start": (page-1)*50+1, "column_end": (page-1)*50+len(result.columns) if result else 0,
     }
     return TemplateResponse(request, "admin/reporting/generate.html", context)
