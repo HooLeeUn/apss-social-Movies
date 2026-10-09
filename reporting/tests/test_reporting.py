@@ -75,7 +75,7 @@ class ReportFixtures:
 class ReportTests(ReportFixtures, TestCase):
     def test_pending_does_not_count(self):
         PendingUserRegistration.objects.create(username="pending", email="a@b.com", first_name="A", last_name="B", birth_date=date(2000,1,1), password="hashed")
-        self.assertEqual(self.rows(), [["Usuarios registrados", 1]])
+        self.assertEqual(self.rows(), [["Acumulado total", 1, "-", "-"]])
 
     def test_confirmed_counts_and_date_joined(self):
         pending = PendingUserRegistration.objects.create(username="confirmed", email="a@b.com", first_name="A", last_name="B", birth_date=date(2000,1,1), password="hashed", terms_accepted_at=dt(2025,1))
@@ -135,44 +135,47 @@ class ReportTests(ReportFixtures, TestCase):
         self.assertEqual(self.rows("countries"),[])
         self.assertEqual(self.result("countries").blocked,True)
         self.people(10)
-        self.assertEqual(self.rows("countries"),[["Colombia",10]])
-        self.assertEqual(self.rows("genders"),[["Hombre",10]])
+        self.assertEqual(self.rows("countries"),[["Acumulado total",10,10,"-","-"]])
+        self.assertEqual(self.result("countries").headers[1], "Colombia")
+        self.assertEqual(self.rows("genders"),[["Acumulado total",10,10,"-","-"]])
+        self.assertEqual(self.result("genders").headers[1], "Hombre")
         self.assertEqual(self.rows("ages")[0][1],10)
 
     def test_rating_updated_at_average_and_content_type(self):
         self.rating(score=8,month=2)
         other=get_user_model().objects.create_user(username="other")
         self.rating(user=other,score=6,month=2)
-        self.assertEqual(self.rows("productions",months=["2026-01"]),[])
-        self.assertEqual(self.rows("productions",months=["2026-02"]),[["Dune","Película",2,7.0]])
-        self.assertEqual(self.rows("productions",months=["2026-02"],content_type="series"),[])
+        self.assertEqual(self.rows("productions",months=["2026-01"]),[["Enero 2026",0,"-","-"],["TOTAL",0,0,"No aplica"]])
+        self.assertEqual(self.rows("productions",months=["2026-02"]),[["Febrero 2026",2,7.0,2,"-","-"],["TOTAL",2,None,2,0,0.0]])
+        self.assertEqual(self.rows("productions",months=["2026-02"],content_type="series"),[["Febrero 2026",0,"-","-"],["TOTAL",0,0,"No aplica"]])
         series=Movie.objects.create(title_english="Series",type="series")
         self.rating(movie=series,month=2)
-        self.assertEqual(self.rows("productions",months=["2026-02"],content_type="series")[0][:3],["Series","Serie",1])
+        self.assertEqual(self.rows("productions",months=["2026-02"],content_type="series")[0][:3],["Febrero 2026",1,8.0])
+        self.assertEqual(self.result("productions",months=["2026-02"],content_type="series").header_groups[1].label,"Series (Serie)")
 
     def test_genres_individual_and_exact_combination(self):
         self.rating()
-        self.assertEqual(self.rows("genres"),[["Action",1,8.0],["Drama",1,8.0]])
-        self.assertEqual(self.rows("combinations"),[["Action|Drama",1,8.0]])
+        self.assertEqual(self.rows("genres"),[["Enero 2026",1,8.0,1,8.0,2,"-","-"],["TOTAL",1,None,1,None,2,0,0.0]])
+        self.assertEqual(self.rows("combinations"),[["Enero 2026",1,8.0,1,"-","-"],["TOTAL",1,None,1,0,0.0]])
 
     def test_content_multiple_months_zero_and_variation(self):
         self.rating()
         u=get_user_model().objects.create_user(username="u2");self.rating(user=u,month=2)
         u=get_user_model().objects.create_user(username="u3");self.rating(user=u,month=2)
-        row=self.rows("productions",months=["2026-01","2026-02","2026-03"])[0]
-        self.assertEqual(row,["Dune","Película",1,8.0,2,8.0,1,100.0,0,"No aplica",-2,-100.0])
+        rows=self.rows("productions",months=["2026-01","2026-02","2026-03"])
+        self.assertEqual(rows,[["Enero 2026",1,8.0,1,"-","-"],["Febrero 2026",2,8.0,2,1,100.0],["Marzo 2026",0,"No aplica",0,-2,-100.0],["TOTAL",3,None,3,-1,-100.0]])
         self.assertEqual(variation(0,3),(3,"No aplica"))
 
     def test_public_comments_only_hidden_count(self):
         for public, hidden in [(True,False),(True,True),(False,False)]:
             c=Comment.objects.create(author=self.user,movie=self.movie,body="test",visibility="public" if public else "mentioned",is_hidden=hidden,target_user=self.user if not public else None)
             self.stamp(c,"created_at",dt(2026,1))
-        self.assertEqual(self.rows("comments"),[["Comentarios públicos realizados",2]])
+        self.assertEqual(self.rows("comments"),[["Enero 2026",2],["TOTAL",2]])
 
     def test_hidden_video_counts(self):
         v=VideoComment.objects.create(user=self.user,movie=self.movie,video="test.mp4",duration_seconds=1,mime_type="video/mp4",file_size=1,is_hidden=True)
         self.stamp(v,"created_at",dt(2026,1))
-        self.assertEqual(self.rows("videos"),[["Video reacciones publicadas",1]])
+        self.assertEqual(self.rows("videos"),[["Enero 2026",1],["TOTAL",1]])
 
     def test_reactions_and_follows_actor_and_dates(self):
         other=get_user_model().objects.create_user(username="target")
@@ -182,10 +185,10 @@ class ReportTests(ReportFixtures, TestCase):
             r=model.objects.create(user=self.user,reaction_type="like",**target);self.stamp(r,"updated_at",dt(2026,1))
         f=Follow.objects.create(follower=self.user,following=other);self.stamp(f,"created_at",dt(2026,1))
         rows=self.rows("social")
-        self.assertEqual([r[1] for r in rows],[1,0,1,0,1])
+        self.assertEqual(rows,[["Enero 2026",1,0,1,0,1],["TOTAL",1,0,1,0,1]])
         for model in [CommentReaction,VideoCommentReaction]:
             model.objects.update(reaction_type="dislike",updated_at=dt(2026,2))
-        self.assertEqual([r[1] for r in self.rows("social",months=["2026-02"])],[0,1,0,1,0])
+        self.assertEqual(self.rows("social",months=["2026-02"]),[["Febrero 2026",0,1,0,1,0],["TOTAL",0,1,0,1,0]])
         comment.visibility="mentioned";comment.save()
         self.assertEqual(self.rows("comment_dislikes",months=["2026-02"])[0][1],0)
 
@@ -193,8 +196,7 @@ class ReportTests(ReportFixtures, TestCase):
         r=self.rating(month=2)
         self.stamp(r,"created_at",dt(2026,1))
         rows=self.rows("direct",months=["2026-01","2026-02"])
-        self.assertEqual(rows[0],["Calificaciones realizadas",0,1,1,"No aplica"])
-        self.assertEqual(len(rows),5)
+        self.assertEqual(rows,[["Enero 2026",0,0,0,0,0],["Febrero 2026",1,0,0,0,0],["TOTAL",1,0,0,0,0]])
 
     def test_privacy_9_blocked_10_allowed_and_exports(self):
         people=self.people(9)
@@ -213,8 +215,9 @@ class ReportTests(ReportFixtures, TestCase):
         r=self.result("direct",countries=["CO"],months=["2026-01","2026-02"])
         self.assertFalse(r.blocked)
         row=list(r.rows())[0]
-        self.assertEqual(row,["Calificaciones realizadas",10,MESSAGE,MESSAGE,MESSAGE])
-        self.assertEqual(list(r.rows())[1],["Comentarios públicos realizados",MESSAGE,MESSAGE,MESSAGE,MESSAGE])
+        self.assertEqual(row,["Enero 2026",10,MESSAGE,MESSAGE,MESSAGE,MESSAGE])
+        self.assertEqual(list(r.rows())[1],["Febrero 2026",MESSAGE,MESSAGE,MESSAGE,MESSAGE,MESSAGE])
+        self.assertEqual(list(r.rows())[-1],["TOTAL",MESSAGE,MESSAGE,MESSAGE,MESSAGE,MESSAGE])
         data=b"".join(csv_response(r).streaming_content).decode("utf-8-sig")
         self.assertIn(MESSAGE,data)
         wb=load_workbook(BytesIO(b"".join(xlsx_response(r).streaming_content)))
@@ -226,9 +229,13 @@ class ReportTests(ReportFixtures, TestCase):
         minority=Movie.objects.create(title_english="Hidden title",genre="Secret",type="movie")
         self.rating(movie=minority)
         r=self.result("productions",countries=["CO"])
-        rows=list(r.rows());self.assertEqual(rows[0][2],10)
-        self.assertEqual(rows[1],[MESSAGE,MESSAGE,MESSAGE,MESSAGE])
-        self.assertEqual(self.rows("genres",countries=["CO"])[-1],[MESSAGE,MESSAGE,MESSAGE])
+        rows=list(r.rows());self.assertEqual(rows[0][1],10)
+        self.assertEqual(rows[0][3:],[MESSAGE,MESSAGE,MESSAGE,"-","-"])
+        self.assertEqual(rows[-1][3:],[MESSAGE,None,MESSAGE,MESSAGE,MESSAGE])
+        self.assertNotIn("Hidden title", str(r.headers))
+        genres=self.result("genres",countries=["CO"])
+        self.assertEqual(list(genres.rows())[0][5:],[MESSAGE,MESSAGE,MESSAGE,"-","-"])
+        self.assertNotIn("Secret", str(genres.headers))
 
     def test_csv_bom_and_real_xlsx_and_formula_safety(self):
         self.movie.title_english="=HYPERLINK(1)";self.movie.save();self.rating()
@@ -236,8 +243,9 @@ class ReportTests(ReportFixtures, TestCase):
         data=b"".join(csv_response(r).streaming_content)
         self.assertTrue(data.startswith(b"\xef\xbb\xbf"));self.assertIn(b"'=HYPERLINK",data)
         x=b"".join(xlsx_response(r).streaming_content);self.assertTrue(x.startswith(b"PK"))
-        wb=load_workbook(BytesIO(x));last=list(wb.active.rows)[-1][0]
-        self.assertEqual(last.data_type,"s");self.assertTrue(last.value.startswith("'="))
+        wb=load_workbook(BytesIO(x))
+        titles=[cell for row in wb.active.rows for cell in row if isinstance(cell.value,str) and cell.value.startswith("'=HYPERLINK")]
+        self.assertEqual(len(titles),1);self.assertEqual(titles[0].data_type,"s")
 
     def test_form_validation_and_irrelevant_fields(self):
         form=ReportForm({"report":"users","total":"on","content_type":"movie"})
@@ -250,8 +258,10 @@ class ReportTests(ReportFixtures, TestCase):
         for i in range(55):
             m=Movie.objects.create(title_english=f"Film-{i}",type="movie");self.rating(movie=m)
         r=self.result("productions")
-        self.assertEqual(len(list(r.rows(0,50))),50)
-        self.assertEqual(len(list(r.rows(50,50))),5)
+        self.assertEqual(len(r.for_columns(0,50).columns),50)
+        self.assertEqual(len(r.for_columns(50,50).columns),5)
+        self.assertEqual(len(list(r.for_columns(50,50).rows())),2)
+        self.assertEqual(list(r.for_columns(50,50).rows())[0][-3],55)
 
 
 class RatingIdempotenceTests(ReportFixtures, TestCase):
@@ -268,7 +278,7 @@ class RatingIdempotenceTests(ReportFixtures, TestCase):
         self.assertEqual(MovieRating.objects.count(),1)
         for m in [UserGenrePreference,UserTypePreference,UserDirectorPreference,UserTasteProfile]:
             self.assertEqual(before[m.__name__],list(m.objects.values()))
-        self.assertEqual(self.rows("productions")[0][2],1)
+        self.assertEqual(self.rows("productions")[0][1],1)
         response=self.api.put(url,{"score":9},format="json")
         self.assertEqual(response.json(),{"movie":self.movie.pk,"my_rating":9,"created":False})
         rating.refresh_from_db();self.assertGreater(rating.updated_at,dt(2026,1))
@@ -297,14 +307,14 @@ class RecommendationTests(ReportFixtures, TestCase):
 
     def test_overlap_january_february_not_march(self):
         self.interval(dt(2026,1,10),dt(2026,2,12))
-        self.assertEqual(self.rows("recommended",months=["2026-01","2026-02","2026-03"]),[["Dune","Película",1,1,0,0.0,0,-1,-100.0]])
+        self.assertEqual(self.rows("recommended",months=["2026-01","2026-02","2026-03"]),[["Enero 2026",1],["Febrero 2026",1],["Marzo 2026",0],["TOTAL",2]])
 
     def test_multiple_intervals_count_once_same_month(self):
         self.interval(dt(2026,1,3),dt(2026,1,7));self.interval(dt(2026,1,20),dt(2026,1,25))
-        self.assertEqual(self.rows("recommended"),[["Dune","Película",1]])
+        self.assertEqual(self.rows("recommended"),[["Enero 2026",1],["TOTAL",1]])
         self.assertEqual(self.rows("added")[0][1],2)
         self.assertEqual(self.rows("removed")[0][1],2)
-        self.assertEqual(self.rows("recommended",months=["2026-02"]),[])
+        self.assertEqual(self.rows("recommended",months=["2026-02"]),[["Febrero 2026"],["TOTAL"]])
 
     def test_backfill_preserves_timestamp_idempotent_partial(self):
         item=MovieRecommendationItem.objects.create(user=self.user,movie=self.movie)
@@ -320,7 +330,7 @@ class RecommendationTests(ReportFixtures, TestCase):
         from reporting.periods import month_period
         feb=month_period("2026-02")
         self.interval(dt(2026,1),feb.start)
-        self.assertEqual(self.rows("recommended",months=["2026-02"])[0][2],1)
+        self.assertEqual(self.rows("recommended",months=["2026-02"])[0][1],1)
 
     def test_user_deletion_does_not_recreate_history(self):
         MovieRecommendationItem.objects.create(user=self.user,movie=self.movie)
@@ -387,7 +397,7 @@ class AdditionalReportTests(ReportFixtures, TestCase):
             self.stamp(u,"date_joined",dt(2026,1))
         result=self.result(countries=["CO","VE"],genders=["male"],ages=["18_30"],total=False)
         self.assertEqual(result.population,10)
-        self.assertEqual(list(result.rows()),[["Usuarios registrados",10]])
+        self.assertEqual(list(result.rows()),[["Enero 2026",10,"-","-"],["TOTAL",10,0,0.0]])
         self.assertTrue(self.result(countries=["CO"],total=False).blocked)
 
     def test_population_not_exposed_with_suppressed_demographic_group(self):
@@ -395,15 +405,17 @@ class AdditionalReportTests(ReportFixtures, TestCase):
         p=people[-1].profile;p.streaming_country="VE";p.save()
         r=self.result("countries")
         self.assertIsNone(r.population)
-        self.assertEqual(list(r.rows()),[["Colombia",10],["Venezuela",MESSAGE]])
+        self.assertEqual(list(r.rows()),[["Acumulado total",10,MESSAGE,MESSAGE,"-","-"]])
         self.assertEqual(r.metadata[-1][1],MESSAGE)
 
     def test_age_unknown_and_outside_groups(self):
         people=self.people(10)
         Profile.objects.update(birth_date=None)
-        self.assertEqual(self.rows("ages"),[["Sin dato",10]])
+        self.assertEqual(self.rows("ages"),[["Acumulado total",10,10,"-","-"]])
+        self.assertEqual(self.result("ages").headers[1],"Sin dato")
         Profile.objects.update(birth_date=date(2020,1,1))
-        self.assertEqual(self.rows("ages"),[["Fuera de rangos definidos",10]])
+        self.assertEqual(self.rows("ages"),[["Acumulado total",10,10,"-","-"]])
+        self.assertEqual(self.result("ages").headers[1],"Fuera de rangos definidos")
 
     def test_timezone_month_boundaries(self):
         rating=self.rating()
@@ -468,8 +480,8 @@ class AdditionalReportTests(ReportFixtures, TestCase):
         qs,_=source("comment_likes",filters(countries=["CO"]),month_period("2026-01"));self.assertEqual(qs.count(),1)
         qs,_=source("comment_likes",filters(countries=["VE"]),month_period("2026-01"));self.assertEqual(qs.count(),0)
 
-    def test_form_rejects_custom_nonmonthly_and_excess_comparison(self):
-        self.assertFalse(ReportForm({"report":"ratings","custom":"on","since":"2026-01-01","until":"2026-01-31"}).is_valid())
+    def test_form_accepts_custom_and_rejects_invalid_comparison(self):
+        self.assertTrue(ReportForm({"report":"ratings","custom":"on","since":"2026-01-01","until":"2026-01-31"}).is_valid())
         self.assertFalse(ReportForm({"report":"social","months":["2026-01"],"content_type":"movie"}).is_valid())
         form=ReportForm({"report":"users","total":"on","months":["99"]})
         self.assertFalse(form.is_valid())

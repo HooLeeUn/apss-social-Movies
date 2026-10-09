@@ -26,8 +26,12 @@ def month_period(value):
 def periods(filters):
     if filters["report"] in USER_REPORTS and filters["total"]:
         return [Period("Acumulado total", None, None)]
-    if filters["report"] in USER_REPORTS and filters["custom"]:
-        return [Period(f'{filters["since"]} — {filters["until"]}', midnight(filters["since"]), midnight(filters["until"] + timedelta(days=1)))]
+    if filters["custom"]:
+        days = []
+        for offset in range((filters["until"] - filters["since"]).days + 1):
+            day = filters["since"] + timedelta(days=offset)
+            days.append(Period(day.strftime("%d/%m/%Y"), midnight(day), midnight(day + timedelta(days=1))))
+        return days
     return [month_period(f"{year:04}-{month:02}")
             for year in sorted(set(filters["years"]))
             for month in sorted(set(filters["months"]))]

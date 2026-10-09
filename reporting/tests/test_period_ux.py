@@ -56,7 +56,7 @@ class PeriodUXTests(ReportFixtures, TestCase):
         self.assertTrue(self.form(total="on", months=[], years=[]).is_valid())
         form = self.form(custom="on", months=[], years=[], since="2025-01-15", until="2025-01-15")
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(list(__import__("reporting.services", fromlist=["generate"]).generate(form.cleaned_data).rows()), [["Usuarios registrados", 1]])
+        self.assertEqual(list(__import__("reporting.services", fromlist=["generate"]).generate(form.cleaned_data).rows()), [["15/01/2025",1,"-","-"],["TOTAL",1,0,0.0]])
 
     def test_monthly_users_not_accumulated_inactive_and_pending(self):
         from core.models import PendingUserRegistration
@@ -65,8 +65,8 @@ class PeriodUXTests(ReportFixtures, TestCase):
         other = get_user_model().objects.create_user(username="feb")
         self.stamp(other, "date_joined", dt(2026, 2))
         PendingUserRegistration.objects.create(username="pending", email="pending@example.com", first_name="A", last_name="B", birth_date=date(2000, 1, 1), password="hashed")
-        self.assertEqual(self.rows(total=False, months=[1, 2], years=[2025, 2026]), [["Usuarios registrados", 1, 0, -1, -100.0, 0, 0, "No aplica", 1, 1, "No aplica"]])
-        self.assertEqual(self.rows(), [["Usuarios registrados", 2]])
+        self.assertEqual(self.rows(total=False, months=[1, 2], years=[2025, 2026]), [["Enero 2025",1,"-","-"],["Febrero 2025",0,-1,-100.0],["Enero 2026",0,0,"No aplica"],["Febrero 2026",1,1,"No aplica"],["TOTAL",2,0,0.0]])
+        self.assertEqual(self.rows(), [["Acumulado total",2,"-","-"]])
 
     def test_user_monthly_privacy_filters_and_derived_cells(self):
         people = self.people(10)
@@ -77,7 +77,9 @@ class PeriodUXTests(ReportFixtures, TestCase):
         for report in ["users", "countries", "ages", "genders"]:
             result = self.result(report, total=False, months=[1, 2], years=[2025], countries=["CO"], genders=["male"], ages=["18_30"])
             self.assertFalse(result.blocked)
-            self.assertEqual(list(result.rows())[0][1:], [10, MESSAGE, MESSAGE, MESSAGE])
+            self.assertEqual(list(result.rows())[0][1], 10)
+            self.assertTrue(all(cell == MESSAGE for cell in list(result.rows())[1][1:]))
+            self.assertTrue(all(cell == MESSAGE for cell in list(result.rows())[-1][1:]))
             self.assertIsNone(result.population)
             csv = b"".join(csv_response(result).streaming_content).decode("utf-8-sig")
             self.assertIn(MESSAGE, csv)
@@ -94,15 +96,19 @@ class PeriodUXTests(ReportFixtures, TestCase):
         wb = load_workbook(BytesIO(b"".join(xlsx_response(result).streaming_content)))
         self.assertEqual(wb.sheetnames, ["Reporte", "Metodología"])
         self.assertEqual(list(wb["Metodología"].values), [tuple(row) for row in result.methodology])
-        self.assertEqual(list(wb["Reporte"].values)[-1], ("Usuarios registrados", 1))
+        self.assertEqual(list(wb["Reporte"].values)[-1], ("Acumulado total",1,"-","-"))
         self.assertTrue(self.result("ratings").show_population)
         self.assertTrue(self.result(total=False, months=[1, 2], years=[2025]).show_population)
 
     def test_explicit_variation_headers_and_zero(self):
-        for report, name in [("users", "Usuarios"), ("productions", "Nº calificaciones"), ("comments", "Comentarios"), ("videos", "Video reacciones"), ("follows", "Follows")]:
+        for report in ["users", "productions", "comments", "videos", "follows"]:
             result = self.result(report, total=False, months=[1, 2], years=[2025])
-            self.assertIn("Dif. " + name, result.headers[-2])
-            self.assertIn("Var. " + name + " %", result.headers[-1])
+            if report == "users":
+                self.assertEqual(result.headers[-2:], ["Diferencia", "Variación %"])
+            elif report == "productions":
+                self.assertEqual(result.headers[-2:], ["Dif. Nº calificaciones", "Var. Nº calificaciones %"])
+            else:
+                self.assertEqual(len(result.headers), 2)
         self.assertEqual(variation(0, 2), (2, "No aplica"))
         self.assertEqual(variation(1, 1), (0, 0))
         self.assertEqual(variation(2, 0), (-2, -100))

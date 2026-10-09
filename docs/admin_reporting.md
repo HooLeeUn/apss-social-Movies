@@ -10,14 +10,15 @@ acciones CRUD. El Admin existente conserva sus registros y comportamiento.
 America/Bogota; `demographics.py` calcula edad histórica en PostgreSQL;
 `queries.py` define las fuentes reales; `services.py` agrega y suprime resultados;
 `privacy.py` aplica el umbral; `exports.py` produce CSV/XLSX del mismo resultado.
-`views.py` comprueba permisos en cada URL y pagina a 50 filas. Los recursos JS/CSS
+`views.py` comprueba permisos en cada URL y pagina a 50 entidades/columnas. Los recursos JS/CSS
 pertenecen exclusivamente al Django Admin; no se modificó el frontend.
 
 El catálogo incluye usuarios, rankings de producciones/géneros/combinaciones,
 producciones más recomendadas, cinco métricas directas y cinco sociales, con
 consolidados y comparaciones mensuales. Máximo 24 meses por solicitud. No hay PDF
-ni endpoints públicos. La tabla muestra totales por métrica/mes y diferencias
-entre meses seleccionados en orden cronológico, incluso si no son consecutivos.
+ni endpoints públicos. Los periodos diarios o mensuales aparecen en filas;
+entidades, segmentos y métricas en columnas. Se conservan todos los periodos,
+incluidos los vacíos, en orden cronológico, incluso meses no consecutivos.
 
 ## Selección temporal y presentación
 
@@ -33,10 +34,25 @@ Los cuatro reportes de usuarios ofrecen tres modos mutuamente excluyentes:
 
 - Acumulado total: semántica histórica existente, con edad a fecha actual;
   deshabilita meses, años y Desde/Hasta.
-- Comparación mensual: ambos checkboxes apagados; una columna por mes/año,
+- Comparación mensual: ambos checkboxes apagados; una fila por mes/año,
   usuarios cuyo `date_joined` pertenece a ese mes, sin acumular meses previos.
 - Personalizado: requiere Desde/Hasta, ambos inclusive en America/Bogota;
+  un periodo por cada día con etiqueta `DD/MM/YYYY`, sin acumulado progresivo;
   deshabilita Acumulado total, meses y años.
+
+Todos los reportes de Contenido, Actividad directa y Actividad indirecta/social
+ofrecen comparación mensual y Personalizado. Acumulado total sigue siendo
+exclusivo de usuarios. En Personalizado, Desde/Hasta están habilitados y Meses/Años
+deshabilitados, por lo que no se envían como filtros activos. Al desactivarlo se
+invierten estos controles. El servidor rechaza modos o filtros temporales mezclados.
+
+Cada día usa el intervalo semiabierto `[inicio, día siguiente)`, con ambos límites
+a las 00:00 en America/Bogota. Desde y Hasta son inclusivos en la interfaz:
+01/09/2026 a 09/10/2026 produce 39 periodos diarios, incluyendo ambos extremos.
+Se conserva cada día aunque tenga cero eventos. No hay máximo nuevo ni
+consolidación automática de rangos largos. Pantalla, metadata, CSV y XLSX consumen
+el mismo resultado y las mismas etiquetas diarias; XLSX conserva Reporte y Metodología.
+Las consultas conservan sus fuentes, filtros y semánticas históricas existentes.
 
 El servidor rechaza combinaciones ambiguas incluso sin JavaScript. País e
 identidad siguen siendo actuales, edad mensual/personalizada corresponde al
@@ -44,14 +60,78 @@ alta, inactivos cuentan y pendientes se excluyen. Se conserva el umbral de 10
 usuarios en segmentos protegidos y cada celda, también en CSV/XLSX. Si alguna
 celda comparada se suprime, diferencia y porcentaje también se suprimen.
 
-Las columnas identifican la métrica: «Dif. Usuarios», «Var. Usuarios %»,
-«Dif. Nº calificaciones», «Var. Nº calificaciones %», comentarios, follows,
-etc. En consolidados se indican eventos de la métrica de la fila. La diferencia
-es actual menos anterior; porcentaje = `(actual - anterior) / anterior * 100`,
-frente al periodo seleccionado anterior. Si anterior es cero, la diferencia
-se conserva y el porcentaje muestra «No aplica». 1→1 produce 0 y 0 %;
-2→0 produce -2 y -100 %. En rankings de ratings la comparación usa el número
-de calificaciones; cada mes mantiene su promedio aparte.
+## Tablas pivotadas y totales
+
+La primera columna es «Fecha» en Personalizado y «Periodo» en mensual/acumulado.
+Los nombres de los periodos no llevan sufijos «· Total» ni «· Calificaciones».
+Un mes usa la misma orientación que varios meses; no hay alternativa horizontal.
+
+- Usuarios registrados: Fecha/Periodo, Registros, Diferencia y Variación %.
+- Usuarios por país, edad o identidad: una columna por segmento, TOTAL del
+  periodo, Diferencia y Variación %. Los segmentos son excluyentes; se conserva
+  el orden lógico del catálogo, incluyendo Sin dato/Fuera de rangos cuando aplica.
+- Ratings por producción, género o combinación: cada entidad tiene dos
+  subcolumnas «No calif.» y «Promedio Calif.», seguidas de TOTAL,
+  «Dif. Nº calificaciones» y «Var. Nº calificaciones %».
+- Recomendadas: una columna por producción. Sin diferencia, variación ni TOTAL
+  general. La suma final por producción cuenta contribuciones usuario-periodo,
+  no usuarios distintos de todo el rango: 8, 4 y 11 suman 23.
+- Actividad directa/social: las métricas son columnas; los individuales tienen
+  una sola columna de valor. Sin diferencia, variación ni TOTAL general.
+
+Cada tabla temporal termina en una fila TOTAL que suma las columnas de conteos
+a través de todos los periodos. En ratings, los Promedio Calif. de esta fila
+quedan vacíos: no se suman ni se calculan promedios consolidados. El modo
+Acumulado total conserva una única fila, sin repetir una sumatoria redundante.
+
+La columna TOTAL, exclusiva de usuarios segmentados y ratings, suma las celdas
+de conteos del periodo. En géneros representa contribuciones a géneros: un rating
+puede aparecer en más de un género, conforme a la agregación existente. No se
+presenta ese total como cantidad de ratings distintos.
+
+Solo usuarios y ratings muestran comparaciones. En filas normales se compara el
+total del periodo (Registros en usuarios registrados) con el periodo anterior:
+`actual - anterior` y `(actual - anterior) / anterior * 100`. La primera fila
+muestra «-». Base cero mantiene la diferencia y muestra «No aplica» en porcentaje.
+En Personalizado se comparan días consecutivos; en mensual, meses seleccionados.
+En la fila TOTAL se compara **último periodo contra primero**, sin usar la suma
+del rango. Registros 6, 5, 1, 2, 8 generan TOTAL 22, diferencia +2 y variación
+33,33 %. Un único periodo compara contra sí mismo en la fila TOTAL (0 y 0 %,
+o No aplica si su conteo es cero). Las comparaciones de ratings usan conteos,
+nunca promedios. HTML muestra signos/porcentajes; CSV conserva números y XLSX
+conserva valores numéricos con formato de porcentaje, sin cambiar su escala.
+
+La privacidad se aplica antes de pivotar y `privacy.protected_sum` propaga la
+supresión: cualquier fila/columna/gran total que contenga una celda protegida
+también se suprime. No se publica una suma parcial de celdas publicables que
+pueda confundirse con un total completo. Diferencias/porcentajes dependientes
+se suprimen. La comparación último/primero de TOTAL puede publicarse si ambos
+extremos son publicables, aunque un periodo intermedio suprima la sumatoria.
+
+HTML usa dos filas de encabezados para ratings, con colspan/rowspan y etiquetas
+de entidad escapadas; se mantiene el diseño del Admin y scroll horizontal manual,
+sin comprimir columnas ni desplazarlas automáticamente. Producciones incluyen
+tipo en su nombre y, solo ante títulos duplicados, un identificador estable.
+Títulos/tipos de entidades completamente protegidas se sustituyen por el mensaje
+de privacidad, sin publicar identificadores. Géneros tienen orden alfabético;
+producciones, combinaciones y Recomendadas ordenan actividad del rango descendente
+con desempate por clave. En reportes protegidos solo el conteo publicable participa
+en ese orden. HTML, CSV y XLSX comparten el mismo orden.
+
+CSV usa nombres planos («Acción - No calif.», «Acción - Promedio Calif.»).
+XLSX usa dos filas equivalentes, sin celdas combinadas para conservar la escritura
+optimizada; congela encabezados/periodos y conserva Reporte y Metodología.
+Todos los formatos consumen las mismas filas, totales y valores protegidos del
+Result, sin recalcular rangos en exportaciones.
+
+La paginación conserva 50 entidades, ahora como columnas, y muestra **todos los
+periodos y TOTAL en cada página**. El contexto indica el rango de entidades.
+TOTAL y sus comparaciones incluyen todas las entidades del reporte y permanecen
+idénticos al cambiar de página; se indica explícitamente en pantalla cuando hay
+más de 50 columnas. Una celda protegida en otra página suprime también ese TOTAL.
+Exportar incluye todas las columnas, como antes, aunque se pulse desde la página
+2. Los periodos no se paginan ni se truncan. Páginas fuera de rango se ajustan
+a la última página de entidades existente.
 
 La población analizada se omite de pantalla y exportaciones cuando coincide
 con la única cifra de usuarios registrados. Se conserva cuando aporta contexto
@@ -111,6 +191,12 @@ exige que transcurran 24 horas. La edad de intervalos se referencia al primer
 instante de solapamiento: `greatest(started_at, inicio_mes)`; cada intervalo puede
 calificar al usuario para el segmento y el usuario se deduplica después.
 
+En Personalizado se reutiliza exactamente este solapamiento, sustituyendo mes
+por día, con usuarios únicos por producción y día. Una recomendación iniciada
+01/09 a las 15:00 y retirada 03/09 a las 10:00 cuenta los días 01, 02 y 03,
+pero no el 04. Se conserva también la regla histórica de fin inclusivo: un retiro
+exactamente a medianoche cuenta en el día que comienza en ese instante.
+
 `MovieRecommendationItem` sigue representando el estado actual. La API usa una
 transacción y bloqueo de la fila del usuario, incluso si no existe item. Las
 señales abren/cierra intervalos para creaciones/eliminaciones ORM normales. Una
@@ -161,6 +247,12 @@ usuarios únicos globales y por celda. Para actividad son contribuyentes a esa
 métrica/mes; para contenido, contribuyentes a producción/género/mes. Cero usuarios
 también es muestra inferior al umbral en reportes protegidos.
 
+En Personalizado el mismo umbral se aplica al segmento y a cada celda diaria:
+usuarios únicos, no número de eventos. Si la celda actual o anterior está
+suprimida, ambas comparaciones se suprimen, incluso en los días siguientes a una
+celda oculta. No se publica población consolidada que permita deducir celdas
+diarias protegidas. Estas reglas se comparten entre HTML, CSV y XLSX.
+
 Si la población global es insuficiente, no hay filas ni exportación. En reportes
 con población global suficiente se suprimen celdas individuales, sus promedios,
 diferencias y porcentajes. Se reserva el total de población para reportes
@@ -178,7 +270,8 @@ resultados) y «Metodología» (fuentes, semántica y todas las advertencias his
 incluidos updated_at, follows, Recomendadas y contenido oculto). CSV contiene
 metadatos y dataset sin filas metodológicas o «Limitación».
 CSV usa streaming; SQL de contenido usa cursor por
-bloques. Una nueva descarga ejecuta el mismo servicio con los mismos filtros;
+bloques. Para pivotar, servicios materializa exclusivamente las celdas agregadas
+entidad-periodo, nunca eventos individuales. Una nueva descarga ejecuta el mismo servicio con los mismos filtros;
 si los datos cambian entre pantalla y descarga, el resultado puede actualizarse.
 
 ## Archivos
@@ -264,6 +357,22 @@ reportes no revoca permisos existentes, por diseño.
 
 ## Mediciones pendientes y atención antes del merge
 
+- Personalizado amplía el número de consultas/agregaciones en función
+  de los días seleccionados; la tabla ahora amplía filas por día.
+  Los consolidados recorren cada métrica por día y
+  contenido genera un fragmento SQL por día. El rango de 39 días se cubre en tests;
+  medir latencia y ancho de exportaciones con datos representativos en preview.
+  La tabla existente permite desplazamiento horizontal. Rangos muy largos pueden
+  exceder la capacidad del worker o las filas de Excel; no se impuso un límite
+  arbitrario ni se consolidan días para evitarlos.
+- Pivotar necesita conocer todas las entidades y materializar sus celdas
+  agregadas: memoria proporcional a entidades × periodos, incluso para una
+  página HTML, porque los totales globales deben considerar también otras páginas.
+  Medir con un catálogo/rango representativo; el cursor sigue acotando lecturas
+  SQL y XLSX conserva escritura optimizada. Muchos títulos producen columnas
+  anchas; validar scroll en móvil/zoom y el límite de columnas de Excel para
+  exportaciones extraordinariamente grandes. No se introdujo un límite nuevo.
+
 - Medir scans temporales de MovieRating.updated_at, Comment.created_at, fechas de
   reacciones y Follow.created_at. Prioridad a MovieRating.updated_at; no se creó
   ese índice sin medición. Usar EXPLAIN inicialmente y EXPLAIN ANALYZE en staging
@@ -285,6 +394,111 @@ reportes no revoca permisos existentes, por diseño.
   preferencias existentes.
 
 ## Validación realizada en este entorno
+
+### Pivot de periodos y entidades (9 de octubre de 2026)
+
+Cambios únicamente en el working tree de `codex/reporting-pivot-tables`, sin
+commit, push, PR, merge, despliegue, operaciones remotas, modelos ni migraciones.
+Las consultas/filtros temporales no cambian. Result comparte datos protegidos,
+encabezados agrupados/planos y sumatorias para todos los formatos.
+
+```powershell
+$env:DATABASE_URL=' '
+$env:DB_HOST='127.0.0.1'
+$env:DEBUG='True'
+$env:R2_ENDPOINT_URL=' '
+python manage.py test reporting core.tests.MovieRatingEndpointTests --noinput --keepdb
+python manage.py check
+python manage.py makemigrations --check --dry-run
+node --check reporting/static/reporting/reports.js
+node reporting/tests/test_reports_js.cjs
+git diff --check
+```
+
+96 tests focalizados aprobados: los 80 anteriores adaptados a la nueva
+orientación y 16 casos de pivot. Se cubren el ejemplo 6/5/1/2/8, bases cero,
+mes único y múltiples meses, segmentos, conteos/promedios, contribuciones de
+géneros, TOTAL último/primero, sumatorias protegidas, celda oculta en otra página,
+Recomendadas 8/4/11, los 12 reportes de actividad, agrupación de encabezados,
+paridad de valores HTML/CSV/XLSX, títulos duplicados, paginación y exports completos.
+Siguen pasando idempotencia de ratings, histórico/backfill de Recomendadas,
+concurrencia, privacidad, permisos y periodos diarios/mensuales. Checks aprobados;
+makemigrations no detecta cambios. JavaScript no necesita modificaciones.
+
+Suite completa: 745 casos descubiertos, 741 ejecutados en 66,504 segundos,
+55 fallos y 43 errores, todos en core; ningún fallo de reporting. Cuatro casos
+no se ejecutan por el error de preparación de ProfileActivityPhaseG3Tests.
+La lista normalizada de los 98 encabezados ERROR/FAIL coincide exactamente con
+el log de la validación diaria anterior; no aparecen casos problemáticos nuevos.
+Esto compara las ejecuciones locales registradas, sin cambiar de rama ni
+ejecutar otro commit. Ejemplos: fixtures MovieRating(rating=...), expectativas
+de feeds/autenticación/proveedores y ventanas semanales UTC frente a Bogotá.
+
+La suite completa usó MD5 únicamente como hasher del runner, PostgreSQL local,
+R2 deshabilitado y conexiones/resoluciones externas bloqueadas. Se ejecutó fuera
+del sandbox con la autorización existente para evitar problemas conocidos de
+temporales Windows. No hay PermissionError ni errores del bloqueo de red en el
+resultado. Log: `C:\Users\USUARIO\AppData\Local\Temp\reccool-pivot-full-tests.log`.
+No se modificaron módulos ajenos para resolver fallos históricos.
+
+Preview pendiente: encabezados agrupados y TOTAL en móvil/zoom, scroll manual,
+columnas largas, navegación entre páginas, apertura XLSX en Excel/LibreOffice,
+y memoria/latencia con entidades × periodos representativos del uso real.
+
+### Personalizado diario (9 de octubre de 2026)
+
+Cambios locales en `codex/reporting-custom-daily-periods`, sin commit, push,
+operaciones remotas, modelos ni migraciones. Personalizado genera un periodo
+por día para los 20 reportes. Se añadieron 11 casos Django y una prueba de
+JavaScript que verifica exclusión de modos y controles para los 20 reportes.
+
+Validación final con PostgreSQL local, `DEBUG=True` y R2 deshabilitado:
+
+```powershell
+$env:DATABASE_URL=' '
+$env:DB_HOST='127.0.0.1'
+$env:DEBUG='True'
+$env:R2_ENDPOINT_URL=' '
+python manage.py test reporting core.tests.MovieRatingEndpointTests --noinput --keepdb
+python manage.py check
+python manage.py makemigrations --check --dry-run
+node --check reporting/static/reporting/reports.js
+node reporting/tests/test_reports_js.cjs
+git diff --check
+```
+
+Los espacios son intencionales: PowerShell elimina variables asignadas a `''`,
+permitiendo que `.env` las repueble. La configuración aplica `.strip()`, de modo
+que `' '` deshabilita DATABASE_URL y R2 sin cambiar archivos de configuración.
+Se comprobó `R2_ENABLED=False` y `DB_HOST=127.0.0.1`.
+
+80 tests focalizados aprobados con el hasher habitual; checks de Django,
+migraciones, sintaxis JavaScript, controles y diff aprobados. Los casos nuevos
+cubren días inclusivos, Bogotá/UTC, medianoche, años bisiestos, 39 días y rangos
+mayores, altas diarias, filtros/edad histórica, privacidad, ratings/promedios,
+géneros/combinaciones, solapamientos, actividad directa/social, validación
+servidor, diferencias/porcentajes y paridad HTML/CSV/XLSX.
+
+La suite completa descubrió 729 tests y ejecutó 725 en 115,595 segundos:
+55 fallos y 43 errores, todos en core, ninguno en reporting. Cuatro casos no
+llegaron a ejecutarse por un error en `ProfileActivityPhaseG3Tests.setUpClass`. Para esta ejecución
+se usó MD5 solo como hasher de pruebas y se bloquearon conexiones/resoluciones
+externas en el runner; no se modificó la configuración del proyecto. Se repitió
+fuera del sandbox para descartar errores de permisos de temporales de Windows:
+en el resultado final no hay PermissionError ni errores del bloqueo de red.
+
+Ejemplos fuera de alcance: fixtures de GuestMode/ProfileActivity usan
+`MovieRating(rating=...)`, argumento inexistente; otras expectativas difieren
+en feeds, autenticación, reacciones, proveedores y ventanas semanales UTC frente
+a Bogotá. El documento ya registra fallos previos de core, pero no se hizo una
+nueva comparación contra otra rama o commit en esta tarea. No se afirma que
+cada fallo actual haya sido contrastado individualmente con el baseline.
+El log completo de esta ejecución queda en
+`C:\Users\USUARIO\AppData\Local\Temp\reccool-daily-full-tests.log`.
+
+Pendiente en preview: exclusión de controles al cambiar entre familias,
+desplazamiento de tablas de 39 días en móvil/zoom, latencia con un volumen real
+y apertura de CSV/XLSX en Excel/LibreOffice. No se impuso un máximo de días.
 
 ### Iteración de periodos y UX (8 de octubre de 2026)
 
@@ -340,3 +554,83 @@ El original presentó además tres errores de Admin por no haber recolectado sus
 estáticos en la copia aislada y un fallo adicional de orden del feed. El código
 con el cambio tenía collectstatic ejecutado. Estos resultados no convierten la
 suite completa en verde ni sustituyen la comprobación en staging.
+
+## Reporte interno: Elegibilidad de creadores
+
+`creator_eligibility` aparece en «Uso interno» exclusivamente para superusuarios
+activos con acceso al admin. Los analistas staff, incluso con ambos permisos
+existentes de consulta/exportación, reciben 403 al solicitar su URL, CSV o XLSX.
+El servicio también exige explícitamente el usuario autorizado antes de consultar
+datos. No se crean permisos, modelos ni migraciones.
+
+Solo admite periodos y «Mínimo de seguidores»: entero positivo, por defecto
+10000. Reutiliza Meses × Años, máximo 24 periodos ordenados cronológicamente,
+y Personalizado diario con Desde/Hasta inclusivos en America/Bogota. No admite
+Acumulado total ni filtros demográficos o de tipo de contenido; el servidor
+rechaza combinaciones incompatibles aunque se envíen manualmente.
+
+Se evalúan cuentas no superusuarias con cualquier VideoComment existente,
+incluso fuera del rango seleccionado, o que alcanzan el umbral actual. Esto
+incluye a todos los creadores con reacciones recibidas en el rango, porque esas
+reacciones pertenecen a un video existente. Se incluyen cuentas inactivas y
+staff. No existe una marca confiable de cuenta técnica: no se excluyen usernames
+arbitrariamente. Un usuario sin videos y por debajo del umbral queda fuera.
+
+- Seguidores actuales: Follow vigentes cuyo `following_id` es el creador;
+  captura única al generar, repetida en todos los periodos. No se reconstruyen
+  seguidores históricos ni unfollows.
+- Video reacciones: publicaciones VideoComment del creador (`user_id`),
+  contadas por `created_at`. Los videos ocultados por moderación siguen contando
+  mientras existan.
+- Likes/dislikes recibidos: VideoCommentReaction atribuidas por
+  `video_comment.user`, nunca por el usuario que reacciona. Se cuenta el estado
+  vigente `reaction_type` por `updated_at`; no se reconstruyen cambios anteriores
+  ni registros eliminados. No incluye reacciones de comentarios públicos.
+
+La tabla muestra una fila por periodo y creador: Periodo/Fecha, Usuario
+(username), User ID, Seguidores actuales, Video reacciones, Likes recibidos,
+Dislikes recibidos, Interacciones recibidas y Cumple umbral (Sí/No). Cada periodo
+ordena primero quienes cumplen el umbral, después interacciones descendentes,
+seguidores descendentes y username, con ID como desempate. No añade TOTAL,
+diferencias ni variaciones. El resumen cuenta usuarios únicos evaluados y que
+cumplen, e informa umbral y periodos seleccionados.
+
+HTML pagina 50 filas; CSV y XLSX exportan todas las filas con los mismos valores.
+XLSX conserva las hojas Reporte y Metodología. La excepción a la supresión de
+celdas menores de 10 se limita a este reporte autorizado: no modifica
+`privacy.py` ni la protección de otros reportes. Solo se exponen username e ID,
+sin email, nombre legal ni nacimiento. Cumplir el umbral es una clasificación
+analítica interna; no concede monetización, aceptación de programa ni derecho
+a compensación.
+
+La selección y captura de seguidores usa una consulta con subconsulta y Exists;
+las métricas usan dos agregaciones por periodo. No hay consultas por creador
+ni por video. Las páginas HTML consultan solamente los periodos intersectados.
+La exportación ordena en memoria los creadores de cada periodo; su coste crece
+con el número de creadores y periodos. Las métricas se leen al producir las filas,
+sin una transacción que garantice una instantánea conjunta frente a escrituras
+concurrentes. No se añaden índices ni migraciones.
+
+Verificación visual pendiente: controles en desktop/móvil, navegación entre
+páginas y apertura de ambas hojas XLSX en Excel/LibreOffice.
+
+Validación local de esta entrega: 17 pruebas nuevas y las 89 existentes de
+reportería pasan. La ejecución conjunta con MovieRatingEndpointTests,
+VideoCommentReactionAPITests y MeFollowingEndpointTests ejecutó 129 casos:
+128 aprobados y un fallo existente de follows por la clave adicional
+`display_name`, también presente en el registro de referencia anterior.
+Pasan `check`, `makemigrations --check --dry-run` (sin cambios), la sintaxis
+y pruebas de controles JavaScript y `git diff --check`.
+
+Suite completa local: 762 casos descubiertos, 758 ejecutados en 75,157 s;
+55 fallos y 43 errores, todos en core. Cuatro casos no se ejecutan por un error
+en setUpClass existente. Se usó MD5 solo para acelerar contraseñas de prueba,
+con conexiones externas bloqueadas. Frente a `reccool-pivot-full-tests.log`,
+97 casos problemáticos coinciden y cambia un caso de orden del feed:
+falla `test_feed_uses_release_year_as_reasonable_tiebreaker` y deja de fallar
+`test_feed_orders_null_release_years_last`. No se afirma equivalencia exacta
+con el baseline ni una suite completa verde; no se modifica core.
+Registro: `%TEMP%/reccool-creator-full-tests.log`.
+Al repetir aisladamente los dos casos de feed, pasa el desempate por año y
+falla el orden de años nulos, inverso a la suite completa: queda registrada
+la variación de estas pruebas de core sin atribuirle una causa no comprobada.
