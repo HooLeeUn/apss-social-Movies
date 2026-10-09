@@ -19,7 +19,7 @@ WARNINGS = [
     "Ratings: score vigente, atribuido a updated_at. No reconstruye scores anteriores ni ratings eliminados.",
     "Reacciones: estado vigente por updated_at; reacciones eliminadas no se reconstruyen.",
     "Follows: relaciones existentes por created_at; unfollows no tienen histórico.",
-    "Recomendadas: intervalos solapados con el mes, usuarios únicos por producción. Edad al primer instante del solapamiento de cada intervalo.",
+    "Recomendadas: intervalos solapados con el periodo (mes o día), usuarios únicos por producción. Edad al primer instante del solapamiento de cada intervalo.",
     "Histórico previo al despliegue parcial: solo se recuperan recomendaciones todavía activas, desde su created_at. No se inventan retiros.",
     "Contenido oculto que todavía existe cuenta; comentarios dirigidos excluidos.",
 ]
@@ -192,5 +192,8 @@ def generate(filters):
     if show_population:
         metadata.append(("Población analizada (usuarios únicos)", MESSAGE if hide_population else population))
     methodology = [("Fuentes, semántica y limitaciones", warning) for warning in WARNINGS]
+    methodology.append(("Periodos", "Personalizado: un periodo diario por fecha Desde/Hasta, ambas inclusivas; cada día usa [00:00, 00:00 del día siguiente) en America/Bogota. Comparación mensual: límites de meses completos; el mes actual puede contener datos parciales."))
+    if filters["custom"]:
+        methodology.append(("Comparación diaria", "Diferencia y variación frente al día consecutivo anterior del rango seleccionado, sin acumulado progresivo. Si alguna celda se suprime, también se suprimen ambas comparaciones."))
     methodology.append(("Comparación", "Diferencia y porcentaje frente al periodo seleccionado anterior; base cero: No aplica. En rankings de ratings se compara el número de calificaciones, no el promedio."))
     return Result(REPORTS[report], headers, metadata, None if hide_population else population, blocked, rows, methodology, show_population)
