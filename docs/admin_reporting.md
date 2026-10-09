@@ -36,7 +36,22 @@ Los cuatro reportes de usuarios ofrecen tres modos mutuamente excluyentes:
 - Comparación mensual: ambos checkboxes apagados; una columna por mes/año,
   usuarios cuyo `date_joined` pertenece a ese mes, sin acumular meses previos.
 - Personalizado: requiere Desde/Hasta, ambos inclusive en America/Bogota;
+  un periodo por cada día con etiqueta `DD/MM/YYYY`, sin acumulado progresivo;
   deshabilita Acumulado total, meses y años.
+
+Todos los reportes de Contenido, Actividad directa y Actividad indirecta/social
+ofrecen comparación mensual y Personalizado. Acumulado total sigue siendo
+exclusivo de usuarios. En Personalizado, Desde/Hasta están habilitados y Meses/Años
+deshabilitados, por lo que no se envían como filtros activos. Al desactivarlo se
+invierten estos controles. El servidor rechaza modos o filtros temporales mezclados.
+
+Cada día usa el intervalo semiabierto `[inicio, día siguiente)`, con ambos límites
+a las 00:00 en America/Bogota. Desde y Hasta son inclusivos en la interfaz:
+01/09/2026 a 09/10/2026 produce 39 periodos diarios, incluyendo ambos extremos.
+Se conserva cada día aunque tenga cero eventos. No hay máximo nuevo ni
+consolidación automática de rangos largos. Pantalla, metadata, CSV y XLSX consumen
+el mismo resultado y las mismas etiquetas diarias; XLSX conserva Reporte y Metodología.
+Las consultas conservan sus fuentes, filtros y semánticas históricas existentes.
 
 El servidor rechaza combinaciones ambiguas incluso sin JavaScript. País e
 identidad siguen siendo actuales, edad mensual/personalizada corresponde al
@@ -51,7 +66,8 @@ es actual menos anterior; porcentaje = `(actual - anterior) / anterior * 100`,
 frente al periodo seleccionado anterior. Si anterior es cero, la diferencia
 se conserva y el porcentaje muestra «No aplica». 1→1 produce 0 y 0 %;
 2→0 produce -2 y -100 %. En rankings de ratings la comparación usa el número
-de calificaciones; cada mes mantiene su promedio aparte.
+de calificaciones; cada mes o día mantiene su promedio aparte. En Personalizado,
+las diferencias y variaciones comparan días consecutivos del rango seleccionado.
 
 La población analizada se omite de pantalla y exportaciones cuando coincide
 con la única cifra de usuarios registrados. Se conserva cuando aporta contexto
@@ -111,6 +127,12 @@ exige que transcurran 24 horas. La edad de intervalos se referencia al primer
 instante de solapamiento: `greatest(started_at, inicio_mes)`; cada intervalo puede
 calificar al usuario para el segmento y el usuario se deduplica después.
 
+En Personalizado se reutiliza exactamente este solapamiento, sustituyendo mes
+por día, con usuarios únicos por producción y día. Una recomendación iniciada
+01/09 a las 15:00 y retirada 03/09 a las 10:00 cuenta los días 01, 02 y 03,
+pero no el 04. Se conserva también la regla histórica de fin inclusivo: un retiro
+exactamente a medianoche cuenta en el día que comienza en ese instante.
+
 `MovieRecommendationItem` sigue representando el estado actual. La API usa una
 transacción y bloqueo de la fila del usuario, incluso si no existe item. Las
 señales abren/cierra intervalos para creaciones/eliminaciones ORM normales. Una
@@ -160,6 +182,12 @@ Un reporte con filtros demográficos, o agrupación demográfica, requiere 10
 usuarios únicos globales y por celda. Para actividad son contribuyentes a esa
 métrica/mes; para contenido, contribuyentes a producción/género/mes. Cero usuarios
 también es muestra inferior al umbral en reportes protegidos.
+
+En Personalizado el mismo umbral se aplica al segmento y a cada celda diaria:
+usuarios únicos, no número de eventos. Si la celda actual o anterior está
+suprimida, ambas comparaciones se suprimen, incluso en los días siguientes a una
+celda oculta. No se publica población consolidada que permita deducir celdas
+diarias protegidas. Estas reglas se comparten entre HTML, CSV y XLSX.
 
 Si la población global es insuficiente, no hay filas ni exportación. En reportes
 con población global suficiente se suprimen celdas individuales, sus promedios,
@@ -264,6 +292,14 @@ reportes no revoca permisos existentes, por diseño.
 
 ## Mediciones pendientes y atención antes del merge
 
+- Personalizado amplía el número de consultas/agregaciones y columnas en función
+  de los días seleccionados. Los consolidados recorren cada métrica por día y
+  contenido genera un fragmento SQL por día. El rango de 39 días se cubre en tests;
+  medir latencia y ancho de exportaciones con datos representativos en preview.
+  La tabla existente permite desplazamiento horizontal. Rangos muy largos pueden
+  exceder la capacidad del worker o las columnas de Excel; no se impuso un límite
+  arbitrario ni se consolidan días para evitarlos.
+
 - Medir scans temporales de MovieRating.updated_at, Comment.created_at, fechas de
   reacciones y Follow.created_at. Prioridad a MovieRating.updated_at; no se creó
   ese índice sin medición. Usar EXPLAIN inicialmente y EXPLAIN ANALYZE en staging
@@ -285,6 +321,61 @@ reportes no revoca permisos existentes, por diseño.
   preferencias existentes.
 
 ## Validación realizada en este entorno
+
+### Personalizado diario (9 de octubre de 2026)
+
+Cambios locales en `codex/reporting-custom-daily-periods`, sin commit, push,
+operaciones remotas, modelos ni migraciones. Personalizado genera un periodo
+por día para los 20 reportes. Se añadieron 11 casos Django y una prueba de
+JavaScript que verifica exclusión de modos y controles para los 20 reportes.
+
+Validación final con PostgreSQL local, `DEBUG=True` y R2 deshabilitado:
+
+```powershell
+$env:DATABASE_URL=' '
+$env:DB_HOST='127.0.0.1'
+$env:DEBUG='True'
+$env:R2_ENDPOINT_URL=' '
+python manage.py test reporting core.tests.MovieRatingEndpointTests --noinput --keepdb
+python manage.py check
+python manage.py makemigrations --check --dry-run
+node --check reporting/static/reporting/reports.js
+node reporting/tests/test_reports_js.cjs
+git diff --check
+```
+
+Los espacios son intencionales: PowerShell elimina variables asignadas a `''`,
+permitiendo que `.env` las repueble. La configuración aplica `.strip()`, de modo
+que `' '` deshabilita DATABASE_URL y R2 sin cambiar archivos de configuración.
+Se comprobó `R2_ENABLED=False` y `DB_HOST=127.0.0.1`.
+
+80 tests focalizados aprobados con el hasher habitual; checks de Django,
+migraciones, sintaxis JavaScript, controles y diff aprobados. Los casos nuevos
+cubren días inclusivos, Bogotá/UTC, medianoche, años bisiestos, 39 días y rangos
+mayores, altas diarias, filtros/edad histórica, privacidad, ratings/promedios,
+géneros/combinaciones, solapamientos, actividad directa/social, validación
+servidor, diferencias/porcentajes y paridad HTML/CSV/XLSX.
+
+La suite completa descubrió 729 tests y ejecutó 725 en 115,595 segundos:
+55 fallos y 43 errores, todos en core, ninguno en reporting. Cuatro casos no
+llegaron a ejecutarse por un error en `ProfileActivityPhaseG3Tests.setUpClass`. Para esta ejecución
+se usó MD5 solo como hasher de pruebas y se bloquearon conexiones/resoluciones
+externas en el runner; no se modificó la configuración del proyecto. Se repitió
+fuera del sandbox para descartar errores de permisos de temporales de Windows:
+en el resultado final no hay PermissionError ni errores del bloqueo de red.
+
+Ejemplos fuera de alcance: fixtures de GuestMode/ProfileActivity usan
+`MovieRating(rating=...)`, argumento inexistente; otras expectativas difieren
+en feeds, autenticación, reacciones, proveedores y ventanas semanales UTC frente
+a Bogotá. El documento ya registra fallos previos de core, pero no se hizo una
+nueva comparación contra otra rama o commit en esta tarea. No se afirma que
+cada fallo actual haya sido contrastado individualmente con el baseline.
+El log completo de esta ejecución queda en
+`C:\Users\USUARIO\AppData\Local\Temp\reccool-daily-full-tests.log`.
+
+Pendiente en preview: exclusión de controles al cambiar entre familias,
+desplazamiento de tablas de 39 días en móvil/zoom, latencia con un volumen real
+y apertura de CSV/XLSX en Excel/LibreOffice. No se impuso un máximo de días.
 
 ### Iteración de periodos y UX (8 de octubre de 2026)
 

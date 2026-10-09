@@ -468,8 +468,8 @@ class AdditionalReportTests(ReportFixtures, TestCase):
         qs,_=source("comment_likes",filters(countries=["CO"]),month_period("2026-01"));self.assertEqual(qs.count(),1)
         qs,_=source("comment_likes",filters(countries=["VE"]),month_period("2026-01"));self.assertEqual(qs.count(),0)
 
-    def test_form_rejects_custom_nonmonthly_and_excess_comparison(self):
-        self.assertFalse(ReportForm({"report":"ratings","custom":"on","since":"2026-01-01","until":"2026-01-31"}).is_valid())
+    def test_form_accepts_custom_and_rejects_invalid_comparison(self):
+        self.assertTrue(ReportForm({"report":"ratings","custom":"on","since":"2026-01-01","until":"2026-01-31"}).is_valid())
         self.assertFalse(ReportForm({"report":"social","months":["2026-01"],"content_type":"movie"}).is_valid())
         form=ReportForm({"report":"users","total":"on","months":["99"]})
         self.assertFalse(form.is_valid())

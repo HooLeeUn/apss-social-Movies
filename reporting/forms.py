@@ -1,3 +1,4 @@
+from datetime import date
 from django import forms
 from django.utils import timezone
 from core.models import Profile
@@ -12,7 +13,7 @@ class ReportForm(forms.Form):
     genders = forms.MultipleChoiceField(label="Identidad de género (vacío = Todos)", choices=Profile.GenderIdentity.choices, required=False)
     content_type = forms.ChoiceField(label="Tipo de contenido", choices=[("", "Todos"), ("movie", "Películas"), ("series", "Series")], required=False)
     total = forms.BooleanField(label="Acumulado total", required=False)
-    custom = forms.BooleanField(label="Personalizado", required=False)
+    custom = forms.BooleanField(label="Personalizado", required=False, help_text="Un periodo por día; Desde y Hasta incluidos, en America/Bogota.")
     since = forms.DateField(label="Desde", required=False, widget=forms.DateInput(attrs={"type": "date"}))
     until = forms.DateField(label="Hasta", required=False, widget=forms.DateInput(attrs={"type": "date"}))
     months = forms.TypedMultipleChoiceField(label="Meses", coerce=int, required=False, choices=[(i, name) for i, name in enumerate(MONTH_NAMES, 1)], help_text="Selecciona uno o varios meses para comparar.")
@@ -36,20 +37,19 @@ class ReportForm(forms.Form):
         if d.get("total") and d.get("custom"):
             raise forms.ValidationError("Acumulado total y Personalizado son mutuamente excluyentes.")
         special = d.get("total") or d.get("custom")
-        if special and report not in USER_REPORTS:
-            raise forms.ValidationError("Este reporte solo permite comparación mensual.")
+        if d.get("total") and report not in USER_REPORTS:
+            raise forms.ValidationError("Acumulado total solo está disponible para reportes de usuarios.")
         if special and (d.get("months") or d.get("years")):
             raise forms.ValidationError("No combines acumulado o personalizado con meses y años.")
         if not d.get("custom") and (d.get("since") or d.get("until")):
             raise forms.ValidationError("Desde y Hasta requieren el modo Personalizado.")
+        if d.get("custom"):
+            if not d.get("since") or not d.get("until"):
+                raise forms.ValidationError("Indica Desde y Hasta.")
+            if d["since"] > d["until"] or d["until"] == date.max:
+                raise forms.ValidationError("Rango de fechas inválido.")
         if report in USER_REPORTS:
             d["content_type"] = ""
-            if not d.get("total"):
-                if d.get("custom"):
-                    if not d.get("since") or not d.get("until"):
-                        raise forms.ValidationError("Indica Desde y Hasta.")
-                    if d["since"] > d["until"] or d["until"].year == 9999:
-                        raise forms.ValidationError("Rango de fechas inválido.")
         else:
             if report == "follows":
                 d["content_type"] = ""
