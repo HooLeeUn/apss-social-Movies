@@ -126,8 +126,11 @@ class Result:
             yield row
 
 
-def generate(filters):
+def generate(filters, user=None):
     report = filters["report"]
+    if report == "creator_eligibility":
+        from .creator_eligibility import generate_creator_eligibility
+        return generate_creator_eligibility(filters, user)
     ps = periods(filters)
     protect = segmented(filters)
     from core.models import Profile

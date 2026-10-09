@@ -554,3 +554,83 @@ El original presentó además tres errores de Admin por no haber recolectado sus
 estáticos en la copia aislada y un fallo adicional de orden del feed. El código
 con el cambio tenía collectstatic ejecutado. Estos resultados no convierten la
 suite completa en verde ni sustituyen la comprobación en staging.
+
+## Reporte interno: Elegibilidad de creadores
+
+`creator_eligibility` aparece en «Uso interno» exclusivamente para superusuarios
+activos con acceso al admin. Los analistas staff, incluso con ambos permisos
+existentes de consulta/exportación, reciben 403 al solicitar su URL, CSV o XLSX.
+El servicio también exige explícitamente el usuario autorizado antes de consultar
+datos. No se crean permisos, modelos ni migraciones.
+
+Solo admite periodos y «Mínimo de seguidores»: entero positivo, por defecto
+10000. Reutiliza Meses × Años, máximo 24 periodos ordenados cronológicamente,
+y Personalizado diario con Desde/Hasta inclusivos en America/Bogota. No admite
+Acumulado total ni filtros demográficos o de tipo de contenido; el servidor
+rechaza combinaciones incompatibles aunque se envíen manualmente.
+
+Se evalúan cuentas no superusuarias con cualquier VideoComment existente,
+incluso fuera del rango seleccionado, o que alcanzan el umbral actual. Esto
+incluye a todos los creadores con reacciones recibidas en el rango, porque esas
+reacciones pertenecen a un video existente. Se incluyen cuentas inactivas y
+staff. No existe una marca confiable de cuenta técnica: no se excluyen usernames
+arbitrariamente. Un usuario sin videos y por debajo del umbral queda fuera.
+
+- Seguidores actuales: Follow vigentes cuyo `following_id` es el creador;
+  captura única al generar, repetida en todos los periodos. No se reconstruyen
+  seguidores históricos ni unfollows.
+- Video reacciones: publicaciones VideoComment del creador (`user_id`),
+  contadas por `created_at`. Los videos ocultados por moderación siguen contando
+  mientras existan.
+- Likes/dislikes recibidos: VideoCommentReaction atribuidas por
+  `video_comment.user`, nunca por el usuario que reacciona. Se cuenta el estado
+  vigente `reaction_type` por `updated_at`; no se reconstruyen cambios anteriores
+  ni registros eliminados. No incluye reacciones de comentarios públicos.
+
+La tabla muestra una fila por periodo y creador: Periodo/Fecha, Usuario
+(username), User ID, Seguidores actuales, Video reacciones, Likes recibidos,
+Dislikes recibidos, Interacciones recibidas y Cumple umbral (Sí/No). Cada periodo
+ordena primero quienes cumplen el umbral, después interacciones descendentes,
+seguidores descendentes y username, con ID como desempate. No añade TOTAL,
+diferencias ni variaciones. El resumen cuenta usuarios únicos evaluados y que
+cumplen, e informa umbral y periodos seleccionados.
+
+HTML pagina 50 filas; CSV y XLSX exportan todas las filas con los mismos valores.
+XLSX conserva las hojas Reporte y Metodología. La excepción a la supresión de
+celdas menores de 10 se limita a este reporte autorizado: no modifica
+`privacy.py` ni la protección de otros reportes. Solo se exponen username e ID,
+sin email, nombre legal ni nacimiento. Cumplir el umbral es una clasificación
+analítica interna; no concede monetización, aceptación de programa ni derecho
+a compensación.
+
+La selección y captura de seguidores usa una consulta con subconsulta y Exists;
+las métricas usan dos agregaciones por periodo. No hay consultas por creador
+ni por video. Las páginas HTML consultan solamente los periodos intersectados.
+La exportación ordena en memoria los creadores de cada periodo; su coste crece
+con el número de creadores y periodos. Las métricas se leen al producir las filas,
+sin una transacción que garantice una instantánea conjunta frente a escrituras
+concurrentes. No se añaden índices ni migraciones.
+
+Verificación visual pendiente: controles en desktop/móvil, navegación entre
+páginas y apertura de ambas hojas XLSX en Excel/LibreOffice.
+
+Validación local de esta entrega: 17 pruebas nuevas y las 89 existentes de
+reportería pasan. La ejecución conjunta con MovieRatingEndpointTests,
+VideoCommentReactionAPITests y MeFollowingEndpointTests ejecutó 129 casos:
+128 aprobados y un fallo existente de follows por la clave adicional
+`display_name`, también presente en el registro de referencia anterior.
+Pasan `check`, `makemigrations --check --dry-run` (sin cambios), la sintaxis
+y pruebas de controles JavaScript y `git diff --check`.
+
+Suite completa local: 762 casos descubiertos, 758 ejecutados en 75,157 s;
+55 fallos y 43 errores, todos en core. Cuatro casos no se ejecutan por un error
+en setUpClass existente. Se usó MD5 solo para acelerar contraseñas de prueba,
+con conexiones externas bloqueadas. Frente a `reccool-pivot-full-tests.log`,
+97 casos problemáticos coinciden y cambia un caso de orden del feed:
+falla `test_feed_uses_release_year_as_reasonable_tiebreaker` y deja de fallar
+`test_feed_orders_null_release_years_last`. No se afirma equivalencia exacta
+con el baseline ni una suite completa verde; no se modifica core.
+Registro: `%TEMP%/reccool-creator-full-tests.log`.
+Al repetir aisladamente los dos casos de feed, pasa el desempate por año y
+falla el orden de años nulos, inverso a la suite completa: queda registrada
+la variación de estas pruebas de core sin atribuirle una causa no comprobada.

@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 
 from core.models import (Comment, CommentReaction, Follow, PendingUserRegistration,
                          VideoComment, VideoCommentReaction)
-from reporting.catalog import REPORTS, USER_REPORTS
+from reporting.catalog import REPORTS, USER_REPORTS, INTERNAL_REPORTS
 from reporting.exports import csv_response, xlsx_response
 from reporting.forms import ReportForm
 from reporting.periods import midnight, periods
@@ -36,6 +36,8 @@ class DailyReportTests(ReportFixtures, TestCase):
 
     def test_all_reports_accept_custom_and_reject_ambiguous_modes(self):
         for report in REPORTS:
+            if report in INTERNAL_REPORTS:
+                continue  # Internal choices require an explicitly authorized user.
             data = {"report": report, "custom": "on", "since": "2026-09-01", "until": "2026-09-03"}
             with self.subTest(report=report):
                 form = ReportForm(data)

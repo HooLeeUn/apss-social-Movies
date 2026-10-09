@@ -13,6 +13,7 @@
 </form>
 {% if result %}
 <section class="report-results"><h2>{{ result.title }}</h2>
+{% if result.summary %}<dl class="report-summary">{% for label,value in result.summary %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>{% endif %}
 <details><summary>Filtros y semántica del reporte</summary><dl>{% for label,value in result.metadata %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}{% for label,value in result.methodology %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl></details>
 {% if result.blocked %}<p class="report-private" role="status">{{ privacy_message }}</p>
 {% else %}
@@ -24,7 +25,7 @@
 {% if result.averages %}<tr>{% for subheader in result.subheaders %}<th scope="col">{{ subheader }}</th>{% endfor %}</tr>{% endif %}</thead>
 <tbody>{% for row in rows %}<tr{% if row.0 == 'TOTAL' %} class="report-total"{% endif %}>{% for cell in row %}{% if forloop.first %}<th scope="row">{{ cell }}</th>{% else %}<td>{% if result.compares and forloop.revcounter == 2 and cell > 0 %}+{% endif %}{{ cell|default_if_none:"" }}{% if result.compares and forloop.last and cell != privacy_message and cell != '-' and cell != 'No aplica' %} %{% endif %}</td>{% endif %}{% endfor %}</tr>{% empty %}<tr><td colspan="{{ result.headers|length }}">No hay resultados para los filtros seleccionados.</td></tr>{% endfor %}</tbody>
 </table></div>
-{% if previous_page or next_page %}<nav class="report-pages" aria-label="Páginas de entidades">{% if previous_page %}<a href="?{{ query }}&amp;page={{ previous_page }}">Anterior</a>{% endif %} Página {{ page }} {% if next_page %}<a href="?{{ query }}&amp;page={{ next_page }}">Siguiente</a>{% endif %}</nav>{% endif %}
+{% if previous_page or next_page %}<nav class="report-pages" aria-label="{% if result.report == 'creator_eligibility' %}Páginas de creadores por periodo{% else %}Páginas de entidades{% endif %}">{% if previous_page %}<a href="?{{ query }}&amp;page={{ previous_page }}">Anterior</a>{% endif %} Página {{ page }} {% if next_page %}<a href="?{{ query }}&amp;page={{ next_page }}">Siguiente</a>{% endif %}</nav>{% endif %}
 {% endif %}</section>{% endif %}
 </div>
 {% endblock %}

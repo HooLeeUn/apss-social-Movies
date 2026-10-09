@@ -23,9 +23,14 @@ def temporal(event, period):
     return Q(**{event + "__gte": period.start, event + "__lt": period.end})
 
 
-def source(metric, filters, period):
+def video_reactions(period):
+    """Shared current-state/updated_at source, independent of actor segmentation."""
+    return VideoCommentReaction.objects.order_by().filter(temporal("updated_at", period))
+
+
+def events(metric, filters, period):
     model, actor, event, movie = SOURCES[metric]
-    qs = model.objects.order_by().filter(temporal(event, period))
+    qs = video_reactions(period) if metric.startswith("video_") else model.objects.order_by().filter(temporal(event, period))
     if metric == "comments":
         qs = qs.filter(visibility="public")
     if metric.startswith("comment_"):
@@ -36,7 +41,12 @@ def source(metric, filters, period):
         qs = qs.filter(ended_at__isnull=False)
     if movie and filters.get("content_type"):
         qs = qs.filter(**{movie + "__type": filters["content_type"]})
-    return segment(qs, actor, event, filters), actor
+    return qs
+
+
+def source(metric, filters, period):
+    _, actor, event, _ = SOURCES[metric]
+    return segment(events(metric, filters, period), actor, event, filters), actor
 
 
 def users(filters, period):

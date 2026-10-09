@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
 
-const names = ["report", "total", "custom", "months", "years", "since", "until", "content_type"];
+const names = ["report", "total", "custom", "months", "years", "since", "until", "content_type", "countries", "ages", "genders", "min_followers"];
 const elements = Object.fromEntries(names.map(name => [name, {
   name, checked: false, disabled: false, value: "", addEventListener() {},
 }]));
@@ -60,3 +60,29 @@ assert.equal(elements.custom.checked, true);
 assert.equal(elements.since.disabled, false);
 assert.equal(elements.content_type.disabled, true);
 console.log("Report form modes passed for all 20 reports.");
+
+elements.report.value = "creator_eligibility";
+elements.total.checked = true;
+update({ target: elements.report });
+assert.equal(elements.total.checked, false);
+assert.equal(wrappers.total.hidden, true);
+assert.equal(wrappers.min_followers.hidden, false);
+assert.equal(elements.min_followers.disabled, false);
+for (const name of ["countries", "ages", "genders", "content_type"]) {
+  assert.equal(wrappers[name].hidden, true);
+  assert.equal(elements[name].disabled, true);
+}
+assert.equal(elements.since.disabled, false);
+elements.custom.checked = false;
+update({ target: elements.custom });
+assert.equal(elements.months.disabled, false);
+assert.equal(elements.years.disabled, false);
+assert.equal(elements.since.disabled, true);
+elements.report.value = "users";
+update({ target: elements.report });
+assert.equal(wrappers.min_followers.hidden, true);
+assert.equal(elements.min_followers.disabled, true);
+assert.equal(elements.countries.disabled, false);
+delete wrappers.min_followers;
+update(); // Non-superuser forms have no threshold field at all.
+console.log("Creator eligibility controls and forms without internal fields passed.");

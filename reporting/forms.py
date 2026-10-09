@@ -2,8 +2,9 @@ from datetime import date
 from django import forms
 from django.utils import timezone
 from core.models import Profile
-from .catalog import REPORTS, USER_REPORTS, CONTENT_REPORTS, DIRECT, SOCIAL, AGE_LABELS, MONTH_NAMES
+from .catalog import REPORTS, USER_REPORTS, CONTENT_REPORTS, DIRECT, SOCIAL, INTERNAL_REPORTS, DEFAULT_CREATOR_MIN_FOLLOWERS, AGE_LABELS, MONTH_NAMES
 from .periods import REPORT_TZ
+from .permissions import can_view_creator_eligibility
 
 
 class ReportForm(forms.Form):
@@ -19,8 +20,12 @@ class ReportForm(forms.Form):
     months = forms.TypedMultipleChoiceField(label="Meses", coerce=int, required=False, choices=[(i, name) for i, name in enumerate(MONTH_NAMES, 1)], help_text="Selecciona uno o varios meses para comparar.")
     years = forms.TypedMultipleChoiceField(label="Años", coerce=int, required=False, choices=[], help_text="Se combina cada mes con cada año seleccionado (máximo 24 periodos).")
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if can_view_creator_eligibility(user):
+            self.fields["report"].choices = [*self.fields["report"].choices, ("Uso interno", list(INTERNAL_REPORTS.items()))]
+            self.fields["min_followers"] = forms.IntegerField(label="Mínimo de seguidores", min_value=1, initial=DEFAULT_CREATOR_MIN_FOLLOWERS, required=False,
+                help_text="Clasificación analítica sobre seguidores actuales; no activa beneficios.")
         today = timezone.localdate(timezone=REPORT_TZ)
         self.fields["months"].initial = [today.month]
         self.fields["years"].initial = [today.year]
@@ -34,6 +39,12 @@ class ReportForm(forms.Form):
     def clean(self):
         d = super().clean()
         report = d.get("report")
+        if report == "creator_eligibility":
+            if any(d.get(field) for field in ("countries", "ages", "genders", "content_type")):
+                raise forms.ValidationError("Elegibilidad de creadores solo utiliza periodo y mínimo de seguidores.")
+            d["min_followers"] = d.get("min_followers") or DEFAULT_CREATOR_MIN_FOLLOWERS
+        else:
+            d.pop("min_followers", None)
         if d.get("total") and d.get("custom"):
             raise forms.ValidationError("Acumulado total y Personalizado son mutuamente excluyentes.")
         special = d.get("total") or d.get("custom")
