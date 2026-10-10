@@ -1565,7 +1565,7 @@ class SocialActivityFeedService:
         queryset = Comment.objects.visible().filter(visibility=Comment.VISIBILITY_PUBLIC)
         if actor_ids is not None:
             queryset = queryset.filter(author_id__in=actor_ids)
-        queryset = queryset.select_related("author", "author__profile", "movie")
+        queryset = queryset.select_related("author", "author__profile", "movie").with_reaction_stats(viewer)
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
 
     @classmethod
@@ -1577,7 +1577,9 @@ class SocialActivityFeedService:
             "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PUBLIC_COMMENT],
             "actor": cls._serialize_actor(comment.author),
             "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
-            "payload": {"comment_id": comment.id, "content": comment.body},
+            "payload": {"comment_id": comment.id, "content": comment.body,
+                        "likes_count": comment.likes_count, "dislikes_count": comment.dislikes_count,
+                        "my_reaction": comment.my_reaction},
         } for comment in queryset]
 
     @classmethod
