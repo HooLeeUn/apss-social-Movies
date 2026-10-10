@@ -107,3 +107,93 @@ class VisitedProfileVideoReactionTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(self.video_activities(response)), 2)
+
+
+class VisitedProfilePublicCommentReactionTests(TestCase):
+    def setUp(self):
+        from core.models import Comment, CommentReaction
+        self.Comment = Comment
+        self.CommentReaction = CommentReaction
+        self.owner = get_user_model().objects.create_user(username="comment_owner")
+        self.viewer = get_user_model().objects.create_user(username="comment_viewer")
+        self.other = get_user_model().objects.create_user(username="comment_other")
+        self.movie = Movie.objects.create(author=self.owner, title_english="Comment movie", type=Movie.MOVIE)
+        self.comment = Comment.objects.create(author=self.owner, movie=self.movie, body="Public")
+        CommentReaction.objects.create(comment=self.comment, user=self.viewer, reaction_type="like")
+        CommentReaction.objects.create(comment=self.comment, user=self.other, reaction_type="dislike")
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+        self.url = reverse("user-activity", kwargs={"username": self.owner.username}) + "?activity_type=public_comment"
+
+    def payload(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        return response.data["results"][0]["payload"]
+
+    def test_profile_and_movie_use_same_counts_and_reaction_record(self):
+        payload = self.payload()
+        self.assertEqual((payload["likes_count"], payload["dislikes_count"], payload["my_reaction"]), (1, 1, "like"))
+        reaction_url = reverse("comment-reaction", kwargs={"pk": self.comment.pk})
+        record = self.CommentReaction.objects.get(comment=self.comment, user=self.viewer)
+        old_updated_at = record.updated_at
+        response = self.client.put(reaction_url, {"reaction": "dislike"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        record.refresh_from_db()
+        self.assertGreater(record.updated_at, old_updated_at)
+        self.assertEqual(self.CommentReaction.objects.filter(comment=self.comment, user=self.viewer).count(), 1)
+        payload = self.payload()
+        self.assertEqual((payload["likes_count"], payload["dislikes_count"], payload["my_reaction"]), (0, 2, "dislike"))
+        movie_response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.pk}))
+        comment = movie_response.data["results"][0]
+        for key in ("likes_count", "dislikes_count", "my_reaction"):
+            self.assertEqual(comment[key], payload[key])
+        self.assertEqual(self.client.delete(reaction_url).status_code, 200)
+        self.assertIsNone(self.payload()["my_reaction"])
+
+    def test_public_count_and_profile_exclude_directed_and_hidden_comments(self):
+        self.Comment.objects.create(author=self.owner, movie=self.movie, body="Hidden", is_hidden=True)
+        self.Comment.objects.create(author=self.owner, movie=self.movie, body="Directed",
+                                    visibility=self.Comment.VISIBILITY_MENTIONED, target_user=self.viewer)
+        unrelated = Movie.objects.create(author=self.owner, title_english="Other", type=Movie.SERIES)
+        self.Comment.objects.create(author=self.other, movie=unrelated, body="Other movie")
+        response = self.client.get(reverse("movie-comments", kwargs={"pk": self.movie.pk}))
+        self.assertEqual(response.data["count"], 1)
+        response = self.client.get(self.url)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_guest_counts_and_authenticated_unreacted_state(self):
+        self.client.force_authenticate(None)
+        self.assertIsNone(self.payload()["my_reaction"])
+        self.assertEqual(self.client.put(reverse("comment-reaction", kwargs={"pk": self.comment.pk}),
+                                         {"reaction": "like"}, format="json").status_code, 401)
+        self.CommentReaction.objects.filter(user=self.viewer).delete()
+        self.client.force_authenticate(self.viewer)
+        self.assertIsNone(self.payload()["my_reaction"])
+
+    def test_comment_annotations_are_batched_without_per_comment_queries(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from core.social_feed import SocialActivityFeedService
+        def serialize():
+            return SocialActivityFeedService.serialize_public_comment_queryset(
+                SocialActivityFeedService._public_comment_activity_queryset(actor_ids=[self.owner.pk], viewer=self.viewer)
+            )
+        with CaptureQueriesContext(connection) as one:
+            serialize()
+        for index in range(8):
+            self.Comment.objects.create(author=self.owner, movie=self.movie, body=f"Public {index}")
+        with CaptureQueriesContext(connection) as many:
+            rows = serialize()
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(one), len(many))
+        self.assertEqual(len(many), 1)
+
+    def test_hidden_and_restricted_comments_keep_existing_permissions(self):
+        from core.models import UserVisibilityBlock
+        reaction_url = reverse("comment-reaction", kwargs={"pk": self.comment.pk})
+        self.Comment.objects.filter(pk=self.comment.pk).update(is_hidden=True)
+        self.assertEqual(self.client.put(reaction_url, {"reaction": "like"}, format="json").status_code, 404)
+        self.Comment.objects.filter(pk=self.comment.pk).update(is_hidden=False)
+        UserVisibilityBlock.objects.create(owner=self.owner, blocked_user=self.viewer)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(self.client.put(reaction_url, {"reaction": "like"}, format="json").status_code, 404)
