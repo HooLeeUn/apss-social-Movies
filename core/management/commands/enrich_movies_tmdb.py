@@ -5,6 +5,7 @@ import re
 import time
 import unicodedata
 from collections import defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -27,6 +28,10 @@ class Command(BaseCommand):
         parser.add_argument("--start-id", type=int, default=None)
         parser.add_argument("--movie-id", type=int, default=None)
         parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument(
+            "--sync-rating-votes", action="store_true",
+            help="Sincroniza solo external_rating y external_votes para registros con tmdb_id.",
+        )
         parser.add_argument("--sleep", type=float, default=0.25)
         parser.add_argument("--workers", type=int, default=1)
         parser.add_argument("--overwrite-image", action="store_true")
@@ -72,17 +77,18 @@ class Command(BaseCommand):
                     )
                 )
 
-        if options["affected_csv"] and not options["backfill_missing_images"]:
+        sync_rating_votes = options["sync_rating_votes"]
+        if not sync_rating_votes and options["affected_csv"] and not options["backfill_missing_images"]:
             return self._handle_affected_csv(options, stats, sleep_seconds, started_at)
 
         local_index = None
-        if not options["backfill_missing_images"] and (
+        if not sync_rating_votes and not options["backfill_missing_images"] and (
             options["use_local_exports"] or options["second_pass_relaxed_match"]
         ):
             local_index = self._build_local_export_index(options["exports_dir"])
 
         movies = list(self._get_movies_queryset(options))
-        if options["backfill_missing_images"]:
+        if not sync_rating_votes and options["backfill_missing_images"]:
             stats["backfill_missing_image_candidates"] = len(movies)
         stats["eligible_with_tmdb_id"] = len([m for m in movies if m.tmdb_id])
         updates = []
@@ -92,8 +98,13 @@ class Command(BaseCommand):
         updated_tmdb_ids = 0
 
         for movie in movies:
-            result = self._enrich_movie(movie, options, stats, sleep_seconds, local_index=local_index)
+            if sync_rating_votes:
+                result = self._sync_rating_votes(movie, options, stats, sleep_seconds)
+            else:
+                result = self._enrich_movie(movie, options, stats, sleep_seconds, local_index=local_index)
             if result["error"]:
+                if sync_rating_votes:
+                    continue
                 movie.tmdb_lookup_status = "error"
                 movie.tmdb_lookup_error = result["error"][:255]
                 movie.tmdb_lookup_checked_at = timezone.now()
@@ -121,6 +132,8 @@ class Command(BaseCommand):
             "tmdb_lookup_error",
             "tmdb_lookup_checked_at",
         ]
+        if sync_rating_votes:
+            update_fields = ["external_rating", "external_votes"]
         if not options["dry_run"] and updates:
             Movie.objects.bulk_update(updates, update_fields, batch_size=500)
             if options["verify_persistence"]:
@@ -173,6 +186,54 @@ class Command(BaseCommand):
         self.stdout.write(f"persistence_mismatches: {stats['persistence_mismatches']}")
         self.stdout.write(f"workers_forced_to_main_thread: {stats['workers_forced_to_main_thread']}")
         self.stdout.write(f"errores: {stats['errors']}")
+        if sync_rating_votes:
+            self.stdout.write(f"ratings_updated: {stats['ratings_updated']}")
+            self.stdout.write(f"votes_updated: {stats['votes_updated']}")
+            self.stdout.write(f"unchanged: {stats['unchanged']}")
+            self.stdout.write(f"skipped: {stats['skipped']}")
+            self.stdout.write(f"dry_run: {options['dry_run']}")
+
+    def _sync_rating_votes(self, movie, options, stats, sleep_seconds):
+        result = {"updates": {}, "error": None}
+        content_kind = self._resolve_content_kind(movie.type)
+        if not content_kind:
+            stats["skipped"] += 1
+            return result
+        try:
+            stats["detail_requests_en"] += 1
+            detail = self._get_tmdb_json_with_retries(
+                stats, f"/{content_kind}/{movie.tmdb_id}", params={"language": "en-US"}
+            )
+            rating = detail.get("vote_average")
+            if rating is not None:
+                rating = Decimal(str(rating)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            votes = detail.get("vote_count")
+            votes = 0 if votes is None else int(votes)
+            for field, value, counter in (
+                ("external_rating", rating, "ratings_updated"),
+                ("external_votes", votes, "votes_updated"),
+            ):
+                if getattr(movie, field) != value:
+                    result["updates"][field] = value
+                    stats[counter] += 1
+            if not result["updates"]:
+                stats["unchanged"] += 1
+            prefix = "DRY-RUN " if options["dry_run"] else ""
+            self.stdout.write(
+                f"{prefix}Movie(id={movie.id}) tmdb_id={movie.tmdb_id}: "
+                f"rating {movie.external_rating} -> {rating}; "
+                f"votes {movie.external_votes} -> {votes}"
+            )
+        except TMDbServiceError as exc:
+            stats["errors"] += 1
+            result["error"] = str(exc)
+            self.stderr.write(
+                f"Movie(id={movie.id}) tmdb_id={movie.tmdb_id}: TMDB error: {exc}"
+            )
+        finally:
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+        return result
 
     def _handle_affected_csv(self, options, stats, sleep_seconds, started_at):
         affected_ids = self._read_affected_csv_movie_ids(options)
@@ -349,6 +410,17 @@ class Command(BaseCommand):
         )
 
     def _get_movies_queryset(self, options):
+        if options["sync_rating_votes"]:
+            qs = Movie.objects.filter(tmdb_id__gt=0).only(
+                "id", "tmdb_id", "type", "external_rating", "external_votes"
+            ).order_by("id")
+            if options["start_id"] is not None:
+                qs = qs.filter(id__gte=options["start_id"])
+            if options["movie_id"] is not None:
+                qs = qs.filter(id=options["movie_id"])
+            if options["limit"] is not None:
+                qs = qs[:options["limit"]]
+            return qs
         qs = Movie.objects.all().only(
             "id",
             "imdb_id",
