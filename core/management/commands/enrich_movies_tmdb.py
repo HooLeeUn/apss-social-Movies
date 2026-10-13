@@ -8,7 +8,8 @@ from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
+from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -22,12 +23,20 @@ class Command(BaseCommand):
 
     IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
     EXPORT_FILENAME_PATTERN = re.compile(r"^(movie_ids|tv_series_ids)_\d{2}_\d{2}_\d{4}\.json\.gz$")
+    ERROR_CSV_FIELDS = (
+        "movie_id", "tmdb_id", "type", "title_english", "release_year",
+        "error_type", "status_code", "error_message",
+    )
 
     def add_arguments(self, parser):
         parser.add_argument("--limit", type=int, default=None)
         parser.add_argument("--start-id", type=int, default=None)
         parser.add_argument("--movie-id", type=int, default=None)
         parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument(
+            "--errors-csv", type=str, default=None,
+            help="CSV acumulativo de errores de --sync-rating-votes (tambien en dry-run).",
+        )
         parser.add_argument(
             "--sync-rating-votes", action="store_true",
             help="Sincroniza solo external_rating y external_votes para registros con tmdb_id.",
@@ -78,6 +87,12 @@ class Command(BaseCommand):
                 )
 
         sync_rating_votes = options["sync_rating_votes"]
+        self._errors_csv_path = None
+        self._seen_csv_errors = set()
+        if options["errors_csv"]:
+            if not sync_rating_votes:
+                raise CommandError("--errors-csv requiere --sync-rating-votes.")
+            self._prepare_errors_csv(options["errors_csv"])
         if not sync_rating_votes and options["affected_csv"] and not options["backfill_missing_images"]:
             return self._handle_affected_csv(options, stats, sleep_seconds, started_at)
 
@@ -135,8 +150,11 @@ class Command(BaseCommand):
         if sync_rating_votes:
             update_fields = ["external_rating", "external_votes"]
         if not options["dry_run"] and updates:
-            Movie.objects.bulk_update(updates, update_fields, batch_size=500)
-            if options["verify_persistence"]:
+            if sync_rating_votes and options["errors_csv"]:
+                self._persist_rating_votes_with_errors(updates, update_fields, options, stats)
+            else:
+                Movie.objects.bulk_update(updates, update_fields, batch_size=500)
+            if options["verify_persistence"] and not (sync_rating_votes and options["errors_csv"]):
                 for movie in updates:
                     persisted = Movie.objects.only(*update_fields).get(pk=movie.pk)
                     for field in update_fields:
@@ -227,6 +245,7 @@ class Command(BaseCommand):
         except TMDbServiceError as exc:
             stats["errors"] += 1
             result["error"] = str(exc)
+            self._record_sync_error(movie, "tmdb", exc)
             self.stderr.write(
                 f"Movie(id={movie.id}) tmdb_id={movie.tmdb_id}: TMDB error: {exc}"
             )
@@ -234,6 +253,79 @@ class Command(BaseCommand):
             if sleep_seconds:
                 time.sleep(sleep_seconds)
         return result
+
+    def _prepare_errors_csv(self, filename):
+        path = Path(filename)
+        try:
+            if path.exists() and path.stat().st_size:
+                with path.open("r", newline="", encoding="utf-8-sig") as stream:
+                    reader = csv.DictReader(stream)
+                    if reader.fieldnames != list(self.ERROR_CSV_FIELDS):
+                        raise CommandError("Cabecera incompatible en --errors-csv.")
+                    for row in reader:
+                        self._seen_csv_errors.add(self._csv_error_key(row))
+            else:
+                with path.open("a", newline="", encoding="utf-8") as stream:
+                    csv.DictWriter(stream, fieldnames=self.ERROR_CSV_FIELDS).writeheader()
+        except OSError as exc:
+            raise CommandError(f"No se puede abrir --errors-csv: {exc}") from exc
+        self._errors_csv_path = path
+
+    def _csv_error_key(self, row):
+        return tuple(str(row.get(field, "")) for field in (
+            "movie_id", "tmdb_id", "error_type", "status_code", "error_message"
+        ))
+
+    def _record_sync_error(self, movie, error_type, exc):
+        if self._errors_csv_path is None:
+            return
+        row = {
+            "movie_id": movie.id, "tmdb_id": movie.tmdb_id, "type": movie.type,
+            "title_english": movie.title_english, "release_year": movie.release_year,
+            "error_type": error_type, "status_code": getattr(exc, "status_code", None) or "",
+            "error_message": str(exc),
+        }
+        key = self._csv_error_key(row)
+        if key in self._seen_csv_errors:
+            return
+        try:
+            with self._errors_csv_path.open("a", newline="", encoding="utf-8") as stream:
+                csv.DictWriter(stream, fieldnames=self.ERROR_CSV_FIELDS).writerow(row)
+        except OSError as error:
+            raise CommandError(f"No se puede agregar el error a --errors-csv: {error}") from error
+        self._seen_csv_errors.add(key)
+
+    def _persist_rating_votes_with_errors(self, updates, update_fields, options, stats):
+        for offset in range(0, len(updates), 500):
+            chunk = updates[offset:offset + 500]
+            try:
+                with transaction.atomic():
+                    Movie.objects.bulk_update(chunk, update_fields, batch_size=500)
+                persisted_movies = chunk
+            except DatabaseError:
+                # The failed chunk was rolled back. Retry each row to isolate its error.
+                persisted_movies = []
+                for movie in chunk:
+                    try:
+                        with transaction.atomic():
+                            Movie.objects.bulk_update([movie], update_fields, batch_size=1)
+                        persisted_movies.append(movie)
+                    except DatabaseError as exc:
+                        stats["errors"] += 1
+                        self._record_sync_error(movie, "persistence", exc)
+                        self.stderr.write(f"Movie(id={movie.id}) tmdb_id={movie.tmdb_id}: persistence error: {exc}")
+            if options["verify_persistence"]:
+                for movie in persisted_movies:
+                    try:
+                        with transaction.atomic():
+                            persisted = Movie.objects.only(*update_fields).get(pk=movie.pk)
+                        if any(getattr(persisted, field) != getattr(movie, field) for field in update_fields):
+                            stats["persistence_mismatches"] += 1
+                            raise ValueError("Persisted rating/votes differ from requested values")
+                    except (DatabaseError, Movie.DoesNotExist, ValueError) as exc:
+                        stats["errors"] += 1
+                        self._record_sync_error(movie, "verification", exc)
+                        self.stderr.write(f"Movie(id={movie.id}) tmdb_id={movie.tmdb_id}: verification error: {exc}")
 
     def _handle_affected_csv(self, options, stats, sleep_seconds, started_at):
         affected_ids = self._read_affected_csv_movie_ids(options)
@@ -414,6 +506,9 @@ class Command(BaseCommand):
             qs = Movie.objects.filter(tmdb_id__gt=0).only(
                 "id", "tmdb_id", "type", "external_rating", "external_votes"
             ).order_by("id")
+            if options["errors_csv"]:
+                qs = qs.only("id", "tmdb_id", "type", "external_rating", "external_votes",
+                             "title_english", "release_year")
             if options["start_id"] is not None:
                 qs = qs.filter(id__gte=options["start_id"])
             if options["movie_id"] is not None:
