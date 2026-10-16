@@ -419,7 +419,6 @@ class Movie(models.Model):
     synopsis_es = models.TextField(blank=True, null=True)
     external_rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
     external_votes = models.PositiveIntegerField(default=0)
-    imdb_id = models.CharField(max_length=20, null=True, blank=True, db_index=True)
     tmdb_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
     tmdb_lookup_status = models.CharField(max_length=20, blank=True, default="")
     tmdb_lookup_checked_at = models.DateTimeField(null=True, blank=True)

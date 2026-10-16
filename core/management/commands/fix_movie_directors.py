@@ -11,11 +11,10 @@ from core.models import Movie, normalize_movie_search_text
 class Command(BaseCommand):
     help = (
         "Corrige Movie.director usando un CSV maestro y matching exacto por campos "
-        "de identidad (sin usar imdb_id ni director para buscar)."
+        "de identidad (sin usar director para buscar)."
     )
 
     REQUIRED_COLUMNS = {
-        "imdb_id",
         "title_english",
         "title_spanish",
         "type",

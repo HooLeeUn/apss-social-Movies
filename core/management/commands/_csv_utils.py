@@ -40,6 +40,8 @@ def detect_csv_delimiter(path, sample_size=4096):
             return ","
         if "\t" in header:
             return "\t"
+        if header.strip().lstrip("\ufeff") == "database_id":
+            return ","
         raise CommandError(
             "No se pudo detectar el delimitador del CSV. "
             "Se esperaba coma (,), punto y coma (;) o tabulación."

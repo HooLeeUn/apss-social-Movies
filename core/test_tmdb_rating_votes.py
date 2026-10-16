@@ -129,7 +129,7 @@ class SyncRatingVotesTests(TestCase):
         self.tmdb.assert_called_once_with("/movie/123", params={"language": "en-US"})
 
     def test_missing_tmdb_is_not_resolved(self):
-        missing = self.create_movie(tmdb_id=None, imdb_id="tt1234567")
+        missing = self.create_movie(tmdb_id=None)
         out, _ = self.run_sync("--movie-id", str(missing.pk))
         self.tmdb.assert_not_called()
         self.assertIn("Procesadas: 0", out)
