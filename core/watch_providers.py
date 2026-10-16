@@ -130,8 +130,6 @@ def get_active_provider_links(
     specific_filter = Q(movie=movie)
     if movie.tmdb_id:
         specific_filter |= Q(tmdb_id=movie.tmdb_id)
-    if movie.imdb_id:
-        specific_filter |= Q(imdb_id=movie.imdb_id)
 
     general_filter = Q(tmdb_id__isnull=True, movie__isnull=True, imdb_id__isnull=True)
 
@@ -153,7 +151,6 @@ def get_active_provider_links(
         is_specific_link = (
             link.movie_id == movie.id
             or link.tmdb_id == movie.tmdb_id
-            or (movie.imdb_id and link.imdb_id == movie.imdb_id)
         )
         if is_specific_link and content_type_matches:
             specific_links.setdefault(link.provider_id, link)
