@@ -111,9 +111,9 @@ class CommentAdmin(admin.ModelAdmin):
 
 @admin.register(Movie)
 class MovieAdmin(admin.ModelAdmin):
-    list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "external_votes", "imdb_id", "tmdb_id", "created_at")
+    list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "external_votes", "tmdb_id", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
-    search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members", "imdb_id", "tmdb_id")
+    search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members", "tmdb_id")
     readonly_fields = ("created_at", "updated_at", "trailer_checked_at")
     fieldsets = (
         (
@@ -139,7 +139,6 @@ class MovieAdmin(admin.ModelAdmin):
                 "fields": (
                     "external_rating",
                     "external_votes",
-                    "imdb_id",
                     "tmdb_id",
                     "image",
                 )
