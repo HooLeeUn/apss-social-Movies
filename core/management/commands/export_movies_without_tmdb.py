@@ -33,7 +33,6 @@ class Command(BaseCommand):
         "title_es": "title_spanish",
         "year": "release_year",
         "director": "director",
-        "imdb_id": "imdb_id",
         "cast": "cast_members",
         "current_tmdb_id": "tmdb_id",
     }

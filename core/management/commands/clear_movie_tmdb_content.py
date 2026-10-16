@@ -8,7 +8,7 @@ from ._csv_utils import delimiter_label, open_csv_dict_reader
 
 
 class Command(BaseCommand):
-    help = "Limpia sólo contenido derivado de TMDb para películas indicadas en un CSV, sin tocar tmdb_id ni imdb_id."
+    help = "Limpia sólo contenido derivado de TMDb para películas indicadas en un CSV, sin tocar tmdb_id."
 
     CHUNK_SIZE = 1000
     FIELDS_TO_CLEAR = (
