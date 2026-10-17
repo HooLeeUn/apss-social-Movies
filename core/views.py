@@ -320,7 +320,7 @@ BRANDING_CACHE_KEY = "app_branding_active_v1"
 
 LEGAL_POLICIES_PAYLOAD = {
     "title": "Políticas y Términos",
-    "last_updated": "2026-05-22",
+    "last_updated": "2026-10-16",
     "sections": [
         {
             "subtitle": "Información general de QNext",
@@ -332,14 +332,14 @@ LEGAL_POLICIES_PAYLOAD = {
             ],
         },
         {
-            "subtitle": "Sistema de calificaciones de QNext",
+            "subtitle": "Sistema de calificaciones de RecCool",
             "content": [
-                "Las calificaciones externas se usan como referencia inicial mientras QNext construye su propia base de calificaciones.",
-                "Cuando una película o serie tiene menos de 5000 votos en IMDb, QNext puede aplicar un ajuste interno o reducción de peso estadístico porque esos ratings pueden ser volátiles o manipulables.",
-                "Cuando QNext supera 100 calificaciones propias en una película o serie, la calificación general pasa a priorizar el promedio propio de QNext.",
-                "Mientras QNext tenga menos de 100 calificaciones propias, la calificación general puede combinar IMDb + QNext con mayor peso inicial de IMDb.",
+                "Las calificaciones externas se usan como referencia inicial mientras RecCool construye su propia base de calificaciones.",
+                "Mientras una película o serie tenga menos de 100 calificaciones propias en RecCool, la calificación general combina la calificación de referencia de TMDB con el promedio de las calificaciones realizadas por los usuarios de RecCool. El peso de las calificaciones propias aumenta progresivamente a medida que se reciben nuevas valoraciones.",
+                "Al alcanzar 100 calificaciones propias en una película o serie, la calificación general utiliza exclusivamente el promedio de las calificaciones realizadas por los usuarios de RecCool.",
+                "Las calificaciones y el número de votos provenientes de TMDB corresponden a información de referencia obtenida al momento de su incorporación o actualización en RecCool y no necesariamente se sincronizan en tiempo real. Por esta razón, pueden diferir de los valores mostrados posteriormente por TMDB.",
                 "Las calificaciones del usuario pueden ser visibles según su configuración de privacidad, seguidores y amigos.",
-                "QNext puede ajustar fórmulas de ranking, recomendación o ponderación para mejorar precisión, seguridad y experiencia.",
+                "RecCool puede utilizar calificaciones, preferencias e interacciones de sus usuarios para rankings, recomendaciones, personalización y otras funcionalidades internas de la plataforma.",
             ],
         },
         {
@@ -362,9 +362,9 @@ LEGAL_POLICIES_PAYLOAD = {
         {
             "subtitle": "Exactitud de datos externos",
             "content": [
-                "QNext no garantiza la exactitud absoluta, disponibilidad permanente o actualización inmediata de información proveniente de IMDb, TMDB u otras fuentes externas.",
-                "Los títulos, sinopsis, posters, directores, casting, géneros, años, votos y calificaciones externas pueden contener errores, cambios o diferencias respecto a sus fuentes originales.",
-                "QNext podrá corregir, actualizar, ocultar o ajustar información cuando sea necesario.",
+                "RecCool no garantiza la exactitud absoluta, disponibilidad permanente o actualización inmediata de información proveniente de TMDB u otras fuentes externas.",
+                "Los títulos, sinopsis, posters, directores, casting, géneros, años, votos, calificaciones externas y demás información obtenida de fuentes externas pueden contener errores, cambios o diferencias respecto a la información disponible posteriormente en dichas fuentes.",
+                "RecCool podrá corregir, actualizar u ocultar información cuando sea necesario.",
             ],
         },
         {
@@ -398,7 +398,7 @@ LEGAL_POLICIES_PAYLOAD = {
             "content": [
                 "QNext conserva derechos sobre marca, nombre, logotipo, identidad visual, diseño de interfaz, experiencia de usuario, estructura de navegación, textos propios, componentes visuales, organización de información, lógica de presentación, rankings, sistemas de recomendación, combinaciones, curaduría, compilaciones de datos, código fuente, arquitectura técnica y funcionalidades propias.",
                 "Se prohíbe copiar, reproducir, distribuir, modificar, extraer masivamente, hacer scraping, ingeniería inversa, plagiar, clonar diseño, reutilizar elementos distintivos o usar comercialmente elementos de QNext sin autorización.",
-                "Los datos externos de IMDb y TMDB pertenecen a sus respectivos titulares.",
+                "Los datos, imágenes y demás contenidos provenientes de fuentes externas pertenecen a sus respectivos titulares y se utilizan de acuerdo con las condiciones aplicables a dichas fuentes.",
                 "El contenido generado por usuarios pertenece o queda bajo responsabilidad del usuario que lo publica; al publicarlo, concede a QNext licencia no exclusiva para mostrarlo, almacenarlo, procesarlo y distribuirlo dentro de la plataforma.",
                 "QNext podrá retirar contenido que infrinja propiedad intelectual, privacidad, seguridad, convivencia o derechos de terceros.",
                 "QNext no autoriza el uso de su marca ni elementos visuales para crear productos confundibles o competidores.",
@@ -406,17 +406,20 @@ LEGAL_POLICIES_PAYLOAD = {
         }
     ],
     "credits": {
-        "imdb": {
-            "description": "IMDb es fuente de referencia para títulos, año, tipo, casting, director, géneros, número de votos y calificaciones promedio.",
-            "rights_notice": "IMDb conserva sus derechos sobre sus bases de datos, marcas, activos y contenidos.",
-            "logo_usage_notice": "No se usa el logo de IMDb.",
-        },
+        "subtitle": "Créditos y fuentes externas",
+        "content": [
+            "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+            "RecCool utiliza información obtenida a través de TMDB para complementar el catálogo de películas y series, incluyendo, según disponibilidad, títulos, años, tipos de producción, géneros, directores, casting, sinopsis, posters, calificaciones promedio, número de votos y otra información asociada a las producciones.",
+            "La información externa puede corresponder a datos obtenidos en distintos momentos y no necesariamente se encuentra sincronizada en tiempo real con TMDB.",
+            "TMDB y sus elementos de marca pertenecen a sus respectivos titulares. La utilización de información de TMDB por parte de RecCool no implica patrocinio, aprobación ni certificación por parte de TMDB.",
+            "La información sobre disponibilidad de películas y series en servicios de streaming, alquiler o compra puede provenir de los datos de proveedores disponibles a través de TMDB, cuya información de disponibilidad es proporcionada por JustWatch. JustWatch es una marca de su respectivo titular.",
+        ],
         "tmdb": {
-            "description": "TMDB es fuente de posters y sinopsis.",
+            "description": "TMDB complementa el catálogo de películas y series y sus datos de referencia.",
             "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
             "rights_notice": "TMDB conserva sus derechos sobre sus bases de datos, marcas, activos y contenidos.",
         },
-        "independence_notice": "QNext es una plataforma independiente y no está afiliada oficialmente, respaldada, certificada ni patrocinada por IMDb o TMDB.",
+        "independence_notice": "La utilización de información de TMDB por parte de RecCool no implica patrocinio, aprobación ni certificación por parte de TMDB.",
     },
 }
 
@@ -3619,9 +3622,7 @@ class MovieSearchView(generics.ListAPIView):
             )
             qs = qs.with_following_rating_stats(user)
         else:
-            qs = Movie.objects.annotate(
-                display_rating=Cast("external_rating", FloatField()),
-            ).only(
+            qs = Movie.objects.with_display_rating().only(
                 "id",
                 "image",
                 "title_spanish",
