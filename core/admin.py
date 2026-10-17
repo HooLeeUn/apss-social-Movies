@@ -114,7 +114,8 @@ class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "external_votes", "tmdb_id", "created_at")
     list_filter = ("genre", "release_year", "created_at", "author")
     search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members", "tmdb_id")
-    readonly_fields = ("created_at", "updated_at", "trailer_checked_at")
+    readonly_fields = ("created_at", "updated_at", "trailer_checked_at",
+                       "reccool_average", "reccool_ratings_count", "overall_rating")
     fieldsets = (
         (
             "Información principal",
@@ -154,8 +155,28 @@ class MovieAdmin(admin.ModelAdmin):
                 )
             },
         ),
+        ("Calificaciones de RecCool", {
+            "fields": ("reccool_average", "reccool_ratings_count", "overall_rating"),
+        }),
         ("Auditoría", {"fields": ("created_at", "updated_at")}),
     )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).with_display_rating()
+
+    @admin.display(description="Promedio RecCool", empty_value="—")
+    def reccool_average(self, obj):
+        value = getattr(obj, "real_ratings_avg", None)
+        return None if value is None else f"{value:.1f}"
+
+    @admin.display(description="Número de calificaciones RecCool")
+    def reccool_ratings_count(self, obj):
+        return getattr(obj, "real_ratings_count", 0)
+
+    @admin.display(description="Calificación general", empty_value="—")
+    def overall_rating(self, obj):
+        value = getattr(obj, "display_rating", None)
+        return None if value is None else f"{value:.1f}"
 
 
 class MovieRatingAdminForm(forms.ModelForm):
