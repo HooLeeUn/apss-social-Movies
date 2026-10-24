@@ -1364,7 +1364,7 @@ class UserSearchView(APIView):
             return Response([], status=status.HTTP_200_OK)
 
         queryset = (
-            User.objects.filter(username__icontains=query)
+            User.objects.filter(username__icontains=query, is_staff=False, is_superuser=False)
             .exclude(id=request.user.id)
         )
         queryset = filter_out_users_who_restricted_viewer(queryset, request.user).order_by("username")[: self.RESULTS_LIMIT]
@@ -1927,7 +1927,7 @@ class FriendMentionListView(ListAPIView):
             User.objects.filter(
                 Q(friendships_as_user1__user2=self.request.user, friendships_as_user1__status=Friendship.STATUS_ACCEPTED)
                 | Q(friendships_as_user2__user1=self.request.user, friendships_as_user2__status=Friendship.STATUS_ACCEPTED)
-            ),
+            ).filter(is_staff=False, is_superuser=False),
             self.request.user,
         )
         search = self.request.query_params.get("search")
@@ -4074,7 +4074,7 @@ class ProfilePrivacyBlockedUsersView(APIView):
                 owner=request.user,
             ).values_list("blocked_user_id", flat=True)
             candidates = (
-                User.objects.filter(username__icontains=query)
+                User.objects.filter(username__icontains=query, is_staff=False, is_superuser=False)
                 .exclude(id=request.user.id)
                 .exclude(id__in=already_restricted_ids)
                 .order_by("username")[: UserSearchView.RESULTS_LIMIT]
