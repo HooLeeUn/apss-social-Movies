@@ -25,13 +25,6 @@ EMAIL_CONFIRMATION_TTL = timedelta(hours=24)
 ACCOUNT_DELETION_TTL = timedelta(hours=24)
 
 
-class PasswordResetDelivery(models.Model):
-    """Short-lived outbox; deliberately contains no reset token or user lookup."""
-
-    email = models.EmailField()
-    created_at = models.DateTimeField(auto_now_add=True)
-
-
 def normalize_email_address(value):
     return (value or "").strip().lower()
 

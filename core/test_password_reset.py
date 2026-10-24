@@ -11,8 +11,7 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-from .models import PasswordResetDelivery
-from .password_reset import GENERIC_RESPONSE, deliver_password_resets
+from .password_reset import GENERIC_RESPONSE
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend", FRONTEND_BASE_URL="https://reccool.example")
@@ -33,24 +32,57 @@ class PasswordResetTests(TestCase):
         data.update(changes)
         return self.client.post(self.confirm_url, data, format="json")
 
+    def test_active_email_sends_exactly_one_email_directly(self):
+        response = self.client.post(self.request_url, {"email": " OWNER@example.COM "}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), GENERIC_RESPONSE)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.user.email])
+        self.assertEqual(mail.outbox[0].subject, "Restablece tu contraseña de ReCCool")
+        prefix = f"https://reccool.example/reset-password/{self.uid}/"
+        self.assertIn(prefix, mail.outbox[0].body)
+        self.assertIn("1 hora", mail.outbox[0].body)
+        self.token = mail.outbox[0].body.split(prefix, 1)[1].split()[0]
+        self.assertTrue(default_token_generator.check_token(self.user, self.token))
+        self.assertEqual(self.confirm().status_code, 200)
+        self.assertEqual(self.confirm().status_code, 400)
+
+    def test_missing_email_returns_generic_response_without_email(self):
+        response = self.client.post(self.request_url, {"email": "missing@example.com"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), GENERIC_RESPONSE)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_inactive_email_returns_generic_response_without_email(self):
+        self.user.is_active = False
+        self.user.save()
+        response = self.client.post(self.request_url, {"email": self.user.email}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), GENERIC_RESPONSE)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_malformed_email_is_rejected_without_email(self):
+        response = self.client.post(self.request_url, {"email": "not-an-email"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_unusable_password_does_not_send_email(self):
+        self.user.set_unusable_password()
+        self.user.save()
+        self.assertEqual(self.client.post(self.request_url, {"email": self.user.email}).json(), GENERIC_RESPONSE)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_request_indistinguishable_for_active_missing_and_inactive(self):
         get_user_model().objects.create_user("inactive", "inactive@example.com", "Old-password-34!", is_active=False)
         responses = []
         for email in [" OWNER@example.COM ", "missing@example.com", "inactive@example.com"]:
-            with self.assertNumQueries(1):
-                response = self.client.post(self.request_url, {"email": email}, format="json")
+            response = self.client.post(self.request_url, {"email": email}, format="json")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json(), GENERIC_RESPONSE)
             self.assertNotIn("token", response.json())
             responses.append(response.content)
         self.assertEqual(len(set(responses)), 1)
-        self.assertEqual(PasswordResetDelivery.objects.first().email, "owner@example.com")
-        self.assertEqual(deliver_password_resets(), 3)
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(mail.outbox[0].to, [self.user.email])
-        self.assertIn(f"https://reccool.example/reset-password/{self.uid}/", mail.outbox[0].body)
-        self.assertIn("1 hora", mail.outbox[0].body)
-        self.assertFalse(PasswordResetDelivery.objects.exists())
 
     def test_valid_reset_hashes_password_revokes_auth_and_allows_login(self):
         auth = Token.objects.create(user=self.user)
@@ -131,17 +163,16 @@ class PasswordResetTests(TestCase):
 
     @patch("core.password_reset.send_mail", side_effect=RuntimeError("sensitive SMTP detail"))
     def test_delivery_errors_do_not_expose_sensitive_details(self, send):
-        response = self.client.post(self.request_url, {"email": self.user.email})
         with self.assertLogs("core.password_reset", level="WARNING") as logs:
-            deliver_password_resets()
+            response = self.client.post(self.request_url, {"email": self.user.email})
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), GENERIC_RESPONSE)
+        send.assert_called_once()
         self.assertNotIn("sensitive", str(logs.output))
-        self.assertFalse(PasswordResetDelivery.objects.exists())
 
-    def test_stale_jobs_are_discarded(self):
-        from django.utils import timezone
-        job = PasswordResetDelivery.objects.create(email=self.user.email)
-        PasswordResetDelivery.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(hours=2))
-        with patch("core.password_reset.send_mail") as send:
-            deliver_password_resets()
-        send.assert_not_called()
+    def test_no_delivery_model_or_management_command(self):
+        from django.apps import apps
+        from django.core.management import get_commands
+        with self.assertRaises(LookupError):
+            apps.get_model("core", "PasswordResetDelivery")
+        self.assertNotIn("send_password_resets", get_commands())
