@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Callable, Iterable, Literal, cast
@@ -1607,25 +1608,29 @@ class SocialActivityFeedService:
         queryset = Comment.objects.filter(visibility=Comment.VISIBILITY_MENTIONED, target_user__isnull=False)
         if actor_ids is not None:
             queryset = queryset.filter(author_id__in=actor_ids)
-        queryset = queryset.select_related("author", "author__profile", "movie", "target_user")
+        queryset = queryset.select_related("author", "author__profile", "movie", "target_user").prefetch_related("recipient_states__user__profile")
         return cls._annotate_movie_feed(queryset, viewer=viewer, movie_id_ref="movie_id").order_by("-created_at", "-id")
 
     @classmethod
     def serialize_private_message_queryset(cls, queryset, *, viewer=None):
         viewer = viewer or getattr(queryset, "_phase_b_viewer", None)
         result = []
-        for comment in queryset:
-            if not comment.has_valid_target_mention():
-                continue
-            result.append({
-                "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}", "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
-                "created_at": comment.created_at, "updated_at": comment.updated_at,
-                "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
-                "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
-                "actor": cls._serialize_actor(comment.author),
-                "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
-                "payload": {"comment_id": comment.id, "content": comment.body, "sender": cls._serialize_compact_user(comment.author), "recipient": cls._serialize_compact_user(comment.target_user), "target_user": cls._serialize_compact_user(comment.target_user), "direction": "sent" if viewer and comment.author_id == viewer.id else "received", "counterpart": cls._serialize_compact_user(comment.target_user if viewer and comment.author_id == viewer.id else comment.author)},
-            })
+        for original in queryset:
+            for comment in original.conversation_contexts(viewer):
+                if not comment.has_valid_target_mention():
+                    continue
+                participants = comment.directed_participants()
+                if len(participants) > 2 and getattr(viewer, "pk", None) not in {user.pk for user in participants}:
+                    continue
+                result.append({
+                    "id": f"{cls.ACTIVITY_PRIVATE_MESSAGE}:{comment.id}" + (f":{comment.target_user_id}" if comment.individual_dispatch else ""), "activity_type": cls.ACTIVITY_PRIVATE_MESSAGE,
+                    "created_at": comment.created_at, "updated_at": comment.updated_at,
+                    "activity_at": cls._resolve_activity_at(created_at=comment.created_at, updated_at=comment.updated_at),
+                    "_sort_entity_id": comment.id, "_sort_activity_priority": cls._ACTIVITY_SORT_PRIORITY[cls.ACTIVITY_PRIVATE_MESSAGE],
+                    "actor": cls._serialize_actor(comment.author),
+                    "movie": cls._serialize_movie(comment.movie, display_rating=comment.movie_display_rating, my_rating=comment.viewer_movie_rating, following_avg_rating=comment.movie_following_avg_rating, following_ratings_count=comment.movie_following_ratings_count),
+                    "payload": {"conversation_key": comment.conversation_key, "is_group": len(participants) > 2, "participants": [cls._serialize_compact_user(user) for user in participants], "comment_id": comment.id, "content": comment.body, "sender": cls._serialize_compact_user(comment.author), "recipient": cls._serialize_compact_user(comment.target_user), "target_user": cls._serialize_compact_user(comment.target_user), "direction": "sent" if viewer and comment.author_id == viewer.id else "received", "counterpart": cls._serialize_compact_user(comment.target_user if viewer and comment.author_id == viewer.id else comment.author)},
+                })
         return result
 
     @classmethod
@@ -1640,7 +1645,21 @@ class SocialActivityFeedService:
 
     @classmethod
     def serialize_private_reaction_queryset(cls, queryset, *, viewer=None):
-        return [cls._serialize_comment_reaction(reaction, viewer=viewer, private=True) for reaction in queryset if reaction.comment.has_valid_target_mention()]
+        result = []
+        for reaction in queryset:
+            if not reaction.comment.has_valid_target_mention():
+                continue
+            for comment in reaction.comment.conversation_contexts(viewer):
+                if len(comment.directed_participants()) > 2 and getattr(viewer, "pk", None) not in {user.pk for user in comment.directed_participants()}:
+                    continue
+                if comment.individual_dispatch and comment.target_user_id != reaction.user_id:
+                    continue
+                projected = copy(reaction)
+                projected._state = copy(reaction._state)
+                projected._state.fields_cache = reaction._state.fields_cache.copy()
+                projected.comment = comment
+                result.append(cls._serialize_comment_reaction(projected, viewer=viewer, private=True))
+        return result
 
     @classmethod
     def _serialize_comment_reaction(cls, reaction, *, viewer, private):

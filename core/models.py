@@ -1,4 +1,5 @@
 import os
+from copy import copy
 import re
 import uuid
 import secrets
@@ -1337,6 +1338,7 @@ class Comment(models.Model):
         choices=VISIBILITY_CHOICES,
         default=VISIBILITY_PUBLIC,
     )
+    individual_dispatch = models.BooleanField(default=False)
     is_read = models.BooleanField(default=False)
     is_hidden = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1350,7 +1352,7 @@ class Comment(models.Model):
 
     def clean(self):
         super().clean()
-        if self.visibility == self.VISIBILITY_MENTIONED and not self.target_user_id:
+        if self.visibility == self.VISIBILITY_MENTIONED and not self.target_user_id and not (self.pk and self.recipient_states.exists()):
             raise ValidationError({"target_user": "Target user is required for mentioned comments."})
 
     def save(self, *args, **kwargs):
@@ -1372,12 +1374,68 @@ class Comment(models.Model):
         """
         if self.visibility != self.VISIBILITY_MENTIONED:
             return False
-        return bool(
-            self.target_user_id
-            and self.author_id != self.target_user_id
-            and getattr(self, "target_user", None)
-            and self.body
-        )
+        return bool(self.body and any(user.pk != self.author_id for user in self.directed_recipients()))
+
+    def delivery_recipients(self):
+        """All physical recipients; independent of the conversation projection."""
+        if not hasattr(self, "_directed_recipients_cache"):
+            recipients = [row.user for row in self.recipient_states.all()]
+            self._directed_recipients_cache = recipients or ([self.target_user] if self.target_user_id else [])
+        return self._directed_recipients_cache
+
+    def directed_recipients(self):
+        if getattr(self, "_individual_conversation", False):
+            return [self.target_user]
+        return self.delivery_recipients()
+
+    def conversation_contexts(self, viewer):
+        """Project a dispatch into authorized pairs without creating Comment rows."""
+        if not self.individual_dispatch or getattr(self, "_individual_conversation", False):
+            return [self]
+        contexts = []
+        viewer_id = getattr(viewer, "pk", None)
+        for recipient in self.delivery_recipients():
+            if viewer_id not in {self.author_id, recipient.pk}:
+                continue
+            projected = copy(self)
+            projected._state = copy(self._state)
+            projected._state.fields_cache = self._state.fields_cache.copy()
+            projected.target_user = recipient
+            projected._individual_conversation = True
+            contexts.append(projected)
+        return contexts
+
+    def conversation_key_for(self, viewer, counterpart=None):
+        contexts = self.conversation_contexts(viewer)
+        if self.individual_dispatch and len(contexts) > 1 and counterpart is not None:
+            contexts = [comment for comment in contexts if comment.target_user_id == counterpart.pk]
+        return contexts[0].conversation_key if len(contexts) == 1 else None
+
+    def directed_participants(self):
+        return sorted({user.pk: user for user in [self.author, *self.directed_recipients()]}.values(), key=lambda user: user.pk)
+
+    @property
+    def conversation_key(self):
+        if self.individual_dispatch and not getattr(self, "_individual_conversation", False):
+            return None  # A dispatch has several pair keys, never a shared group key.
+        ids = "-".join(str(user.pk) for user in self.directed_participants())
+        return f"movie:{self.movie_id}:participants:{ids}"
+
+    def is_read_by(self, user):
+        if getattr(user, "pk", None) == self.author_id:
+            return self.is_read
+        state = next((row for row in self.recipient_states.all() if row.user_id == getattr(user, "pk", None)), None)
+        return state.is_read if state else self.is_read
+
+
+class DirectedCommentRecipient(models.Model):
+    comment = models.ForeignKey(Comment, on_delete=models.CASCADE, related_name="recipient_states")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="directed_comment_receipts")
+    is_read = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["comment", "user"], name="unique_directed_comment_recipient")]
+        indexes = [models.Index(fields=["user", "is_read"], name="directed_recipient_unread_idx")]
 
 
 class VideoCommentQuerySet(models.QuerySet):
