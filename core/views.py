@@ -11,7 +11,7 @@ from django.core.cache import cache
 from django.core import signing
 from django.core.mail import send_mail
 from django.db import connection, transaction
-from django.db.models import Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
+from django.db.models import Prefetch, Case, Count, Avg, Exists, F, FloatField, Func, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Cast, Coalesce, NullIf
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from rest_framework.generics import RetrieveAPIView, ListAPIView
@@ -50,6 +50,7 @@ from .models import (
     AppBranding,
     Comment,
     CommentReaction,
+    DirectedCommentRecipient,
     Follow,
     Friendship,
     Movie,
@@ -939,7 +940,9 @@ def apply_feed_genre_filters(queryset, genres):
 
 
 def annotate_comments_for_user(queryset, user):
-    return queryset.with_reaction_stats(user)
+    return queryset.with_reaction_stats(user).prefetch_related(
+        Prefetch("recipient_states", queryset=DirectedCommentRecipient.objects.select_related("user", "user__profile")),
+    )
 
 
 def can_access_directed_comment_reactions(user, comment):
@@ -947,26 +950,24 @@ def can_access_directed_comment_reactions(user, comment):
         return True
     if not user or not user.is_authenticated:
         return False
-    return user.id in {comment.author_id, comment.target_user_id}
+    return user.id in {participant.pk for participant in comment.directed_participants()}
 
 
 def is_valid_directed_comment(comment):
     if comment.visibility != Comment.VISIBILITY_MENTIONED:
         return False
-    if not comment.target_user_id:
-        return False
     return comment.has_valid_target_mention()
 
 
 def filter_valid_directed_comments(queryset):
-    valid_ids = [comment.id for comment in queryset if is_valid_directed_comment(comment)]
+    valid_ids = [comment.id for comment in queryset.prefetch_related("recipient_states__user") if is_valid_directed_comment(comment)]
     if not valid_ids:
         return queryset.none()
     return queryset.filter(id__in=valid_ids).order_by("-created_at", "-id")
 
 
 def get_valid_directed_comment_ids(queryset):
-    optimized_queryset = queryset.select_related(
+    optimized_queryset = queryset.prefetch_related("recipient_states__user").select_related(
         "author",
         "author__profile",
         "movie",
@@ -988,12 +989,36 @@ def get_valid_directed_comment_ids(queryset):
     return [comment.id for comment in optimized_queryset if is_valid_directed_comment(comment)]
 
 
+def directed_recipient_q(user, unread=False):
+    receipts = DirectedCommentRecipient.objects.filter(user=user)
+    if unread:
+        receipts = receipts.filter(is_read=False)
+    legacy = Q(target_user=user) & ~Q(pk__in=DirectedCommentRecipient.objects.values("comment_id"))
+    if unread:
+        legacy &= Q(is_read=False)
+    return Q(pk__in=receipts.values("comment_id")) | legacy
+
+
+def directed_recipient_filter(user, unread=False):
+    return {"pk__in": Comment.objects.filter(directed_recipient_q(user, unread)).values("pk")}
+
+
+def mark_directed_read(user, ids):
+    ids = list(ids)
+    with transaction.atomic():
+        updated = DirectedCommentRecipient.objects.filter(comment_id__in=ids, user=user, is_read=False).update(is_read=True)
+        legacy = Comment.objects.filter(pk__in=ids, target_user=user, recipient_states__isnull=True, is_read=False)
+        updated += legacy.update(is_read=True)
+        Comment.objects.filter(pk__in=ids, target_user=user).update(is_read=True)
+        UserNotification.objects.filter(comment_id__in=ids, recipient=user, type=UserNotification.TYPE_PRIVATE_MESSAGE).update(is_read=True, read_at=timezone.now())
+    return updated
+
+
 def get_unread_private_message_count(user):
     queryset = (
         Comment.objects.filter(
             visibility=Comment.VISIBILITY_MENTIONED,
-            target_user=user,
-            is_read=False,
+            **directed_recipient_filter(user, unread=True),
         )
         .exclude(author=user)
         .select_related("target_user")
@@ -1002,7 +1027,7 @@ def get_unread_private_message_count(user):
     valid_ids = get_valid_directed_comment_ids(queryset)
     if not valid_ids:
         return 0
-    return Comment.objects.filter(id__in=valid_ids, is_read=False).count()
+    return len(valid_ids)
 
 
 def build_actor_payload(actor, request):
@@ -1174,7 +1199,7 @@ def filter_comments_visible_to_user(queryset, user):
     return queryset.filter(
         Q(visibility=Comment.VISIBILITY_PUBLIC)
         | Q(author=user)
-        | Q(target_user=user)
+        | directed_recipient_q(user)
     )
 
 
@@ -2351,25 +2376,30 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
         return annotate_comments_for_user(queryset, self.request.user)
 
     def _get_mentioned_friend(self, body):
-        if not body:
-            return None
+        friends = self._get_mentioned_friends(body)
+        return friends[0] if friends else None
 
-        match = self.mention_pattern.search(body)
-        if not match:
-            return None
+    def _resolve_mentioned_users(self, usernames):
+        usernames = [username.strip().lstrip("@") for username in usernames]
+        lookup = Q(pk__in=[])
+        for username in set(usernames):
+            lookup |= Q(username__iexact=username)
+        users = list(User.objects.filter(lookup).select_related("profile"))
+        result = []
+        for username in usernames:
+            exact = next((user for user in users if user.username == username), None)
+            matches = [user for user in users if user.username.casefold() == username.casefold()]
+            result.append(exact or (matches[0] if len(matches) == 1 else None))
+        return result
 
-        username = match.group("username")
-        target_user = self._resolve_mentioned_user(username)
-        if target_user is None or target_user == self.request.user:
-            return None
-
-        friendship = Friendship.between(self.request.user, target_user).filter(
-            status=Friendship.STATUS_ACCEPTED,
-        ).first()
-        if friendship is None:
-            return None
-
-        return target_user
+    def _get_mentioned_friends(self, body):
+        users = self._resolve_mentioned_users([match.group("username") for match in self.mention_pattern.finditer(body or "")])
+        users = {user.pk: user for user in users if user and user.pk != self.request.user.pk}
+        pairs = Friendship.objects.filter(status=Friendship.STATUS_ACCEPTED).filter(
+            Q(user1=self.request.user, user2_id__in=users) | Q(user2=self.request.user, user1_id__in=users)
+        ).values_list("user1_id", "user2_id")
+        friend_ids = {pk for pair in pairs for pk in pair} - {self.request.user.pk}
+        return [user for pk, user in users.items() if pk in friend_ids]
 
     def _resolve_mentioned_user(self, raw_username):
         username = (raw_username or "").strip().lstrip("@")
@@ -2403,47 +2433,99 @@ class MovieCommentsListCreateView(generics.ListCreateAPIView):
 
         return target_user, True
 
+    def _resolve_recipients(self, serializer, movie):
+        data = serializer.validated_data
+        reply_id = data.get("reply_to_comment_id")
+        key = data.get("conversation_key")
+        self._reply_group = False
+        if reply_id or key:
+            candidates = filter_comments_visible_to_user(
+                Comment.objects.filter(movie=movie, visibility=Comment.VISIBILITY_MENTIONED)
+                .select_related("author", "author__profile", "target_user", "target_user__profile")
+                .prefetch_related("recipient_states__user__profile"), self.request.user,
+            )
+            if reply_id:
+                original = get_object_or_404(candidates, pk=reply_id)
+                contexts = original.conversation_contexts(self.request.user)
+                if key:
+                    contexts = [comment for comment in contexts if comment.conversation_key == key]
+                elif len(contexts) > 1:
+                    # Legacy sender replies must select one pair explicitly.
+                    username = (data.get("mentioned_username") or data.get("recipient_username") or "").lstrip("@").casefold()
+                    contexts = [comment for comment in contexts if comment.target_user.username.casefold() == username]
+                if len(contexts) != 1:
+                    raise ValidationError({"conversation_key": "Select a valid conversation for this reply."})
+                original = contexts[0]
+            else:
+                original = next((context for comment in candidates for context in comment.conversation_contexts(self.request.user) if context.conversation_key == key), None)
+                if original is None:
+                    raise ValidationError({"conversation_key": "Conversation is unavailable."})
+            self._reply_group = len(original.directed_participants()) > 2
+            targets = [user for user in original.directed_participants() if user.pk != self.request.user.pk]
+        elif "mentioned_usernames" in data:
+            targets = []
+            for target in self._resolve_mentioned_users(data["mentioned_usernames"]):
+                if target is None or target == self.request.user:
+                    raise ValidationError({"mentioned_usernames": "Mentioned user is invalid."})
+                targets.append(target)
+        else:
+            target, explicit = self._get_mentioned_friend_from_payload(data)
+            targets = [target] if explicit else self._get_mentioned_friends(data.get("body", ""))
+            if explicit:
+                targets.extend(self._get_mentioned_friends(data.get("body", "")))
+        targets = list({user.pk: user for user in targets}.values())
+        participants = [self.request.user, *targets]
+        participant_ids = {user.pk for user in participants}
+        accepted_pairs = {
+            frozenset(pair) for pair in Friendship.objects.filter(
+                status=Friendship.STATUS_ACCEPTED,
+                user1_id__in=participant_ids, user2_id__in=participant_ids,
+            ).values_list("user1_id", "user2_id")
+        }
+        for target in targets:
+            if frozenset((self.request.user.pk, target.pk)) not in accepted_pairs:
+                raise ValidationError({"mentioned_usernames": "You can only mention users who are your friends."})
+        # One batch query checks restrictions across every participant pair.
+        if UserVisibilityBlock.objects.filter(owner_id__in=participant_ids, blocked_user_id__in=participant_ids).exists():
+            raise PermissionDenied({"code": "directed_message_restricted", "detail": "You cannot send a directed message to this user."})
+        all_friends = len(accepted_pairs) == len(participant_ids) * (len(participant_ids) - 1) // 2
+        if self._reply_group and not all_friends:
+            raise ValidationError({"conversation_key": "All group participants must still be accepted friends."})
+        self._individual_dispatch = len(targets) > 1 and not all_friends
+        return targets
+
+    def _persist_comment(self, serializer, movie, targets):
+        with transaction.atomic():
+            comment = serializer.save(
+                author=self.request.user, movie=movie,
+                target_user=targets[0] if targets else None,
+                visibility=Comment.VISIBILITY_MENTIONED if targets else Comment.VISIBILITY_PUBLIC,
+                is_read=not bool(targets),
+                individual_dispatch=self._individual_dispatch,
+            )
+            DirectedCommentRecipient.objects.bulk_create([
+                DirectedCommentRecipient(comment=comment, user=user) for user in targets
+            ])
+            comment._directed_recipients_cache = targets
+            # The batch restriction validation above has already checked these pairs.
+            for user in [self.request.user, *targets]:
+                user.restricted_current_user = False
+            for user in targets:
+                UserNotification.objects.get_or_create(
+                    recipient=user, actor=self.request.user, comment=comment,
+                    type=UserNotification.TYPE_PRIVATE_MESSAGE,
+                    defaults={"movie": movie, "target_tab": UserNotification.TARGET_PRIVATE_INBOX},
+                )
+
     def perform_create(self, serializer):
         movie = get_object_or_404(Movie, pk=self.kwargs["pk"])
-        target_user, has_explicit_mention = self._get_mentioned_friend_from_payload(serializer.validated_data)
-        if not has_explicit_mention:
-            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
-        if target_user and users_have_any_restriction(self.request.user, target_user):
-            raise PermissionDenied({
-                "code": "directed_message_restricted",
-                "detail": "You cannot send a directed message to this user.",
-            })
-        visibility = Comment.VISIBILITY_MENTIONED if target_user else Comment.VISIBILITY_PUBLIC
-        is_read = visibility != Comment.VISIBILITY_MENTIONED
-        serializer.save(
-            author=self.request.user,
-            movie=movie,
-            target_user=target_user,
-            visibility=visibility,
-            is_read=is_read,
-        )
+        self._persist_comment(serializer, movie, self._resolve_recipients(serializer, movie))
 
     def _save_directed_comment(self, serializer, movie):
-        target_user, _ = self._get_mentioned_friend_from_payload(serializer.validated_data)
-        if target_user is None:
-            target_user = self._get_mentioned_friend(serializer.validated_data.get("body", ""))
-        if target_user is None:
+        targets = self._resolve_recipients(serializer, movie)
+        if not targets:
             raise ValidationError({"mentioned_username": "Directed comments require a valid friend mention."})
-        if users_have_any_restriction(self.request.user, target_user):
-            raise PermissionDenied({
-                "code": "directed_message_restricted",
-                "detail": "You cannot send a directed message to this user.",
-            })
-
-        # Private-message notifications are derived from this same Comment row.
-        with transaction.atomic():
-            serializer.save(
-                author=self.request.user,
-                movie=movie,
-                target_user=target_user,
-                visibility=Comment.VISIBILITY_MENTIONED,
-                is_read=False,
-            )
+        self._persist_comment(serializer, movie, targets)
 
 
 
@@ -2612,7 +2694,7 @@ class ReceivedDirectedCommentsView(generics.ListAPIView):
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=self.request.user,
+                **directed_recipient_filter(self.request.user),
             )
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
@@ -2648,6 +2730,9 @@ class SentDirectedCommentsView(generics.ListAPIView):
 
 
 class DirectedCommentsListView(MovieCommentsListCreateView):
+    def get_permissions(self):
+        return [permissions.IsAuthenticated()]
+
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = CommentSerializer
 
@@ -2669,7 +2754,7 @@ class DirectedCommentsListView(MovieCommentsListCreateView):
                 visibility=Comment.VISIBILITY_MENTIONED,
             )
             .filter(
-                Q(author=self.request.user) | Q(target_user=self.request.user)
+                Q(author=self.request.user) | directed_recipient_q(self.request.user)
             )
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
@@ -2694,7 +2779,7 @@ class MeMessagesView(generics.ListAPIView):
                 visibility=Comment.VISIBILITY_MENTIONED,
                 target_user__isnull=False,
             )
-            .filter(Q(target_user=user) | Q(author=user))
+            .filter(directed_recipient_q(user) | Q(author=user))
             .exclude(author=F("target_user"))
             .exclude(body="")
             .select_related(
@@ -2722,9 +2807,10 @@ class MeMessagesView(generics.ListAPIView):
         )
 
     def _serialize_items(self, messages, reactions, request):
+        from django.db.models import prefetch_related_objects
+        prefetch_related_objects(messages, Prefetch("recipient_states", queryset=DirectedCommentRecipient.objects.select_related("user", "user__profile")))
         annotate_restricted_current_user_for_users(
-            [user for comment in messages for user in (comment.author, comment.target_user)],
-            request.user,
+            [participant for comment in messages for participant in comment.directed_participants()], request.user,
         )
         message_payloads = {
             item.id: payload
@@ -2838,9 +2924,11 @@ class MeMessagesView(generics.ListAPIView):
             return self._paginated_list(request)
 
         private_messages_qs = self._message_queryset(request.user)
-        private_messages = list(private_messages_qs)
+        private_messages = list(private_messages_qs.prefetch_related(
+            Prefetch("recipient_states", queryset=DirectedCommentRecipient.objects.select_related("user", "user__profile")),
+        ))
         annotate_restricted_current_user_for_users(
-            [user for comment in private_messages for user in (comment.author, comment.target_user)],
+            [user for comment in private_messages for user in comment.directed_participants()],
             request.user,
         )
 
@@ -2912,7 +3000,7 @@ class MeMessagesSummaryView(APIView):
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=request.user,
+                **directed_recipient_filter(request.user),
             )
             .exclude(author=request.user)
             .select_related("target_user")
@@ -2938,8 +3026,7 @@ class MeMessagesMarkAsReadView(APIView):
         queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=request.user,
-                is_read=False,
+                **directed_recipient_filter(request.user, unread=True),
             )
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
@@ -2947,7 +3034,7 @@ class MeMessagesMarkAsReadView(APIView):
         valid_ids = get_valid_directed_comment_ids(queryset)
         updated = 0
         if valid_ids:
-            updated = Comment.objects.filter(id__in=valid_ids, is_read=False).update(is_read=True)
+            updated = mark_directed_read(request.user, valid_ids)
         return Response({"updated": updated})
 
 
@@ -3019,11 +3106,15 @@ class MeNotificationsView(APIView):
         reaction_notifications = reaction_notifications.select_related(
             "actor", "actor__profile", "movie", "comment", "video_comment",
             "video_comment__user", "video_comment__user__profile",
-        ).order_by("-created_at", "-id")
+        ).prefetch_related("comment__recipient_states__user").order_by("-created_at", "-id")
         reaction_items = [
             {
                 "id": item.id,
                 "notification_id": item.id,
+                "conversation_key": (
+                    item.comment.conversation_key_for(request.user, counterpart=item.actor)
+                    if item.comment and item.comment.visibility == Comment.VISIBILITY_MENTIONED else None
+                ),
                 "type": item.type,
                 "actor": build_actor_payload(item.actor, request),
                 "target_tab": item.target_tab,
@@ -3063,17 +3154,18 @@ class MeNotificationsView(APIView):
         private_queryset = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=request.user,
+                **directed_recipient_filter(request.user),
             )
             .exclude(author=request.user)
             .select_related("author", "author__profile", "movie", "target_user")
             .order_by("-created_at", "-id")
         )
         if not include_read:
-            private_queryset = private_queryset.filter(is_read=False)
-        valid_private_messages = filter_valid_directed_comments(private_queryset)
+            private_queryset = private_queryset.filter(directed_recipient_q(request.user, unread=True))
+        valid_private_messages = filter_valid_directed_comments(private_queryset).prefetch_related("recipient_states__user")
         private_items = [
             {
+                "conversation_key": comment.conversation_key_for(request.user),
                 "id": f"pm-{comment.id}",
                 "notification_id": f"pm-{comment.id}",
                 "type": UserNotification.TYPE_PRIVATE_MESSAGE,
@@ -3081,9 +3173,10 @@ class MeNotificationsView(APIView):
                 "target_tab": UserNotification.TARGET_PRIVATE_INBOX,
                 "message": f"Tienes un mensaje privado de {comment.author.username}",
                 "created_at": comment.created_at,
-                "is_read": comment.is_read,
+                "is_read": comment.is_read_by(request.user),
                 "object": {
                     "comment_id": comment.id,
+                    "conversation_key": comment.conversation_key_for(request.user),
                     "movie": {
                         "id": comment.movie.id,
                         "title_english": comment.movie.title_english,
@@ -3201,6 +3294,9 @@ class MeNotificationsMarkReadView(APIView):
             notifications_qs = notifications_qs.filter(type=notification_type)
         if target_tab:
             notifications_qs = notifications_qs.filter(target_tab=target_tab)
+        normalized_private_message_ids.extend(notifications_qs.filter(
+            type=UserNotification.TYPE_PRIVATE_MESSAGE, comment__isnull=False,
+        ).values_list("comment_id", flat=True))
         notifications_updated = notifications_qs.update(is_read=True, read_at=timezone.now())
 
         friend_requests_updated = 0
@@ -3233,8 +3329,7 @@ class MeNotificationsMarkReadView(APIView):
         private_messages_qs = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=request.user,
-                is_read=False,
+                **directed_recipient_filter(request.user, unread=True),
             )
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
@@ -3242,7 +3337,7 @@ class MeNotificationsMarkReadView(APIView):
         if normalized_private_message_ids:
             private_messages_qs = private_messages_qs.filter(id__in=normalized_private_message_ids)
         if should_mark_private_messages or normalized_private_message_ids:
-            messages_updated = private_messages_qs.update(is_read=True)
+            messages_updated = mark_directed_read(request.user, private_messages_qs.values_list("id", flat=True))
 
         updated_total = notifications_updated + messages_updated + friend_requests_updated
 
@@ -3268,8 +3363,7 @@ class MeNotificationsMarkAllReadView(APIView):
         private_messages_qs = (
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
-                target_user=request.user,
-                is_read=False,
+                **directed_recipient_filter(request.user, unread=True),
             )
             .exclude(author=request.user)
             .order_by("-created_at", "-id")
@@ -3279,7 +3373,7 @@ class MeNotificationsMarkAllReadView(APIView):
         valid_private_message_ids = get_valid_directed_comment_ids(private_messages_qs)
         messages_updated = 0
         if valid_private_message_ids:
-            messages_updated = Comment.objects.filter(id__in=valid_private_message_ids, is_read=False).update(is_read=True)
+            messages_updated = mark_directed_read(request.user, valid_private_message_ids)
 
         return Response(
             {
@@ -3326,6 +3420,10 @@ class MeNotificationsMarkReadBatchView(APIView):
 
         notifications_updated = 0
         if normalized_notification_ids:
+            normalized_private_message_ids.extend(UserNotification.objects.filter(
+                recipient=request.user, id__in=normalized_notification_ids,
+                type=UserNotification.TYPE_PRIVATE_MESSAGE, comment__isnull=False,
+            ).values_list("comment_id", flat=True))
             notifications_updated = UserNotification.objects.filter(
                 recipient=request.user,
                 is_read=False,
@@ -3344,8 +3442,7 @@ class MeNotificationsMarkReadBatchView(APIView):
             private_messages_qs = (
                 Comment.objects.filter(
                     visibility=Comment.VISIBILITY_MENTIONED,
-                    target_user=request.user,
-                    is_read=False,
+                    **directed_recipient_filter(request.user, unread=True),
                     id__in=normalized_private_message_ids,
                 )
                 .exclude(author=request.user)
@@ -3353,10 +3450,7 @@ class MeNotificationsMarkReadBatchView(APIView):
             )
             valid_private_message_ids = get_valid_directed_comment_ids(private_messages_qs)
             if valid_private_message_ids:
-                messages_updated = Comment.objects.filter(
-                    id__in=valid_private_message_ids,
-                    is_read=False,
-                ).update(is_read=True)
+                messages_updated = mark_directed_read(request.user, valid_private_message_ids)
 
         return Response(
             {
@@ -3407,18 +3501,14 @@ class MeNotificationsMarkContextReadView(APIView):
             private_messages_qs = (
                 Comment.objects.filter(
                     visibility=Comment.VISIBILITY_MENTIONED,
-                    target_user=request.user,
-                    is_read=False,
+                    **directed_recipient_filter(request.user, unread=True),
                 )
                 .exclude(author=request.user)
                 .order_by("-created_at", "-id")
             )
             valid_private_message_ids = get_valid_directed_comment_ids(private_messages_qs)
             if valid_private_message_ids:
-                messages_updated = Comment.objects.filter(
-                    id__in=valid_private_message_ids,
-                    is_read=False,
-                ).update(is_read=True)
+                messages_updated = mark_directed_read(request.user, valid_private_message_ids)
 
         return Response(
             {
@@ -3431,6 +3521,9 @@ class MeNotificationsMarkContextReadView(APIView):
 
 
 class MovieDirectedCommentsListView(MovieCommentsListCreateView):
+    def get_permissions(self):
+        return [permissions.IsAuthenticated()]
+
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = DirectedConversationSerializer
     pagination_class = DefaultPagination
@@ -3447,7 +3540,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
                 visibility=Comment.VISIBILITY_MENTIONED,
             )
             .filter(
-                Q(author=self.request.user) | Q(target_user=self.request.user)
+                Q(author=self.request.user) | directed_recipient_q(self.request.user)
             )
             .select_related("author", "author__profile", "movie", "target_user", "target_user__profile")
             .order_by("-created_at", "-id")
@@ -3462,6 +3555,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
                 self.request.user,
             )
         )
+        directed_comments = [context for comment in directed_comments for context in comment.conversation_contexts(self.request.user)]
         annotate_restricted_current_user_for_users(
             [user for comment in directed_comments for user in (comment.author, comment.target_user)],
             self.request.user,
@@ -3476,8 +3570,12 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
             direction = "sent" if comment.author_id == self.request.user.id else "received"
             recipient = comment.target_user if comment.target_user_id else None
             conversation = grouped.setdefault(
-                other_user.id,
+                comment.conversation_key,
                 {
+                    "conversation_key": comment.conversation_key,
+                    "participants": comment.directed_participants(),
+                    "other_participants": [user for user in comment.directed_participants() if user.pk != self.request.user.pk],
+                    "is_group": len(comment.directed_participants()) > 2,
                     "other_user": other_user,
                     "counterpart": other_user,
                     "recipient": recipient,
@@ -3500,7 +3598,7 @@ class MovieDirectedCommentsListView(MovieCommentsListCreateView):
         )
         for item in conversations:
             item["messages_endpoint"] = self.request.build_absolute_uri(
-                f"/api/movies/{self.kwargs['pk']}/comments/directed/conversations/{item['other_user'].username}/messages/"
+                f"/api/movies/{self.kwargs['pk']}/comments/directed/conversations/{item['other_user'].username}/messages/?conversation_key={item['conversation_key']}"
             )
         return conversations
 
@@ -3525,22 +3623,19 @@ class DirectedConversationMessagesView(generics.ListAPIView):
     def get_queryset(self):
         movie_id = self.kwargs["pk"]
         other_user = get_object_or_404(User, username=self.kwargs["username"])
-        queryset = (
-            Comment.objects.filter(
-                movie_id=movie_id,
-                visibility=Comment.VISIBILITY_MENTIONED,
-            )
-            .filter(
-                Q(author=self.request.user, target_user=other_user)
-                | Q(author=other_user, target_user=self.request.user)
-            )
-            .select_related("author", "author__profile", "movie", "target_user", "target_user__profile")
-            .order_by("-created_at", "-id")
-        )
-        valid_ids = get_valid_directed_comment_ids(queryset)
-        if not valid_ids:
-            return Comment.objects.none()
-        comments = list(annotate_comments_for_user(queryset.filter(id__in=valid_ids), self.request.user))
+        queryset = Comment.objects.filter(
+            movie_id=movie_id, visibility=Comment.VISIBILITY_MENTIONED,
+        ).filter(Q(author=self.request.user) | directed_recipient_q(self.request.user)).select_related(
+            "author", "author__profile", "movie", "target_user", "target_user__profile",
+        ).order_by("-created_at", "-id")
+        key = self.request.query_params.get("conversation_key")
+        expected = key or f"movie:{movie_id}:participants:{'-'.join(str(pk) for pk in sorted([self.request.user.pk, other_user.pk]))}"
+        comments = [
+            context for comment in annotate_comments_for_user(queryset, self.request.user)
+            if is_valid_directed_comment(comment)
+            for context in comment.conversation_contexts(self.request.user)
+            if context.conversation_key == expected
+        ]
         annotate_restricted_current_user_for_users(
             [user for comment in comments for user in (comment.author, comment.target_user)],
             self.request.user,

@@ -147,7 +147,8 @@ class MeMessagesCursorPaginationTests(TestCase):
 
         self.assertEqual(len(response.data["results"]), 10)
         self.assertEqual(len(many_item_queries), len(one_item_queries))
-        self.assertLessEqual(len(many_item_queries), 4)
+        # One fixed prefetch loads all recipient/read states for the page.
+        self.assertLessEqual(len(many_item_queries), 5)
 
     def test_next_keeps_opt_in_parameter(self):
         for index in range(11):
