@@ -534,7 +534,7 @@ class PrivacySettingsSerializer(serializers.ModelSerializer):
             Comment.objects.filter(
                 visibility=Comment.VISIBILITY_MENTIONED,
             ).filter(
-                Q(author=instance.user) | Q(target_user=instance.user)
+                Q(author=instance.user) | Q(target_user=instance.user) | Q(recipient_states__user=instance.user)
             ).delete()
 
         return instance
@@ -670,6 +670,14 @@ class SocialActivitySerializer(serializers.Serializer):
     users_who_disliked = serializers.SerializerMethodField()
     latest_reaction_at = serializers.SerializerMethodField()
     object_created_at = serializers.SerializerMethodField()
+
+    def to_representation(self, instance):
+        result = super().to_representation(instance)
+        payload = instance.get("payload") or {}
+        for field in ("conversation_key", "participants", "is_group"):
+            if field in payload:
+                result[field] = payload[field]
+        return result
 
     def get_type(self, obj):
         mapping = {
@@ -1106,9 +1114,41 @@ class VideoCommentReactionSerializer(serializers.Serializer):
         return super().to_internal_value(payload)
 
 
-class CommentSerializer(serializers.ModelSerializer):
+class DirectedMembershipSerializerMixin:
+    def to_representation(self, instance):
+        if instance.individual_dispatch and not getattr(instance, "_individual_conversation", False):
+            viewer = getattr(self.context.get("request"), "user", None)
+            contexts = [self.to_representation(comment) for comment in instance.conversation_contexts(viewer)]
+            if not contexts:
+                return {}
+            payload = dict(contexts[0])
+            if len(contexts) > 1:
+                payload["conversation_contexts"] = contexts
+            return payload
+        payload = super().to_representation(instance)
+        if instance.visibility != Comment.VISIBILITY_MENTIONED:
+            return payload
+        request = self.context.get("request")
+        viewer = getattr(request, "user", None)
+        participants = instance.directed_participants()
+        serialize = lambda users: DirectedConversationOtherUserSerializer(users, many=True, context=self.context).data
+        payload.update({
+            "participants": serialize(participants),
+            "recipients": serialize(instance.directed_recipients()),
+            "other_participants": serialize([user for user in participants if user.pk != getattr(viewer, "pk", None)]),
+            "conversation_key": instance.conversation_key,
+            "is_group": len(participants) > 2,
+            "is_read": instance.is_read_by(viewer) if viewer and viewer.is_authenticated else instance.is_read,
+        })
+        return payload
+
+
+class CommentSerializer(DirectedMembershipSerializerMixin, serializers.ModelSerializer):
     author = UserMiniSerializer(read_only=True)
     target_user = serializers.PrimaryKeyRelatedField(read_only=True)
+    mentioned_usernames = serializers.ListField(child=serializers.CharField(), write_only=True, required=False, allow_empty=False)
+    reply_to_comment_id = serializers.IntegerField(write_only=True, required=False, min_value=1)
+    conversation_key = serializers.CharField(write_only=True, required=False)
     mentioned_username = serializers.CharField(write_only=True, required=False, allow_blank=True)
     recipient_username = serializers.CharField(write_only=True, required=False, allow_blank=True)
     likes_count = serializers.IntegerField(read_only=True)
@@ -1122,7 +1162,7 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         fields = [
             "id", "author", "movie", "target_user", "body", "visibility",
-            "mentioned_username", "recipient_username",
+            "mentioned_username", "recipient_username", "mentioned_usernames", "reply_to_comment_id", "conversation_key",
             "created_at", "updated_at", "likes_count", "dislikes_count", "my_reaction",
             "author_username", "author_display_name", "author_avatar",
         ]
@@ -1134,7 +1174,15 @@ class CommentSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data.pop("mentioned_username", None)
         validated_data.pop("recipient_username", None)
+        validated_data.pop("mentioned_usernames", None)
+        validated_data.pop("reply_to_comment_id", None)
+        validated_data.pop("conversation_key", None)
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        for field in ("mentioned_username", "recipient_username", "mentioned_usernames", "reply_to_comment_id", "conversation_key"):
+            validated_data.pop(field, None)
+        return super().update(instance, validated_data)
 
     def get_author_avatar(self, obj):
         if hasattr(obj.author, "profile") and obj.author.profile.avatar:
@@ -1192,7 +1240,7 @@ class DirectedMessageMovieSerializer(serializers.ModelSerializer):
         ]
 
 
-class DirectedConversationMessageSerializer(serializers.ModelSerializer):
+class DirectedConversationMessageSerializer(DirectedMembershipSerializerMixin, serializers.ModelSerializer):
     author = DirectedConversationOtherUserSerializer(read_only=True)
     movie = DirectedMessageMovieSerializer(read_only=True)
     target_user = DirectedConversationOtherUserSerializer(read_only=True)
@@ -1295,6 +1343,10 @@ class DirectedConversationMessageSerializer(serializers.ModelSerializer):
 
 
 class DirectedConversationSerializer(serializers.Serializer):
+    conversation_key = serializers.CharField(read_only=True)
+    is_group = serializers.BooleanField(read_only=True)
+    participants = DirectedConversationOtherUserSerializer(read_only=True, many=True)
+    other_participants = DirectedConversationOtherUserSerializer(read_only=True, many=True)
     other_user = DirectedConversationOtherUserSerializer(read_only=True)
     counterpart = DirectedConversationOtherUserSerializer(read_only=True)
     recipient = DirectedConversationOtherUserSerializer(read_only=True, allow_null=True)
@@ -1333,7 +1385,7 @@ class MeMessageMovieSerializer(DirectedMessageMovieSerializer):
     pass
 
 
-class MeMessageSerializer(serializers.ModelSerializer):
+class MeMessageSerializer(DirectedMembershipSerializerMixin, serializers.ModelSerializer):
     author = MeMessageAuthorSerializer(read_only=True)
     target_user = MeMessageAuthorSerializer(read_only=True)
     movie = MeMessageMovieSerializer(read_only=True)
