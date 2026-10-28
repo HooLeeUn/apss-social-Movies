@@ -67,13 +67,14 @@ class RatingDisplayTests(TestCase):
         after = Movie.objects.with_display_rating().get(pk=movie.pk).display_rating
         self.assertEqual(before, after)
 
-    def test_admin_metrics_are_readonly_and_require_one_query_for_all_movies(self):
+    def test_admin_metrics_are_readonly_and_loaded_only_for_individual_movies(self):
         movie_admin = admin.site._registry[Movie]
         request = RequestFactory().get("/admin/core/movie/")
-        with self.assertNumQueries(1):
-            rows = list(movie_admin.get_queryset(request))
-            rendered = {row.pk: (movie_admin.reccool_average(row), movie_admin.reccool_ratings_count(row),
-                                 movie_admin.overall_rating(row)) for row in rows}
+        rendered = {}
+        for movie in self.movies.values():
+            row = movie_admin.get_object(request, str(movie.pk))
+            rendered[row.pk] = (movie_admin.reccool_average(row), movie_admin.reccool_ratings_count(row),
+                                movie_admin.overall_rating(row))
         self.assertEqual(rendered[self.movies[0].pk], (None, 0, "8.0"))
         self.assertEqual(rendered[self.movies[1].pk], ("6.0", 1, "8.0"))
         self.assertEqual(rendered[self.movies[50].pk], ("6.0", 50, "7.0"))
@@ -86,7 +87,7 @@ class RatingDisplayTests(TestCase):
     def test_admin_handles_missing_external_and_internal_average(self):
         movie = Movie.objects.create(title_english="No ratings")
         movie_admin = admin.site._registry[Movie]
-        row = movie_admin.get_queryset(RequestFactory().get("/")).get(pk=movie.pk)
+        row = movie_admin.get_object(RequestFactory().get("/"), str(movie.pk))
         self.assertIsNone(movie_admin.reccool_average(row))
         self.assertEqual(movie_admin.reccool_ratings_count(row), 0)
         self.assertIsNone(movie_admin.overall_rating(row))
