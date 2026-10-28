@@ -1,0 +1,14 @@
+{% load i18n %}
+<details data-filter-title="{{ title }}" open>
+  <summary>{% blocktranslate with filter_title=title %} By {{ filter_title }} {% endblocktranslate %}</summary>
+  {% for choice in choices %}
+    <form method="get" style="padding: 0 15px 10px;">
+      {% for key, value in choice.hidden_parameters %}
+        <input type="hidden" name="{{ key }}" value="{{ value }}">
+      {% endfor %}
+      <input type="text" name="{{ spec.parameter_name }}" value="{{ spec.value|default_if_none:'' }}" aria-label="{{ title }}" style="width: 90%;">
+      <button type="submit">{% translate "Apply" %}</button>
+      <a href="{{ choice.clear_url }}">{% translate "Clear" %}</a>
+    </form>
+  {% endfor %}
+</details>

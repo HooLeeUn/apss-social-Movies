@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.admin.options import IncorrectLookupParameters
 from django import forms
 from django.utils.html import format_html
 from django.db.models import Avg, Count, Q
@@ -109,10 +110,59 @@ class CommentAdmin(admin.ModelAdmin):
     list_select_related = ("movie", "author", "target_user")
 
 
+class MovieExactInputFilter(admin.SimpleListFilter):
+    """Accept an exact value without enumerating the catalog or all users."""
+
+    template = "admin/core/movie/input_filter.html"
+
+    def lookups(self, request, model_admin):
+        return ()
+
+    def has_output(self):
+        return True
+
+    def choices(self, changelist):
+        yield {
+            "hidden_parameters": [
+                (key, value)
+                for key, values in changelist.filter_params.items()
+                if key not in {self.parameter_name, "p"}
+                for value in values
+            ],
+            "clear_url": changelist.get_query_string(remove=[self.parameter_name, "p"]),
+        }
+
+    def queryset(self, request, queryset):
+        if self.value() not in (None, ""):
+            try:
+                return queryset.filter(**{self.parameter_name: self.value()})
+            except (ValueError, TypeError) as exc:
+                raise IncorrectLookupParameters(exc)
+        return queryset
+
+
+class MovieGenreFilter(MovieExactInputFilter):
+    title = "género (valor exacto)"
+    parameter_name = "genre__exact"
+
+
+class MovieYearFilter(MovieExactInputFilter):
+    title = "año de estreno"
+    parameter_name = "release_year__exact"
+
+
+class MovieAuthorFilter(MovieExactInputFilter):
+    title = "autor (ID)"
+    parameter_name = "author__id__exact"
+
+
 @admin.register(Movie)
 class MovieAdmin(admin.ModelAdmin):
     list_display = ("id", "title_english", "title_spanish", "genre", "release_year", "author", "external_rating", "external_votes", "tmdb_id", "created_at")
-    list_filter = ("genre", "release_year", "created_at", "author")
+    list_filter = (MovieGenreFilter, MovieYearFilter, "created_at", MovieAuthorFilter)
+    list_select_related = ("author",)
+    show_full_result_count = False
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("id", "title_english", "title_spanish", "director", "genre", "cast_members", "tmdb_id")
     readonly_fields = ("created_at", "updated_at", "trailer_checked_at",
                        "reccool_average", "reccool_ratings_count", "overall_rating")
@@ -161,8 +211,19 @@ class MovieAdmin(admin.ModelAdmin):
         ("Auditoría", {"fields": ("created_at", "updated_at")}),
     )
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).with_display_rating()
+    def get_ordering(self, request):
+        # Keep the existing ordering for autocomplete and other admin views.
+        match = request.resolver_match
+        if match and match.url_name == "core_movie_changelist":
+            return ("-pk",)
+        return super().get_ordering(request)
+
+    def get_object(self, request, object_id, from_field=None):
+        obj = super().get_object(request, object_id, from_field)
+        if obj is None:
+            return None
+        # Apply the unchanged rating formula only after selecting one movie.
+        return self.get_queryset(request).filter(pk=obj.pk).with_display_rating().get()
 
     @admin.display(description="Promedio RecCool", empty_value="—")
     def reccool_average(self, obj):
