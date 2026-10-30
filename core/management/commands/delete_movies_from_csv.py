@@ -127,23 +127,30 @@ class Command(BaseCommand):
 
     def _delete_batch(self, batch, mode, report_rows):
         deleted = protected = errors = 0
+        # Publish successes only after the outer transaction has committed.
+        committed_rows = []
         with transaction.atomic():
             for database_id in batch:
                 try:
                     with transaction.atomic():
-                        movie = Movie.objects.get(id=database_id)
-                        movie.delete()
+                        movie = Movie.objects.select_for_update().get(id=database_id)
+                        self._delete_movie(movie)
                     deleted += 1
-                    report_rows.append(self._report_row(database_id, "deleted", "Movie eliminado.", mode))
+                    committed_rows.append(self._report_row(database_id, "deleted", "Movie eliminado.", mode))
                 except Movie.DoesNotExist:
-                    report_rows.append(self._report_row(database_id, "not_found", "Movie no encontrado al eliminar.", mode))
+                    committed_rows.append(self._report_row(database_id, "not_found", "Movie no encontrado al eliminar.", mode))
                 except ProtectedError as exc:
                     protected += 1
-                    report_rows.append(self._report_row(database_id, "protected_error", str(exc), mode))
+                    committed_rows.append(self._report_row(database_id, "protected_error", str(exc), mode))
                 except Exception as exc:  # noqa: BLE001 - command must continue and report real deletion errors.
                     errors += 1
-                    report_rows.append(self._report_row(database_id, "error", str(exc), mode))
+                    committed_rows.append(self._report_row(database_id, "error", str(exc), mode))
+        report_rows.extend(committed_rows)
         return deleted, protected, errors
+
+    def _delete_movie(self, movie):
+        """Extension point for audited deletion; ordinary CSV behavior stays unchanged."""
+        movie.delete()
 
     def _print_database_context(self):
         db = settings.DATABASES.get(DEFAULT_DB_ALIAS, {})
