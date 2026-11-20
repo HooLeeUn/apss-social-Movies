@@ -80,7 +80,8 @@ class MetadataAnalysisTests(TestCase):
         rating = next(edge for edge in report["incoming_relations"] if edge["dependent"] == "core.MovieRating")
         self.assertEqual(rating["on_delete"], "CASCADE")
         self.assertTrue(rating["constraints"])
-        self.assertEqual(report["movie_model"]["constraints"], [])
+        self.assertEqual([item[2]["name"] for item in report["movie_model"]["constraints"]],
+                         ["movie_type_tmdb_id_uniq"])
 
 
 class DiagnosticQueryTests(TestCase):

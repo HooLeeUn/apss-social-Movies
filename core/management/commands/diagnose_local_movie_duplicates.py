@@ -68,7 +68,7 @@ def require_local(connection):
 
 
 @contextmanager
-def local_readonly_snapshot(alias):
+def local_readonly_snapshot(alias, *, extra_read_tables=()):
     try:
         connection = connections[alias]
     except ConnectionDoesNotExist as exc:
@@ -87,11 +87,12 @@ def local_readonly_snapshot(alias):
                 if not address or not is_loopback(address) or readonly != "on":
                     raise CommandError("Server did not confirm loopback and READ ONLY; diagnosis rejected.")
 
-            table = connection.ops.quote_name(Movie._meta.db_table)
+            tables = tuple(connection.ops.quote_name(name) for name in
+                           (Movie._meta.db_table, *extra_read_tables))
 
             def guard(execute, sql, params, many, context):
-                if many or not sql.lstrip().upper().startswith("SELECT ") or table not in sql:
-                    raise CommandError("Unexpected SQL blocked: only Movie SELECTs are allowed.")
+                if many or not sql.lstrip().upper().startswith("SELECT ") or not any(table in sql for table in tables):
+                    raise CommandError("Unexpected SQL blocked: only authorized table SELECTs are allowed.")
                 return execute(sql, params, many, context)
 
             with connection.execute_wrapper(guard):
