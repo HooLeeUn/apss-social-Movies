@@ -1,0 +1,3 @@
+# These files are hashed as bytes in the phase 5B preparation manifest.
+core/tmdb_import_ready.py text eol=lf
+core/tmdb_importer.py text eol=lf

@@ -142,14 +142,15 @@ def update_user_preferences_for_movie_rating(user, movie, new_score, old_score=N
     profile.save(update_fields=["ratings_count", "last_updated_at"])
 
 
-@transaction.atomic
 def remove_user_preferences_for_movie_rating(user, movie, old_score):
-    _apply_score_for_movie_preferences(user, movie, old_score, add=False)
+    # Keep deletion signals on the database that owns the rating/user.
+    with transaction.atomic(using=user._state.db or "default"):
+        _apply_score_for_movie_preferences(user, movie, old_score, add=False)
 
-    profile, _ = UserTasteProfile.objects.get_or_create(user=user)
-    profile.ratings_count = max(profile.ratings_count - 1, 0)
-    profile.last_updated_at = timezone.now()
-    profile.save(update_fields=["ratings_count", "last_updated_at"])
+        profile, _ = UserTasteProfile.objects.get_or_create(user=user)
+        profile.ratings_count = max(profile.ratings_count - 1, 0)
+        profile.last_updated_at = timezone.now()
+        profile.save(update_fields=["ratings_count", "last_updated_at"])
 
 
 @transaction.atomic

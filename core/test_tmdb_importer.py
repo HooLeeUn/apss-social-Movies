@@ -275,9 +275,9 @@ class PlanningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(resume=first["run_directory"])
 
-    def test_future_apply_and_remote_configuration_rejected_before_connection(self):
+    def test_unconfirmed_apply_and_remote_configuration_rejected_before_connection(self):
         with patch.object(command, "connections") as connections:
-            with self.assertRaisesRegex(CommandError, "Apply is disabled"):
+            with self.assertRaisesRegex(CommandError, "Apply requires"):
                 call_command("import_tmdb_productions", run_dir=str(self.source), output_dir=str(self.root / "output"), apply=True,
                              confirm_database="socialapp", limit=10, stdout=io.StringIO())
             connections.__getitem__.assert_not_called()
