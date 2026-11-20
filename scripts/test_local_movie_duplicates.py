@@ -29,7 +29,10 @@ def main():
 
     with patch.object(BaseDatabaseWrapper, "ensure_connection", isolated_only):
         django.setup()
-        suite = unittest.defaultTestLoader.loadTestsFromName("core.test_local_movie_duplicates")
+        suite = unittest.defaultTestLoader.loadTestsFromNames(
+            ["core.test_local_movie_duplicates", "core.test_movie_duplicate_cleanup_plan",
+             "core.test_movie_duplicate_preferences", "core.test_movie_duplicate_resume"]
+        )
         result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1
 

@@ -14,7 +14,8 @@ def main():
     sys.path.insert(0, str(root))
     settings.configure(SECRET_KEY="synthetic-import-planner-tests", BASE_DIR=root,
         INSTALLED_APPS=["django.contrib.auth", "django.contrib.contenttypes", "core"],
-        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+        DATABASES={alias: {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
+                   for alias in ("default", "alternate")},
         DEFAULT_AUTO_FIELD="django.db.models.BigAutoField", USE_TZ=True)
     original = BaseDatabaseWrapper.ensure_connection
 
@@ -27,7 +28,8 @@ def main():
             patch("socket.socket.connect", side_effect=AssertionError("Network forbidden")):
         django.setup()
         suite = unittest.defaultTestLoader.loadTestsFromNames([
-            "core.test_tmdb_importer", "core.test_tmdb_import_ready", "core.test_tmdb_enrichment", "core.test_tmdb_normalizer",
+            "core.test_tmdb_importer", "core.test_tmdb_import_ready", "core.test_tmdb_import_apply",
+            "core.test_tmdb_enrichment", "core.test_tmdb_normalizer",
             "core.test_tmdb_eligibility", "core.test_local_movie_duplicates.LocalSafetyTests"])
         result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1

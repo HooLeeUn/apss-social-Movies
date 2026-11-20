@@ -2,7 +2,9 @@
 
 Esta etapa no consulta PostgreSQL ni TMDb. No utiliza decisiones del dry-run de
 fase 5 como autorización y no compara de nuevo exportaciones masivas.
-`--apply` del importador continúa bloqueado antes de abrir conexión.
+La [fase 5C](tmdb_importer.md) verificó el piloto de diez producciones en
+dry-run. `--apply` requiere confirmación explícita y comprueba que el destino
+tenga el índice único de identidad. Esa comprobación bloquea `socialapp`.
 
 ## Diseño e inspección
 
@@ -187,8 +189,8 @@ a aplicar defaults/derivados, en lugar de pasar movie_data directamente al ORM.
 
 Se mantiene la consulta ligera por lotes de identidad contra PostgreSQL local
 READ ONLY. Existentes y duplicados existentes se omiten y se informan; no se vuelve
-a comparar el catálogo completo. Apply sigue inhabilitado; concurrencia de
-escrituras, respaldos y unicidad de destino continúan pendientes de otra fase.
+a comparar el catálogo completo. Las protecciones y requisitos de apply se
+describen en la [guía del importador](tmdb_importer.md).
 
 Los checkpoints previos de fase 5 usan un hash de implementación distinto y no
 deben reanudarse con reglas nuevas; se inicia un dry-run nuevo. No se modifica el
@@ -221,7 +223,7 @@ Después de generarlo localmente, verificar la carpeta exacta impresa:
   --verify 'C:\dev\docs\TMDB import ready\prepare-REEMPLAZAR'
 ```
 
-Dry-run posterior sobre ese preparado, pendiente de revisión/autorización local:
+Dry-run sobre el preparado que se desee verificar:
 
 ```powershell
 .\venv\Scripts\python.exe -B manage.py import_tmdb_productions `
@@ -247,7 +249,9 @@ El ejecutor bloquea sockets y PostgreSQL. No se ejecutan migraciones.
 
 Resultado de validación: **156 pruebas aprobaron** (139 previas y 17 nuevas de
 fase 5B). Los ejemplos se verificaron con artefactos sintéticos temporales; no
-se generó todavía un import_ready del piloto real ni se consultó su destino.
+se generó el import_ready del piloto real ni se consultó su destino durante
+las pruebas de fase 5B. La guía del importador registra la consulta posterior
+del piloto en fase 5C.
 
 Reservar disco para snapshots comprimidos, cola/resultados JSON, temporales y
 archivo final. La memoria depende de un lote y de la línea/grupo de texto más

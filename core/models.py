@@ -435,6 +435,9 @@ class Movie(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["type", "tmdb_id"], name="movie_type_tmdb_id_uniq"),
+        ]
         indexes = [
             models.Index(fields=["-external_votes", "-release_year", "-id"], name="movie_votes_year_id_idx"),
             models.Index(fields=["-release_year", "-external_votes", "-id"], name="movie_year_votes_id_idx"),

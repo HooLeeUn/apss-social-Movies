@@ -1,298 +1,178 @@
-# Fase 5 — importador controlado: primera entrega de planificación
+# Fase 5C — importador local de TMDb
 
-Fase 5B: también se admiten carpetas con `preparation_manifest.json` e
-`import_ready.jsonl.gz` verificados. Ver [preparación import_ready](tmdb_import_ready.md).
-La preparación no consulta destino; el dry-run conserva su consulta agrupada local.
+`import_tmdb_productions` usa dry-run de forma predeterminada. Verifica la
+fuente y consulta PostgreSQL local en una transacción `REPEATABLE READ READ ONLY`.
+El modo apply exige confirmación de escritura y un esquema de destino verificado.
 
-`import_tmdb_productions` prepara un **dry-run exclusivamente de lectura** sobre
-PostgreSQL local. `--apply` está bloqueado incondicionalmente antes de abrir una
-conexión o leer entradas. No existe código de INSERT/UPDATE/DELETE contra Django.
-No se han implementado importación real, actualizaciones ni depuración.
+## Piloto verificado el 17 de noviembre de 2026
 
-## Inspección y compatibilidad
+En `socialapp` local, el dry-run verificó que las diez identidades preparadas eran
+películas nuevas y elegibles. Los IDs TMDb fueron 25449, 31975, 9, 91, 94, 125,
+126, 127, 160 y 190. Hubo cero exclusiones, pendientes, coincidencias e inserciones.
+El resultado describe el destino en el momento de la consulta.
 
-Se revisaron Movie, `Movie.save()`, helpers de búsqueda/genre_key, señales,
-serializadores, el importador previo de ratings/votos y los componentes de fases
-1–4, además de settings y migraciones existentes. No se modificó ninguno.
+La auditoría confirmó 1.295 grupos duplicados de identidades positivas de
+películas y series. El único índice único de la tabla era el de la PK `id`.
+El índice de `tmdb_id` permite duplicados. El trigger de búsqueda instalado está
+habilitado para INSERT y las 434.223 filas observadas tenían `search_vector`.
+La comprobación de esquema de apply rechazó `socialapp` en una transacción
+READ ONLY por falta del índice único compuesto. Durante esta fase se usaron
+exclusivamente consultas de lectura en esa base.
 
-- Identidad: `(type, tmdb_id)`, valores `movie`/`series`; PK `id` interna.
-  No hay unicidad sobre la pareja; el índice individual TMDb no evita duplicados.
-- `title_english` es obligatorio, máximo 255; `title_spanish` es opcional.
-- Género/director/póster tienen límites de 100/255/200 caracteres. Año y votos
-  deben caber en los enteros del modelo; rating es decimal de una cifra decimal.
-- `synopsis` no admite NULL, pero sí `""`; `external_votes` tiene default 0.
-  Los opcionales restantes pueden quedar NULL. Son defaults del modelo, no
-  afirmaciones de que TMDb haya proporcionado esos valores.
-- `Movie.save()` deriva `genre_key` y cuatro campos de búsqueda. El planificador
-  reutiliza `build_genre_key()` y `populate_search_fields()` en objetos sin guardar.
-- `search_vector` lo genera el trigger PostgreSQL definido en la migración 0040.
-  `full_clean()` lo rechaza vacío porque no tiene `blank=True`: la validación de
-  propuestas excluye **solo** ese campo gestionado por el servidor. No se inventa
-  un vector ni se cambia Movie. Antes de habilitar apply habrá que comprobar el
-  trigger real en la base desechable/destino autorizado.
-- No hay señales de guardado de Movie en `core.signals`; las señales sociales
-  identificadas no se ejecutan porque no se llama a `save()` ni se crean relaciones.
-- Los serializadores actuales usan `title_english` como título principal.
-  Se conserva el respaldo multilingüe aprobado, sin modificar el frontend.
-- El comando previo de ratings actualiza registros existentes y no sirve para
-  crear producciones; no se reutiliza su ruta de escritura.
-- `bulk_create()` omite `save()` y no equivale a él. No se utiliza ni se habilita
-  en esta entrega. Tampoco se usa `ignore_conflicts=True`.
-
-## Comandos preparados, no ejecutados contra una base real
-
-Confirmar previamente que `default` corresponde a PostgreSQL local conocido.
-La herramienta comprueba la configuración efectiva, no el nombre del alias;
-no modifica `.env`, DATABASE_URL ni otras variables.
+## Ejecutar dry-run
 
 ```powershell
 Set-Location 'C:\dev\apss-social-Movies'
-.\venv\Scripts\python.exe -B manage.py import_tmdb_productions `
-  --run-dir 'C:\dev\docs\TMDB enriched\live-pilot-10\run-20261113T010627Z-019d61868a' `
-  --output-dir 'C:\dev\docs\TMDB import' `
-  --database default `
-  --allow-partial `
-  --batch-size 10 `
-  --limit 10
+$ready = 'C:\dev\docs\TMDB import ready\prepare-20261117T030953Z-04ae9a747d42'
+$reports = Join-Path ([System.IO.Path]::GetTempPath()) 'reccool-tmdb-phase5c-author'
+.\venv\Scripts\python.exe -B manage.py import_tmdb_productions --dry-run --author-username Admin --run-dir $ready --output-dir $reports --database default --batch-size 10 --limit 10
 ```
 
-Omitir modo equivale a `--dry-run`. `--allow-partial` permite explícitamente el
-piloto verificado `limited`; no lo reanuda ni afirma que terminó su CSV completo.
-`--limit` cuenta resultados terminales de enriquecimiento examinados por esta
-invocación, no inserciones. Se incluye tanto accepted como incomplete, excluded
-e invalid. Los pendientes upstream no se importan y se cuentan separadamente.
+El límite cuenta candidatos examinados. El lote acepta valores de 1 a 500.
+Cada ejecución crea una carpeta nueva fuera del repositorio con
+`source_snapshot/`, `import_manifest.json`, `decisions.jsonl` y
+`checkpoint.sqlite3`. El manifiesto identifica destino, huella de la fuente,
+conteos por decisión y estado. El checkpoint de dry-run permite continuar un
+prefijo con `--resume <carpeta de un dry-run anterior>`; las decisiones previas
+conservan la información de su consulta original. Para obtener una vista fresca
+de todas las identidades, iniciar un dry-run nuevo.
 
-Para continuar **el plan de importación**, no el enriquecimiento:
+El manifiesto registra el nombre, ID y estado del autor, junto con
+`author_blocks_apply`. La consulta usa el mismo alias y snapshot READ ONLY
+que Movie. Sin `--author-username` se conserva el plan y se informa
+`not_provided`. Si falta el usuario se informa `not_found`. Para `socialapp`,
+un nombre distinto de `Admin` se informa como `expected_local_admin`.
+Estos estados bloquean apply y dejan intacta la elegibilidad del contenido.
+Al reanudar un dry-run se vuelve a consultar el autor solicitado.
+
+Dry-run también admite enriquecimiento verificado. Una fuente de enriquecimiento
+limitada exige `--allow-partial`, y los fixtures de procedencia offline exigen
+`--allow-offline-input`. Para el archivo preparado se verifican el manifiesto,
+tamaños, SHA-256, GZIP, UTF-8, identidad, conteos y elegibilidad. El manifiesto
+del piloto se creó con LF en los dos módulos de preparación e importación.
+`.gitattributes` fija esos finales de línea para que Git en Windows preserve
+las huellas de esos dos archivos de reglas. Ante una discrepancia de reglas,
+verificar la versión y los bytes de la copia de trabajo antes de reintentar.
+
+## Apply, condicionado al esquema y a la autorización
+
+Comando propuesto para el primer piloto, pendiente de autorización y de cumplir
+las condiciones de integridad. Usa las variables PowerShell definidas arriba.
 
 ```powershell
-.\venv\Scripts\python.exe -B manage.py import_tmdb_productions `
-  --run-dir 'C:\dev\docs\TMDB enriched\live-pilot-10\run-20261113T010627Z-019d61868a' `
-  --output-dir 'C:\dev\docs\TMDB import' `
-  --database default --allow-partial --batch-size 10 --limit 10 `
-  --resume 'C:\dev\docs\TMDB import\run-REEMPLAZAR'
+.\venv\Scripts\python.exe -B manage.py import_tmdb_productions --apply --confirm-write --confirm-database socialapp --author-username Admin --run-dir $ready --output-dir $reports --database default --batch-size 10 --limit 10
 ```
 
-Cada invocación crea una carpeta distinta `run-<UTC>-<UUID>`. No sobrescribe la
-anterior. Se permite lote 1–500 y límite positivo. Los resultados deben estar
-fuera de los repositorios. Para fixtures sintéticos hay una excepción explícita
-`--allow-offline-input`, exclusivamente en dry-run; nunca se aceptan por defecto.
+- Se exige un `import_ready` verificado de procedencia live, una confirmación
+  explícita, el nombre exacto de la base, un autor explícito y un límite positivo de inserciones por
+  invocación. Se omiten filas existentes y se siguen revisando candidatos hasta
+  alcanzar el límite o terminar la fuente.
+- La configuración efectiva debe usar PostgreSQL y una IP de loopback literal,
+  con puerto explícito y conexión nueva. Se rechazan los desvíos de libpq por
+  hostaddr, servicio y otras opciones de enrutamiento. PostgreSQL confirma
+  dirección, puerto, base, modo de transacción y que el servidor es primario.
+- El preflight READ ONLY exige que el ORM resuelva `public.core_movie`, que exista
+  un índice único válido, inmediato y sin predicado sobre las dos columnas, y
+  que el trigger de búsqueda esté activo para INSERT. También exige una FK
+  validada hacia la PK del modelo de usuario en el destino.
+- Cada lote usa READ COMMITTED, confirma el destino y toma un bloqueo
+  `SHARE ROW EXCLUSIVE` sobre Movie con espera máxima de cinco segundos. Se
+  repiten las comprobaciones de esquema y se consulta la existencia de las
+  identidades en una sola consulta bajo el bloqueo. El bloqueo serializa lotes
+  y bloquea otras escrituras sobre Movie durante ese lote. El índice único
+  protege la identidad también fuera del importador.
+- Se crean únicamente identidades nuevas con `bulk_create`. Se releen los IDs,
+  las identidades, el autor y los derivados en el mismo lote, y se exige un
+  vector de búsqueda no vacío antes de confirmar. Un error revierte el lote
+  completo. Los lotes anteriores pueden haber quedado confirmados.
 
-`--apply`, incluso combinado con `--confirm-database` y `--limit`, genera
-`CommandError: Apply is disabled...` sin abrir conexión. No hay flag oculto,
-variable ni configuración que habilite escrituras.
+`Movie.author` es una FK nullable a `auth.User`, el `AUTH_USER_MODEL`
+configurado, con `SET_NULL` en el ORM. El apply anterior dejaba el autor en NULL.
+El comando de ratings y votos sólo actualiza esos campos en películas existentes.
+Apply resuelve el nombre de usuario exacto y bloquea su fila antes de cada lote
+para comprobar que conserva la misma identidad. El usuario debe existir en la
+base. `socialapp` exige `Admin`. El nombre previsto para una importación futura
+en producción es `catalog_import`. El comando actual sólo admite PostgreSQL local.
 
-## Verificación de entrada
+## Proyección del catálogo
 
-1. Se copia el manifiesto y sus archivos de resultados a `source_snapshot/`
-   dentro de la carpeta nueva. Las rutas deben ser canónicas y permanecer en el
-   directorio origen; se rechazan escapes mediante enlaces/rutas manipuladas.
-2. Se reutiliza `tmdb_enrich_verify.verify_run()` sobre esa copia: SHA-256,
-   tamaños, GZIP concatenado, UTF-8, JSON estricto, identidades/posiciones únicas,
-   clasificación, elegibilidad v2 y reconciliación de conteos.
-3. Se exige normalizador conocido por su SHA-256. Se admiten envoltorios v1 y
-   v2 compatibles; v1 se evalúa mediante la política vigente sin modificarlo.
-4. Se rechaza modo sintético salvo opt-in, estados fallidos/activos y ejecuciones
-   parciales sin autorización explícita. La procedencia de cada registro debe
-   concordar con el modo del manifiesto. No se confía en el nombre accepted.
-5. Los registros se colocan incrementalmente en una cola SQLite local indexada
-   por posición original. Así se conserva el orden incluso cuando los archivos
-   por estado contienen resultados reintentados fuera de orden.
-6. Todas estas comprobaciones terminan **antes de abrir PostgreSQL**.
+La proyección aplica los mismos helpers que `Movie.save()` para `genre_key` y
+los cuatro campos de búsqueda normalizados. `bulk_create` omite `save()` y las
+señales de Django. Las señales de calificación y recomendaciones pertenecen
+a sus modelos sociales. El trigger PostgreSQL incorpora títulos, año, director,
+género, reparto y tipo al vector ponderado. En el piloto, por ejemplo, 31975
+proyectó `Comedy|Drama`, 160 proyectó `Documentary|Drama` y 25449 dejó la clave
+en NULL al carecer de género. El orden y la cantidad de géneros provienen del
+normalizador y del helper de Movie.
 
-La copia evita depender de archivos que pudieran cambiar después de verificar.
-No se modifica el enriquecimiento original ni su checkpoint. Los checksums
-detectan corrupción/inconsistencias, no autentican al autor: alguien con permiso
-para falsificar datos y todos sus hashes también puede falsificar `mode=live`.
-Los artefactos deben proceder de un directorio confiable. No se conservan ni se
-usan credenciales para autenticar estos archivos.
+Se conserva el título Unicode disponible en `title_english` y se guarda
+`title_spanish` cuando tiene procedencia ES. Se exige evidencia de `adult=false`
+y se excluyen contradicciones, mientras que `video` se conserva como dato de
+auditoría. Se mantienen las exclusiones de Reality, News y Talk. La ausencia
+de opcionales usa el valor del modelo correspondiente, por ejemplo, sinopsis
+vacía y votos en cero. Los ratings externos conservan la precisión
+del modelo y las calificaciones sociales mantienen su lógica existente.
 
-## Admisión adult/video
+El feed y el detalle leen el catálogo Movie mediante el ID interno asignado.
+El buscador usa los campos derivados y el vector GIN. Los filtros por género y
+las afinidades de recomendaciones consultan `genre_key`. Tu Cartelera y las
+listas de recomendaciones muestran la película cuando el usuario establece
+la relación social correspondiente. La revisión verificó estos puntos en el
+código, y la prueba sintética verificó que se conserva una relación existente.
+La verificación funcional en PostgreSQL queda pendiente.
 
-Los JSONL actuales conservan `tmdb_flags.adult/video` de la respuesta EN y
-`source.adult/video` de la exportación. Eso permite resolver los casos conocidos
-sin llamadas a TMDb ni cambios silenciosos al enriquecedor.
+## Informes, reanudación y comprobaciones posteriores
 
-- La API solo se interpreta como confirmación si aporta un booleano JSON real.
-- Los flags CSV aceptan booleanos o strings `true`/`false`, ignorando espacios y
-  mayúsculas. Números, null, ausencia y otros valores son desconocidos.
-- Si **cualquiera** de las fuentes confirma adult=true, se excluye. API true
-  siempre prevalece, incluso si la exportación decía false. Una exportación true
-  con API false también se excluye por prudencia; se informa del conflicto.
-- Si no hay true y alguna fuente confirma false, se considera adult resuelto.
-- Si ambas siguen desconocidas, se registra `pending_adult`: nunca equivale a false.
-- `video` true/false/null/ausente no cambia admisión ni genera revisión manual.
-  Se informa como dato independiente, sin relación con tráilers.
-- Adult prevalece incluso sobre otros errores/elegibilidad. Se mantienen las
-  exclusiones explícitas Reality y News/Talk del normalizador, y todas las
-  equivalencias históricas de géneros sin límite de tres.
+Apply genera un manifiesto por ejecución con destino, huella de la fuente,
+conteos, el autor resuelto e inserciones confirmadas observadas. `decisions.jsonl`
+registra `inserted`, `movie_id` y `author_id` por cada alta. El manifiesto es el
+checkpoint de informes y se publica después de cada lote. Para asociar una
+reanudación al informe previo, añadir `--resume <carpeta de un apply anterior>`
+al mismo comando y confirmar nuevamente el destino, el autor y el límite.
+Apply sólo reanuda informes con el mismo nombre de usuario y PK resuelta.
+Los informes de apply previos a esta validación se rechazan para reanudación.
 
-Los géneros desconocidos conservan diagnóstico; no se inventan categorías. Un
-campo parcial/inválido no se transfiere al objeto propuesto como si fuera válido.
-Los géneros transferidos deben pertenecer al vocabulario interno existente.
+Al reejecutar se verifica otra vez la fuente y se recorren sus identidades
+desde el inicio. PostgreSQL determina qué falta, incluso si el proceso murió
+después del commit y antes de publicar los informes. En ese intervalo el
+checkpoint puede subcontar inserciones. El siguiente informe las clasifica
+como existentes y no puede atribuirlas retroactivamente a la ejecución anterior.
+Los informes previos se conservan. Revisar la identidad y los IDs en la base si
+el manifiesto quedó en `running`, `failed` o `interrupted`. Ante error de lock,
+reintentar tras resolver la contención. Ante un error de fuente, verificar sus
+archivos y huellas. Ante un fallo de integridad o búsqueda, investigar el esquema
+y el lote afectado antes de reintentar.
 
-## Propuesta de Movie y títulos
+Antes de autorizar el piloto real, resolver los duplicados históricos con una
+estrategia aprobada que preserve las relaciones y los IDs, provisionar y revisar
+el índice único y el trigger, hacer un respaldo comprobado y repetir el dry-run.
+Después de un apply autorizado, comparar IDs, campos, `genre_key` y vector con
+los informes, comprobar que hay una sola fila por identidad y repetir el
+dry-run para verificar que los nuevos se clasifican como existentes. Probar
+búsqueda, feed, detalle, Cartelera y recomendaciones con el piloto autorizado.
 
-Se recalcula elegibilidad desde `normalization`; la bandera v2 también se verifica
-por el verificador. No se ejecuta `Movie.objects.create(**data)` ni se usa
-`update_data`, cuyo propósito es proteger actualizaciones de títulos existentes.
-
-Se construye una lista explícita de campos permitidos y solo se copian valores
-con estado `valid`. El título principal sale de `data.title_english`, incluyendo
-respaldos originales o españoles; se informa `title_sources`. No se duplican las
-reglas de fallback ni se fabrican traducciones. Se preserva Unicode.
-
-Se validan identidad del sobre frente al contenido, tipos JSON, límites, géneros
-internos y compatibilidad del objeto mediante `full_clean(validate_unique=False,
-validate_constraints=False, exclude=['search_vector'])`. No se consultan FK ni
-unicidad durante esa validación. Se aplican NULL/defaults reales del modelo
-cuando faltan datos opcionales y se separan en `model_defaults` para trazabilidad.
-No se asignan author, Movie.id, timestamps, relaciones ni datos sociales.
-
-## Destino local y consultas
-
-Se reutilizan `require_local()` y `local_readonly_snapshot()` de la fase 2A:
-motor PostgreSQL, host explícito loopback/localhost, puerto y nombre simples,
-sin servicios/pools/hostaddr que sobrescriban el destino ni sesión preexistente.
-Después se establece `REPEATABLE READ READ ONLY` y se confirma mediante
-`host(inet_server_addr())` y `transaction_read_only=on`. Un wrapper adicional
-rechaza escrituras y SQL ajeno al SELECT fijo de Movie. No es un parser SQL general.
-No se consultan usuarios, ratings, comentarios, videos ni otras tablas sociales.
-
-Por lote hay como máximo un SELECT de Movie agrupado por `(type,tmdb_id)` con
-`COUNT(id)` y `MIN(id)`. Se seleccionan solo las identidades del lote: cero
-coincidencias significa candidato nuevo; una, existente; varias, duplicado
-existente. No se hacen consultas individuales ni se cargan modelos de destino.
-Dry-run usa una instantánea consistente durante la invocación; se libera y se
-cierra la conexión al terminar o fallar. Esto puede retener MVCC en ejecuciones
-largas: limitar pilotos y vigilar el tiempo.
-
-Loopback identifica la ubicación de red, no descarta túneles o servidores locales
-maliciosos. Usar el PostgreSQL local conocido, sin redirecciones hacia Render.
-La inicialización ordinaria de Django ocurre antes de establecer la transacción;
-no se ejecutan checks/migraciones ni se garantiza código ajeno a este comando.
-
-## Duplicados, concurrencia y apply bloqueado
-
-Las repeticiones ilegales de identidad dentro de archivos terminales bloquean la
-verificación antes de conectar. Los eventos `duplicate_input` legítimos del
-enriquecedor se cuentan, sin producir otra propuesta. Movie.id no se reasigna y
-los títulos nunca se usan como identidad.
-
-Un SELECT previo **no garantiza** ausencia de duplicados concurrentes. Sin
-restricción única, un advisory lock solo protege a escritores que respeten el
-mismo protocolo. Un lock de tabla serializa durante una transacción, pero no
-impide que un escritor ajeno inserte después usando una decisión antigua.
-Por ese motivo apply sigue deshabilitado, incluso con confirmación del destino.
-
-Diseño pendiente de aprobación antes de habilitarlo:
-
-1. Validar dry-run y respaldo/restauración local.
-2. Elegir una garantía de identidad demostrable: unicidad efectiva tras resolver
-   duplicados en otra fase, o exclusividad operacional y protocolo obligatorio
-   para **todos** los escritores durante el piloto.
-3. Exigir destino local confirmado por nombre, límite explícito, entrada live
-   verificada y nueva comprobación de identidad inmediatamente antes de insertar.
-4. Transacciones por lote, bloqueo acordado, solo inserciones nuevas, sin updates,
-   reasignaciones ni ignore_conflicts. Comprobar trigger de búsqueda y efectos de
-   save/señales sobre una base PostgreSQL desechable.
-5. Registrar únicamente inserciones confirmadas tras COMMIT; recuperar el caso
-   COMMIT sin informe mediante nueva consulta de identidad, nunca reinserción ciega.
-
-No se han escrito ni probado inserciones PostgreSQL ni locks de inserción. Las
-pruebas de concurrencia actuales solo demuestran aislamiento de dos planificadores
-dry-run y la imposibilidad de activar apply; no se presentan como garantía de
-unicidad de escrituras reales.
-
-## Journal, reanudación e informes
-
-El SQLite de la carpeta nueva es un journal **local de informes**, no Django.
-Guarda cola, configuración y decisiones confirmadas por lote con synchronous=FULL.
-Una interrupción registra estado y exporta las decisiones ya confirmadas. Al
-reanudar se verifica el SHA-256 del checkpoint anterior y la configuración
-(fuente, destino, flags y hashes de implementación/modelo/normalizador/verificador).
-Se copia mediante backup SQLite de conexión read-only a un journal nuevo; el
-origen permanece intacto. Las decisiones deben formar un prefijo ordenado.
-
-Se rechazan fuentes activas o incompatibles. Tras terminación abrupta que deje
-estado `running` no se intenta reparación automática: en esta entrega sin
-escrituras se puede iniciar otro dry-run desde la fuente verificada. No se usan
-decisiones de un dry-run como órdenes de apply. Las decisiones previas de una
-reanudación no se revalidan: el manifiesto lo advierte; el catálogo pudo cambiar
-entre invocaciones. Un apply futuro siempre debe verificar de nuevo identidades.
-
-La memoria contiene como máximo un lote, un resultado JSON por línea y caché
-SQLite de unos 8 MiB; no hay conjunto Python con todo el catálogo. Reservar disco
-para los GZIP copiados, cola JSON descomprimida, decisiones y journal: puede ser
-varias veces el tamaño comprimido. No se midió rendimiento a escala completa.
-
-Archivos por ejecución:
-
-- `import_manifest.json`: modo/estado, fuente y hashes, destino sin credenciales,
-  configuración, límites, conteos, pendientes upstream y datos de reanudación.
-- `decisions.jsonl`: una fila JSON UTF-8 por identidad terminal examinada, posición,
-  decisión, motivos, flags, elegibilidad, diagnóstico, título de procedencia,
-  valores propuestos/defaults cuando corresponde. `inserted=false` siempre.
-- `checkpoint.sqlite3`: cola, decisiones y configuración local.
-- `source_snapshot/`: copia de los informes verificados, sin el checkpoint del enriquecedor.
-
-Decisiones: `proposed_new`, `existing`, `existing_duplicate`, `excluded_adult`,
-`excluded_genre`, `pending_adult`, `validation_error`. Hay conteos independientes
-para incompletos aceptables, eventos de entrada duplicada y pendientes upstream.
-`inserted=0` y `apply_enabled=false` siempre. `complete` se refiere al recorrido
-de resultados terminales de **este plan**, no al CSV original ni a una importación.
-Un plan puede terminar aunque el enriquecimiento fuente esté limitado.
-
-Ejemplo generado por la prueba aislada con cuatro resultados terminales, una
-identidad existente, una identidad con dos filas y dos candidatos nuevos:
-
-```json
-{
-  "mode": "dry-run",
-  "state": "completed",
-  "complete": true,
-  "examined": 4,
-  "counts": {
-    "proposed_new": 2,
-    "existing": 1,
-    "existing_duplicate": 1,
-    "excluded_adult": 0,
-    "excluded_genre": 0,
-    "pending_adult": 0,
-    "validation_error": 0
-  },
-  "incomplete_acceptable": 1,
-  "inserted": 0,
-  "apply_enabled": false
-}
-```
-
-El ejemplo es sintético; no predice identidades actualmente existentes en la base
-local. No se almacenan usuario, password, tokens ni excepciones de conexión.
-
-## Pruebas y límites de la entrega
+## Pruebas aisladas
 
 ```powershell
-Set-Location 'C:\dev\apss-social-Movies'
 .\venv\Scripts\python.exe -B scripts\test_tmdb_importer.py
 ```
 
-El ejecutor no carga settings de aplicación ni `.env`; solo permite una base
-SQLite `:memory:` sintética y bloquea sockets/PostgreSQL. No hay migraciones.
-Los tests usan SQL ORM real para identidades y PRAGMA query_only durante el plan,
-comparan filas y tabla social antes/después y comprueban que UPDATE falla. Incluyen
-los contratos v1/v2, corrupción, flags adult/video, opcionales, Unicode, derivados,
-duplicados, repetición, concurrencia dry-run, protección apply, interrupción y
-reanudación, y la suite previa completa del enriquecedor/normalizador/elegibilidad.
-Las pruebas heredadas de frontera local validan READ ONLY y el rechazo de destinos
-remotos mediante dobles. No sustituyen una integración PostgreSQL desechable.
+El ejecutor usa SQLite sintético en memoria y bloquea PostgreSQL y la red.
+Las pruebas de apply hacen inserciones y rollback reales en SQLite, con
+sustitutos para el catálogo, los bloqueos y el trigger de búsqueda de
+PostgreSQL. La auditoría de solo lectura aportó evidencia sobre el esquema
+real. La integridad de las escrituras y la contención de PostgreSQL tendrán
+que demostrarse en una instancia desechable.
 
-Resultado: **139 pruebas pasaron**, incluidas las 112 de enriquecimiento,
-normalización y elegibilidad, las nuevas de planificación y las de frontera local.
-El ejemplo de conteos anterior se comprobó contra los informes realmente generados
-por la prueba sintética. Las 139 pruebas no incluyen inserciones PostgreSQL ni
-demuestran locks de escritura: apply permanece bloqueado.
-
-No se ejecutó dry-run ni apply sobre PostgreSQL real durante esta tarea, ni se
-consultó TMDb/Render. No se modificaron Movie, migraciones, frontend o datos reales.
-No se crearon ramas, commits, PR ni despliegues. La primera entrega queda pendiente
-de revisión; las escrituras reales siguen bloqueadas.
+Para continuar el ensayo, confirmar primero el nombre de la base sintética,
+directorio de datos, usuario y puerto de loopback de una instancia separada
+de `socialapp`. Con esa configuración aprobada, aprovisionar una base vacía
+con el DDL de Movie, el trigger equivalente al de 0040, `unaccent` y el índice
+único de identidad. Usar una preparación sintética de contrato live generada
+sin red. Ejecutar dry-run, apply limitado y reanudación, lanzar dos apply
+simultáneos sobre la misma fuente y verificar unicidad e IDs. Repetir con un
+error inducido en el segundo lote para comprobar rollback y conservación del
+primero. Verificar la búsqueda de un título acentuado, `genre_key`, los
+campos de búsqueda y relaciones de prueba. Eliminar la instancia desechable
+tras conservar los resultados. Esta fase dejó el ensayo pendiente de
+confirmación del destino aislado.
