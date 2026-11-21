@@ -17,7 +17,7 @@ import psycopg
 
 
 @contextmanager
-def isolated_server(binaries, root):
+def isolated_server(binaries, root, *, server_options=()):
     data = root / "pgdata"
     password_path = root / "password"
     password = secrets.token_urlsafe(32)
@@ -42,7 +42,7 @@ def isolated_server(binaries, root):
     password_path.unlink()
     with (root / "postgres.log").open("w+", encoding="utf-8") as log:
         server = subprocess.Popen([executable("postgres"), "-D", str(data), "-h", "127.0.0.1",
-                                   "-p", str(port), "-c", "unix_socket_directories="],
+                                   "-p", str(port), "-c", "unix_socket_directories=", *server_options],
                                   env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
         try:
             credentials = {"host": "127.0.0.1", "port": port, "user": "cleanup_fixture",
