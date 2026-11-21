@@ -4,6 +4,9 @@
 fuente y consulta PostgreSQL local en una transacción `REPEATABLE READ READ ONLY`.
 El modo apply exige confirmación de escritura y un esquema de destino verificado.
 
+Para la conexión dedicada a Render y el procedimiento del piloto, consultar
+[Importaciones de TMDb en Render](tmdb_import_render.md).
+
 ## Piloto verificado el 17 de noviembre de 2026
 
 En `socialapp` local, el dry-run verificó que las diez identidades preparadas eran

@@ -2,18 +2,34 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import gzip
+import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from psycopg import sql
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.test_postgres_movie_duplicate_cleanup import isolated_server, create_fixture_schema_without_migrations
 
+RENDER_HOST = 'dpg-tmdb-fixture.oregon-postgres.render.com'
 
-def exercise(root, credentials, historical=None, prepared=None):
+
+def make_certificate(openssl, root, host, prefix):
+    cert, key = root / f'{prefix}.crt', root / f'{prefix}.key'
+    subprocess.run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                    '-subj', f'/CN={host}', '-addext', f'subjectAltName=DNS:{host}',
+                    '-out', str(cert), '-keyout', str(key)], check=True, capture_output=True)
+    key.chmod(0o600)
+    return cert, key
+
+
+def exercise(root, credentials, historical=None, prepared=None, cert=None, other_ca=None):
     import django
     from django.conf import settings
     settings.configure(SECRET_KEY='disposable-import-only', BASE_DIR=Path(__file__).resolve().parent.parent,
@@ -22,17 +38,28 @@ def exercise(root, credentials, historical=None, prepared=None):
             **{k.upper(): v for k, v in credentials.items() if k not in ('dbname', 'connect_timeout')}}},
         DEFAULT_AUTO_FIELD='django.db.models.BigAutoField', USE_TZ=True)
     from django.db.backends.base.base import BaseDatabaseWrapper
+    from django.db.backends.postgresql.base import DatabaseWrapper
     original = BaseDatabaseWrapper.ensure_connection
+    original_params = DatabaseWrapper.get_connection_params
 
     def guard(conn):
         cfg = conn.settings_dict
-        if (cfg['NAME'], cfg['HOST'], int(cfg['PORT'])) != (credentials['dbname'], '127.0.0.1', credentials['port']):
+        host = RENDER_HOST if conn.alias == RENDER_ALIAS and cert else '127.0.0.1'
+        if (cfg['NAME'], cfg['HOST'], int(cfg['PORT'])) != (credentials['dbname'], host, credentials['port']):
             raise AssertionError('Only this disposable cluster is permitted')
         return original(conn)
 
-    with patch.object(BaseDatabaseWrapper, 'ensure_connection', guard):
+    def loopback_params(conn):
+        params = original_params(conn)
+        if conn.alias == RENDER_ALIAS:
+            params['hostaddr'] = '127.0.0.1'  # Keep the hostname for TLS while bypassing DNS.
+        return params
+
+    with patch.object(BaseDatabaseWrapper, 'ensure_connection', guard), \
+            patch.object(DatabaseWrapper, 'get_connection_params', loopback_params):
         django.setup()
         from django.contrib.auth import get_user_model
+        from django.core.management import call_command
         from django.core.management.base import CommandError
         from django.db import connection, connections, IntegrityError, transaction
         from core.models import Movie
@@ -41,12 +68,14 @@ def exercise(root, credentials, historical=None, prepared=None):
         from core.tmdb_import_ready import prepare_run, verify_ready_run
         from core.tmdb_importer import read_json, evaluate_record
         from core.tmdb_enrichment_store import file_digest
+        from core.tmdb_import_render import RENDER_ALIAS, render_connection, render_readonly_snapshot
 
         create_fixture_schema_without_migrations()
         constraint = next(c for c in Movie._meta.constraints if c.name == 'movie_type_tmdb_id_uniq')
         with connection.schema_editor() as editor:
             editor.add_constraint(Movie, constraint)
         admin = get_user_model().objects.create_user(username='Admin')
+        catalog_import = get_user_model().objects.create_user(username='catalog_import')
         target = {'alias': 'default', 'host': '127.0.0.1', 'port': str(credentials['port']), 'name': credentials['dbname']}
 
         class Tests(unittest.TestCase):
@@ -176,6 +205,115 @@ def exercise(root, credentials, historical=None, prepared=None):
                     self.apply()
                 self.assertEqual(Movie.objects.count(), 0)
 
+            def render_options(self):
+                return dict(database=RENDER_ALIAS, confirm_host=RENDER_HOST,
+                            confirm_port=credentials['port'], confirm_user=credentials['user'],
+                            confirm_database=credentials['dbname'], tls_ca_file=str(cert),
+                            run_dir=str(self.prepared), output_dir=str(self.folder / 'render-reports'))
+
+            def render_environment(self, user=None):
+                login = credentials if user is None else credentials | {'user': user}
+                url = ('postgresql://{user}:{password}@' + RENDER_HOST + ':{port}/{dbname}').format(**login)
+                return patch.dict(os.environ, RECCOOL_RENDER_DATABASE_URL=url)
+
+            def render(self, **options):
+                output = io.StringIO()
+                known = set((self.folder / 'render-reports').glob('*/import_manifest.json'))
+                with self.render_environment():
+                    call_command('import_tmdb_productions', stdout=output, **(self.render_options() | options))
+                report, = set((self.folder / 'render-reports').glob('*/import_manifest.json')) - known
+                self.assertNotIn(credentials['password'], output.getvalue() + report.read_text())
+                self.assertNotIn(RENDER_ALIAS, connections.databases)
+                return read_json(report)
+
+            @unittest.skipUnless(cert, 'Pass --openssl to exercise a real verified TLS connection')
+            def test_render_dry_run_apply_resume_and_idempotence(self):
+                original_default = connection.settings_dict.copy()
+                existing = Movie.objects.create(type='movie', tmdb_id=3, author=admin)
+                dry = self.render(dry_run=True)
+                self.assertEqual((dry['counts']['existing'], dry['counts']['proposed_new'], dry['inserted']), (1, 2, 0))
+                self.assertEqual(dry['author']['id'], catalog_import.pk)
+                self.assertEqual(Movie.objects.count(), 1)
+                first = self.render(apply=True, confirm_write=True, limit=1)
+                self.assertEqual(first['inserted'], 1)
+                second = self.render(apply=True, confirm_write=True, limit=10, resume=first['run_directory'])
+                self.assertEqual(second['counts'], {'existing': 2, 'inserted': 1})
+                self.assertEqual(self.render(apply=True, confirm_write=True, limit=10)['counts'], {'existing': 3})
+                self.assertEqual(Movie.objects.get(pk=existing.pk).author_id, admin.pk)
+                self.assertEqual(Movie.objects.exclude(pk=existing.pk).filter(author=catalog_import).count(), 2)
+                self.assertEqual(connection.settings_dict, original_default)
+
+            @unittest.skipUnless(cert, 'Pass --openssl to exercise a real verified TLS connection')
+            def test_render_readonly_tls_and_write_authorization(self):
+                with self.render_environment(), render_connection(self.render_options()) as (remote, destination):
+                    with render_readonly_snapshot(remote, destination), remote.cursor() as cursor:
+                        cursor.execute("SELECT current_setting('transaction_read_only')")
+                        self.assertEqual(cursor.fetchone(), ('on',))
+                        with self.assertRaisesRegex(CommandError, 'SELECT'):
+                            cursor.execute('DELETE FROM core_movie')
+                for options in ({'tls_ca_file': str(other_ca)}, {'confirm_host': 'dpg-wrong.render.com'},
+                                {'confirm_database': 'wrong_database'}, {'confirm_port': 1},
+                                {'confirm_user': 'wrong_role'}, {'apply': True, 'limit': 1},
+                                {'apply': True, 'confirm_write': True, 'limit': 1, 'author_username': 'Admin'}):
+                    with self.subTest(options=options), self.render_environment():
+                        with self.assertRaises(CommandError) as failure:
+                            call_command('import_tmdb_productions', **(self.render_options() | options))
+                        self.assertNotIn(credentials['password'], str(failure.exception))
+                        self.assertIsNone(failure.exception.__cause__)
+                self.assertFalse(Movie.objects.exists())
+
+            @unittest.skipUnless(cert, 'Pass --openssl to exercise a real verified TLS connection')
+            def test_render_postgresql_rejects_apply_for_readonly_login(self):
+                reader = 'tmdb_fixture_reader'
+                with connection.cursor() as cursor:
+                    cursor.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(
+                        sql.Identifier(reader), sql.Literal(credentials['password'])))
+                    cursor.execute('GRANT SELECT ON core_movie, auth_user TO tmdb_fixture_reader')
+                options = self.render_options() | {'confirm_user': reader}
+                with self.render_environment(reader):
+                    call_command('import_tmdb_productions', stdout=io.StringIO(), dry_run=True, **options)
+                    with self.assertRaisesRegex(CommandError, 'Apply stopped') as failure:
+                        call_command('import_tmdb_productions', stdout=io.StringIO(), apply=True,
+                                     confirm_write=True, limit=1, **options)
+                    self.assertIsNone(failure.exception.__cause__)
+                self.assertFalse(Movie.objects.exists())
+
+            @unittest.skipUnless(cert, 'Pass --openssl to exercise a real verified TLS connection')
+            def test_render_schema_and_rollback(self):
+                with connection.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT conname FROM pg_constraint WHERE conrelid = 'core_movie'::regclass
+                         AND confrelid = 'auth_user'::regclass AND contype = 'f'
+                    """)
+                    fk, = cursor.fetchone()
+                    cursor.execute(sql.SQL('ALTER TABLE core_movie DROP CONSTRAINT {}').format(sql.Identifier(fk)))
+                try:
+                    with self.assertRaisesRegex(CommandError, 'foreign key'):
+                        self.render(dry_run=True)
+                finally:
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql.SQL(
+                            'ALTER TABLE core_movie ADD CONSTRAINT {} FOREIGN KEY (author_id) REFERENCES auth_user(id)'
+                            ' DEFERRABLE INITIALLY DEFERRED'
+                        ).format(sql.Identifier(fk)))
+                with connection.cursor() as cursor:
+                    cursor.execute('ALTER TABLE core_movie DISABLE TRIGGER core_movie_search_vector_update_trigger')
+                try:
+                    with self.assertRaisesRegex(CommandError, 'trigger'):
+                        self.render(dry_run=True)
+                finally:
+                    with connection.cursor() as cursor:
+                        cursor.execute('ALTER TABLE core_movie ENABLE TRIGGER core_movie_search_vector_update_trigger')
+                with connection.cursor() as cursor:
+                    cursor.execute('ALTER TABLE core_movie ADD CONSTRAINT reject_fixture_id CHECK (tmdb_id <> 2) NOT VALID')
+                try:
+                    with self.assertRaisesRegex(CommandError, 'Apply stopped'):
+                        self.render(apply=True, confirm_write=True, limit=3, batch_size=3)
+                    self.assertFalse(Movie.objects.exists())
+                finally:
+                    with connection.cursor() as cursor:
+                        cursor.execute('ALTER TABLE core_movie DROP CONSTRAINT reject_fixture_id')
+
             @unittest.skipUnless(historical and prepared, 'Pass historical and regenerated pilot directories')
             def test_historical_rejected_regenerated_real_pilot_imports(self):
                 original = Path(historical)
@@ -205,11 +343,18 @@ def main():
     parser.add_argument('--pg-bin', type=Path, default=Path(r'C:\Program Files\PostgreSQL\18\bin'))
     parser.add_argument('--historical')
     parser.add_argument('--prepared')
+    parser.add_argument('--openssl', help='OpenSSL executable for disposable verify-full TLS tests')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='reccool-import-postgres-') as temp:
         root = Path(temp)
-        with isolated_server(args.pg_bin, root) as credentials:
-            success = exercise(root, credentials, args.historical, args.prepared)
+        cert = other_ca = None
+        server_options = ()
+        if args.openssl:
+            cert, key = make_certificate(args.openssl, root, RENDER_HOST, 'server')
+            other_ca, _ = make_certificate(args.openssl, root, RENDER_HOST, 'wrong-ca')
+            server_options = ('-c', 'ssl=on', '-c', f'ssl_cert_file={cert}', '-c', f'ssl_key_file={key}')
+        with isolated_server(args.pg_bin, root, server_options=server_options) as credentials:
+            success = exercise(root, credentials, args.historical, args.prepared, cert, other_ca)
     return 0 if success else 1
 
 

@@ -1,4 +1,4 @@
-"""Insert verified prepared productions into an explicitly confirmed local database."""
+"""Insert verified prepared productions into an explicitly confirmed database."""
 from collections import Counter
 from datetime import datetime, timezone
 import gzip
@@ -10,7 +10,7 @@ import uuid
 
 from django.core.management.base import CommandError
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import connections, transaction
 
 from core.management.commands.diagnose_local_movie_duplicates import is_loopback, require_local
 from core.models import Movie
@@ -18,13 +18,16 @@ from core.tmdb_enrichment_client import reject_constant, strict_json
 from core.tmdb_enrichment_store import atomic_bytes, file_digest
 from core.tmdb_import_ready import snapshot_ready_input
 from core.tmdb_importer import DERIVED_FIELDS, evaluate_record, existing_identities, read_json
+from core.tmdb_import_render import RENDER_ALIAS, RENDER_AUTHOR, check_render_session
 
 
 def resolve_author(target, username, *, lock=False):
     result = {"username": username, "id": None, "status": "not_provided"}
     if not username:
         return result
-    if target["name"] == "socialapp" and username != "Admin":
+    if target["alias"] == RENDER_ALIAS and username != RENDER_AUTHOR:
+        return {**result, "status": "expected_render_catalog_import"}
+    if target["alias"] != RENDER_ALIAS and target["name"] == "socialapp" and username != "Admin":
         return {**result, "status": "expected_local_admin"}
     user_model = get_user_model()
     username_field = user_model.USERNAME_FIELD
@@ -43,6 +46,9 @@ def resolve_author(target, username, *, lock=False):
 
 
 def check_session(cursor, target, read_only):
+    if target.get("alias") == RENDER_ALIAS:
+        check_render_session(cursor, target, read_only)
+        return
     cursor.execute("""
         SELECT host(inet_server_addr()), inet_server_port(), current_database(),
                current_setting('transaction_read_only'), pg_is_in_recovery()
@@ -108,7 +114,10 @@ def apply_batch(connection, target, table, batch, remaining, author):
     alias = target["alias"]
     with transaction.atomic(using=alias, durable=True):
         with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            if alias == RENDER_ALIAS:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")
+            else:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             check_session(cursor, target, read_only=False)
             cursor.execute("SET LOCAL lock_timeout = '5s'")
             cursor.execute("SET LOCAL synchronous_commit = 'on'")
@@ -145,11 +154,18 @@ def apply_batch(connection, target, table, batch, remaining, author):
 
 
 def apply_import(source, output_parent, connection, target, *, batch_size, limit, author_username, resume=None):
-    require_local(connection)
+    if type(limit) is not int or limit <= 0:
+        raise CommandError("Apply requires a positive insertion limit.")
     if connection.alias != target["alias"]:
         raise CommandError("Apply target and connection aliases must match.")
-    if not is_loopback(target["host"]):
-        raise CommandError("Apply requires a literal loopback HOST, such as 127.0.0.1.")
+    if connection.alias == RENDER_ALIAS:
+        if (connection is not connections[RENDER_ALIAS] or connection.vendor != "postgresql"
+                or connection.connection is not None or author_username != RENDER_AUTHOR):
+            raise CommandError("Render apply requires a fresh dedicated PostgreSQL session and catalog_import.")
+    else:
+        require_local(connection)
+        if not is_loopback(target["host"]):
+            raise CommandError("Apply requires a literal loopback HOST, such as 127.0.0.1.")
     source = Path(source).resolve(strict=True)
     if output_parent == source or source in output_parent.parents:
         raise CommandError("Reports must be outside the prepared source directory.")
